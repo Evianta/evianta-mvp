@@ -9,6 +9,9 @@
       "import": "./dist/index.js"
     }
   },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",

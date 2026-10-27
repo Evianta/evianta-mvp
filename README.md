@@ -28,7 +28,7 @@ cloud services or model providers.
 
 | Path              | Current boundary and planned ownership                          |
 | ----------------- | --------------------------------------------------------------- |
-| `packages/core`   | Shared, dependency-light primitives                             |
+| `packages/core`   | Shared domain schemas, ports and synthetic workflow fixtures    |
 | `packages/env`    | Server-side environment validation                              |
 | `packages/store`  | Persistence boundary; storage implementations come later        |
 | `packages/ai`     | Provider boundary; adapters come later                          |
