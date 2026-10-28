@@ -69,10 +69,8 @@ export const UsageUnitsSchema = z
   })
   .superRefine((units, context) => {
     if (
-      units.input !== null &&
-      units.output !== null &&
       units.total !== null &&
-      units.total < units.input + units.output
+      units.total < (units.input ?? 0) + (units.output ?? 0)
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -138,10 +136,8 @@ export const UsageSummarySchema = z
       });
     }
     if (
-      usage.inputUnits !== null &&
-      usage.outputUnits !== null &&
       usage.totalUnits !== null &&
-      usage.totalUnits < usage.inputUnits + usage.outputUnits
+      usage.totalUnits < (usage.inputUnits ?? 0) + (usage.outputUnits ?? 0)
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -829,7 +825,6 @@ export const CreateDocumentUploadRequestSchema = z.object({
   name: z.string().min(1).max(255),
   mimeType: z.string().min(1).max(255),
   sizeBytes: z.number().int().positive(),
-  contentHash: z.string().min(1),
 });
 export type CreateDocumentUploadRequest = z.infer<
   typeof CreateDocumentUploadRequestSchema

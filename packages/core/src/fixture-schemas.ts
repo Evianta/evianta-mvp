@@ -15,7 +15,10 @@ const SeededErrorSchema = z.object({
 });
 
 const commonFixtureFields = {
-  case: CaseSchema,
+  case: CaseSchema.refine(
+    (record) => record.isSample && record.synthetic && record.ownerId === null,
+    { message: "Fixtures must be synthetic, ownerless public samples" },
+  ),
   documents: z.array(DocumentMetadataDtoSchema),
   input: z.record(z.string(), z.unknown()),
   checklist: z.array(ChecklistItemSchema).min(1),
@@ -40,7 +43,7 @@ const validateFixtureReferences = (
   }
 };
 
-const DataAnalysisFixtureSchema = z
+export const DataAnalysisFixtureSchema = z
   .object({
     ...commonFixtureFields,
     expected: z.object({
@@ -64,7 +67,7 @@ const DataAnalysisFixtureSchema = z
     }
   });
 
-const TaxNoticeFixtureSchema = z
+export const TaxNoticeFixtureSchema = z
   .object({
     ...commonFixtureFields,
     expected: z.object({
@@ -88,7 +91,7 @@ const TaxNoticeFixtureSchema = z
     }
   });
 
-const MsmePaymentFixtureSchema = z
+export const MsmePaymentFixtureSchema = z
   .object({
     ...commonFixtureFields,
     expected: z.object({

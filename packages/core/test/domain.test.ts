@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {
   AgentProfileSetSchema,
   ApiErrorSchema,
   CaseSchema,
+  CreateDocumentUploadRequestSchema,
   DocumentMetadataDtoSchema,
   EvidenceLocationSchema,
   EvaluationResultSchema,
@@ -12,6 +13,7 @@ import {
   TaskPlanSchema,
   UsageRecordSchema,
   UsageSummarySchema,
+  UsageUnitsSchema,
   isApprovalCurrent,
   syntheticWorkflowFixtures,
 } from "@evianta/core";
@@ -61,6 +63,7 @@ describe("domain schemas", () => {
     const document = DocumentMetadataDtoSchema.parse({
       ...syntheticWorkflowFixtures.dataAnalysis.documents[0],
       objectKey: "private/users/u1/document",
+      contentHash: "internal-hash",
     });
     expect(document).not.toHaveProperty("objectKey");
     expect(document).not.toHaveProperty("contentHash");
@@ -84,6 +87,22 @@ describe("domain schemas", () => {
     expect(run).not.toHaveProperty("threadId");
     expect(run).not.toHaveProperty("fencingToken");
     expect(run).not.toHaveProperty("leaseId");
+  });
+
+  it("accepts upload metadata without a client-supplied content hash", () => {
+    const request = {
+      caseId: "case-1",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 1200,
+    };
+    expect(CreateDocumentUploadRequestSchema.parse(request)).toEqual(request);
+    expect(
+      CreateDocumentUploadRequestSchema.parse({
+        ...request,
+        contentHash: "untrusted-client-hash",
+      }),
+    ).toEqual(request);
   });
 
   it("validates task references and rejects cyclic plans", () => {
@@ -210,6 +229,87 @@ describe("domain schemas", () => {
         totalUnits: null,
       }).success,
     ).toBe(true);
+  });
+
+  it.each([
+    { input: 100, output: null, total: 0 },
+    { input: null, output: 100, total: 0 },
+    { input: 100, output: 50, total: 149 },
+    { input: 100, output: null, total: 99 },
+  ])("rejects totals below known usage components: %j", (units) => {
+    expect(UsageUnitsSchema.safeParse(units).success).toBe(false);
+    expect(
+      UsageSummarySchema.safeParse({
+        ...usage,
+        inputUnits: units.input,
+        outputUnits: units.output,
+        totalUnits: units.total,
+      }).success,
+    ).toBe(false);
+  });
+
+  it.each([
+    { input: 100, output: null, total: 100 },
+    { input: null, output: 100, total: 100 },
+    { input: 100, output: null, total: null },
+    { input: null, output: null, total: 0 },
+    { input: 100, output: 50, total: 150 },
+  ])("preserves valid partial usage: %j", (units) => {
+    expect(UsageUnitsSchema.parse(units)).toEqual(units);
+    const summary = {
+      ...usage,
+      inputUnits: units.input,
+      outputUnits: units.output,
+      totalUnits: units.total,
+    };
+    expect(UsageSummarySchema.parse(summary)).toEqual(summary);
+  });
+
+  it.each(Object.values(syntheticWorkflowFixtures))(
+    "rejects owned or non-sample fixture cases: $case.useCase",
+    (fixture) => {
+      expect(
+        SyntheticWorkflowFixtureSchema.safeParse({
+          ...fixture,
+          case: {
+            ...fixture.case,
+            isSample: false,
+            synthetic: false,
+            ownerId: "owner-1",
+          },
+        }).success,
+      ).toBe(false);
+      expect(
+        SyntheticWorkflowFixtureSchema.safeParse({
+          ...fixture,
+          case: {
+            ...fixture.case,
+            isSample: false,
+            synthetic: true,
+            ownerId: "owner-1",
+          },
+        }).success,
+      ).toBe(false);
+    },
+  );
+
+  it("exports workflow-specific expected types and correct document MIME types", () => {
+    expectTypeOf(
+      syntheticWorkflowFixtures.dataAnalysis.expected.totalRevenue,
+    ).toEqualTypeOf<number>();
+    expectTypeOf(
+      syntheticWorkflowFixtures.taxNotice.expected.incomeDifference,
+    ).toEqualTypeOf<number>();
+    expectTypeOf(
+      syntheticWorkflowFixtures.msmePayment.expected.outstanding,
+    ).toEqualTypeOf<number>();
+    for (const fixture of Object.values(syntheticWorkflowFixtures)) {
+      for (const document of fixture.documents) {
+        expect(document.mimeType).toBe(
+          document.name.endsWith(".pdf") ? "application/pdf" : "text/csv",
+        );
+      }
+    }
   });
 
   it("accepts only well-formed evaluation summaries and current approvals", () => {

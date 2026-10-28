@@ -1,4 +1,9 @@
-import { SyntheticWorkflowFixtureSchema } from "./fixture-schemas.js";
+import {
+  DataAnalysisFixtureSchema,
+  MsmePaymentFixtureSchema,
+  SyntheticWorkflowFixtureSchema,
+  TaxNoticeFixtureSchema,
+} from "./fixture-schemas.js";
 import { CaseSchema, DocumentMetadataDtoSchema } from "./domain.js";
 import type { z } from "zod";
 
@@ -14,7 +19,6 @@ const emptyUsage = {
 
 const baseDocument = {
   caseId: "",
-  mimeType: "text/csv",
   sizeBytes: 1200,
   state: "ready" as const,
   uploadedAt: createdAt,
@@ -39,14 +43,19 @@ const sampleCase = (input: {
     updatedAt: createdAt,
   });
 
-const document = (input: { id: string; caseId: string; name: string }) =>
+const document = (input: {
+  id: string;
+  caseId: string;
+  name: string;
+  mimeType: "text/csv" | "application/pdf";
+}) =>
   DocumentMetadataDtoSchema.parse({
     ...baseDocument,
     ...input,
   });
 
 export const syntheticWorkflowFixtures = {
-  dataAnalysis: SyntheticWorkflowFixtureSchema.parse({
+  dataAnalysis: DataAnalysisFixtureSchema.parse({
     case: sampleCase({
       id: "sample-sales-quarter",
       title: "Quarterly sales review",
@@ -58,6 +67,7 @@ export const syntheticWorkflowFixtures = {
         id: "sales-transactions",
         caseId: "sample-sales-quarter",
         name: "quarterly-sales.csv",
+        mimeType: "text/csv",
       }),
     ],
     input: {
@@ -96,7 +106,7 @@ export const syntheticWorkflowFixtures = {
       },
     ],
   }),
-  taxNotice: SyntheticWorkflowFixtureSchema.parse({
+  taxNotice: TaxNoticeFixtureSchema.parse({
     case: sampleCase({
       id: "sample-tax-notice",
       title: "Synthetic income-tax notice",
@@ -108,11 +118,13 @@ export const syntheticWorkflowFixtures = {
         id: "notice-document",
         caseId: "sample-tax-notice",
         name: "notice-summary.pdf",
+        mimeType: "application/pdf",
       }),
       document({
         id: "return-document",
         caseId: "sample-tax-notice",
         name: "return-and-credit-summary.csv",
+        mimeType: "text/csv",
       }),
     ],
     input: {
@@ -155,7 +167,7 @@ export const syntheticWorkflowFixtures = {
       },
     ],
   }),
-  msmePayment: SyntheticWorkflowFixtureSchema.parse({
+  msmePayment: MsmePaymentFixtureSchema.parse({
     case: sampleCase({
       id: "sample-msme-overdue",
       title: "Synthetic delayed-payment case",
@@ -167,16 +179,19 @@ export const syntheticWorkflowFixtures = {
         id: "invoice-records",
         caseId: "sample-msme-overdue",
         name: "invoices.csv",
+        mimeType: "text/csv",
       }),
       document({
         id: "payment-records",
         caseId: "sample-msme-overdue",
         name: "payments.csv",
+        mimeType: "text/csv",
       }),
       document({
         id: "correspondence-record",
         caseId: "sample-msme-overdue",
         name: "correspondence.pdf",
+        mimeType: "application/pdf",
       }),
     ],
     input: {
