@@ -26,21 +26,25 @@ cloud services or model providers.
 
 ## Workspace responsibilities
 
-| Path              | Current boundary and planned ownership                          |
-| ----------------- | --------------------------------------------------------------- |
-| `packages/core`   | Shared domain schemas, ports and synthetic workflow fixtures    |
-| `packages/env`    | Server-side environment and storage configuration validation    |
-| `packages/store`  | MongoDB repositories and private document storage adapters      |
-| `packages/ai`     | Provider boundary; adapters come later                          |
-| `packages/agents` | Agent boundary; orchestration comes later                       |
-| `apps/api`        | API application boundary; HTTP features come later              |
-| `apps/web`        | Web application boundary; UI features come in the web work pack |
+| Path              | Current boundary and planned ownership                            |
+| ----------------- | ----------------------------------------------------------------- |
+| `packages/core`   | Shared domain schemas, ports and synthetic workflow fixtures      |
+| `packages/env`    | Server-side environment and storage configuration validation      |
+| `packages/store`  | MongoDB repositories and private document storage adapters        |
+| `packages/ai`     | Muse/mock provider adapters, structured output and usage boundary |
+| `packages/agents` | Agent boundary; orchestration comes later                         |
+| `apps/api`        | API application boundary; HTTP features come later                |
+| `apps/web`        | Web application boundary; UI features come in the web work pack   |
 
 Keep shared types in `core`, environment reads in `env`, persistence in
 `store`, and provider access in `ai`. Use `workspace:*` for internal
 dependencies. Keep tests deterministic and isolated from real credentials,
 cloud resources and model traffic. Add each feature with its own focused tests;
 do not add placeholder product behavior to a package boundary.
+
+The AI package defaults to the deterministic mock provider. Live Muse requests
+require server-side configuration and an injected usage-admission/recording
+port; tests do not call a model provider.
 
 ## Environment and generated files
 

@@ -10,7 +10,8 @@
     }
   },
   "dependencies": {
-    "@evianta/core": "workspace:*"
+    "@evianta/core": "workspace:*",
+    "zod": "4.4.3"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

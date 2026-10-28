@@ -6,6 +6,9 @@
     "declarationMap": true,
     "sourceMap": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "paths": {
+      "@evianta/core": ["../core/dist/index.d.ts"]
+    }
   }
 }
