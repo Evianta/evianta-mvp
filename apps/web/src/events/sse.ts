@@ -84,6 +84,7 @@ export interface RunEventStreamOptions {
   onUnauthorized: () => void;
   onEvent: (event: RunEvent) => void;
   onResync?: (lastSequence: number, nextSequence: number) => void;
+  replayOnly?: boolean;
   fetcher?: typeof fetch;
   maxReconnects?: number;
   retryDelayMs?: number;
@@ -152,6 +153,7 @@ export async function streamRunEvents(
         options.onEvent(runEvent);
         if (isTerminal(runEvent)) return;
       }
+      if (options.replayOnly) return;
       if (attempt === maxReconnects) {
         throw new ApiError(
           503,

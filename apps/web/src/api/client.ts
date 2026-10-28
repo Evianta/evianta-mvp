@@ -75,6 +75,7 @@ export interface WebApiClient {
       signal: AbortSignal;
       onEvent: (event: RunEvent) => void;
       onResync?: (lastSequence: number, nextSequence: number) => void;
+      replayOnly?: boolean;
     },
   ): Promise<void>;
   clearPrivateState(): void;
@@ -200,6 +201,7 @@ export class FetchWebApiClient implements WebApiClient {
       signal: AbortSignal;
       onEvent: (event: RunEvent) => void;
       onResync?: (lastSequence: number, nextSequence: number) => void;
+      replayOnly?: boolean;
     },
   ): Promise<void> {
     const token = this.options.getToken();
@@ -217,6 +219,7 @@ export class FetchWebApiClient implements WebApiClient {
         signal: controller.signal,
         onEvent: options.onEvent,
         onResync: options.onResync,
+        replayOnly: options.replayOnly,
         onUnauthorized: () => {
           this.clearPrivateState();
           this.options.onUnauthorized();

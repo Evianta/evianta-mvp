@@ -116,16 +116,14 @@ export function CaseWorkspaceClient({ caseId }: { caseId: string }) {
   }, [api, caseId, session]);
 
   useEffect(() => {
-    if (
-      !run ||
-      !(run.status === "running" || run.status === "queued") ||
-      !session
-    )
-      return;
+    if (!run || !session) return;
+    const replayOnly = terminalStatuses.has(run.status);
+    if (replayOnly && lastSequence.current > 0) return;
     const controller = new AbortController();
     void api
       .streamRunEvents(run.id, {
         afterSequence: lastSequence.current,
+        replayOnly,
         signal: controller.signal,
         onEvent(event) {
           lastSequence.current = Math.max(lastSequence.current, event.sequence);
@@ -135,6 +133,7 @@ export function CaseWorkspaceClient({ caseId }: { caseId: string }) {
               ? current
               : [...current, event].slice(-30),
           );
+          if (replayOnly) return;
           setRun((current) => {
             if (!current) return current;
             switch (event.payload.type) {

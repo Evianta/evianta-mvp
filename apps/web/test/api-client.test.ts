@@ -87,6 +87,58 @@ describe("FetchWebApiClient", () => {
     );
   });
 
+  it("follows all case-list cursors", async () => {
+    const record = syntheticWorkflowFixtures.dataAnalysis.case;
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ cases: [record], nextCursor: "next/page" }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ cases: [record], nextCursor: null }),
+      );
+    const client = new FetchWebApiClient({
+      getToken: () => "session-token",
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+
+    expect(await client.listCases()).toEqual([record, record]);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "/cases",
+      "/cases?cursor=next%2Fpage",
+    ]);
+  });
+
+  it("returns document metadata from the shared upload response envelope", async () => {
+    const document = {
+      id: "document-1",
+      caseId: "case-1",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 4,
+      state: "uploaded",
+      uploadedAt: "2026-01-15T00:00:00.000Z",
+      processedAt: null,
+    } as const;
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ document }));
+    const client = new FetchWebApiClient({
+      getToken: () => "session-token",
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+
+    await expect(
+      client.uploadDocument(
+        "case-1",
+        new File(["data"], "source.pdf", { type: "application/pdf" }),
+        "mixed",
+      ),
+    ).resolves.toEqual(document);
+  });
+
   it("clears private streams and the session on an unauthorized response", async () => {
     const onUnauthorized = vi.fn();
     const client = new FetchWebApiClient({

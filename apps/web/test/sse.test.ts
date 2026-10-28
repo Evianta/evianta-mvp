@@ -139,6 +139,31 @@ describe("SSE event handling", () => {
     expect(onUnauthorized).toHaveBeenCalledOnce();
   });
 
+  it("accepts a normal close after replaying events for a terminal run", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(byteStream([`data: ${runEvent(1, "task-started")}\n\n`]), {
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    );
+    const onEvent = vi.fn();
+    const sleep = vi.fn(async () => undefined);
+
+    await streamRunEvents({
+      url: "https://api.example.test/runs/run-1/events",
+      token: "in-memory-token",
+      signal: new AbortController().signal,
+      onUnauthorized: vi.fn(),
+      onEvent,
+      fetcher,
+      replayOnly: true,
+      sleep,
+    });
+
+    expect(onEvent).toHaveBeenCalledOnce();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
   it.each([
     "run-failed",
     "run-cancelled",
