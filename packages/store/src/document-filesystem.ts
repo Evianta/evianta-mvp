@@ -47,9 +47,10 @@ export class FileSystemDocumentStore implements DocumentStore {
     await mkdir(this.directory, { recursive: true });
 
     try {
-      await mkdir(temporaryDirectory);
+      await mkdir(temporaryDirectory, { mode: 0o700 });
       await writeFile(join(temporaryDirectory, "data"), uploaded.bytes, {
         flag: "wx",
+        mode: 0o600,
       });
       await writeFile(
         join(temporaryDirectory, "metadata.json"),
@@ -58,7 +59,7 @@ export class FileSystemDocumentStore implements DocumentStore {
           contentLength: uploaded.object.contentLength,
           contentHash: uploaded.object.contentHash,
         }),
-        { flag: "wx" },
+        { flag: "wx", mode: 0o600 },
       );
       await rename(temporaryDirectory, targetDirectory);
       return uploaded.key;

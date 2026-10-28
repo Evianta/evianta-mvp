@@ -116,6 +116,7 @@ export async function readObjectBuffer(
   maxBytes: number,
 ): Promise<Buffer> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    destroyBody(object.body);
     throw new DocumentStoreError("Invalid read limit", "invalid-limit");
   }
   if (object.contentLength > maxBytes) {
@@ -166,7 +167,7 @@ export function bytesFromBuffer(buffer: Buffer): AsyncIterable<Uint8Array> {
   })();
 }
 
-function destroyBody(body: AsyncIterable<Uint8Array>): void {
+export function destroyBody(body: unknown): void {
   if (
     typeof body === "object" &&
     body !== null &&
