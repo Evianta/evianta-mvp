@@ -50,9 +50,10 @@ export interface UserRepository {
 }
 
 export interface AccessKeyRepository {
-  findActiveById(id: string): Promise<AccessKeyRecord | null>;
+  findActiveById(id: string, at?: string): Promise<AccessKeyRecord | null>;
   insert(record: AccessKeyRecord): Promise<void>;
   revoke(id: string, revokedAt: string): Promise<boolean>;
+  markUsed(id: string, usedAt: string): Promise<void>;
 }
 
 export interface SessionRepository {
@@ -168,4 +169,21 @@ export interface UsageAdmissionPort {
   reserve(request: UsageReservationRequest): Promise<UsageReservation>;
   settle(settlement: UsageSettlement): Promise<void>;
   release(reservationId: string, reason: "cancelled" | "failed"): Promise<void>;
+}
+
+export interface RateLimitRequest {
+  key: string;
+  limit: number;
+  windowSeconds: number;
+  at: string;
+}
+
+export interface RateLimitResult {
+  allowed: boolean;
+  count: number;
+  resetAt: string;
+}
+
+export interface RateLimitRepository {
+  consume(request: RateLimitRequest): Promise<RateLimitResult>;
 }
