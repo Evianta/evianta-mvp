@@ -3,6 +3,7 @@ import {
   syntheticWorkflowFixtures,
   type Case,
   type Deliverable,
+  type ExtractedDocument,
   type OwnerScope,
   type RunRecord,
   type UsageRecord,
@@ -20,7 +21,7 @@ import {
   it,
 } from "vitest";
 import { createInMemoryStore } from "../src/memory.js";
-import { MongoStore } from "../src/mongo.js";
+import { getMongoDatabaseName, MongoStore } from "../src/mongo.js";
 
 const timestamp = "2026-01-15T00:00:00.000Z";
 const usageSummary = syntheticWorkflowFixtures.dataAnalysis.case.usage;
@@ -137,6 +138,14 @@ function repositoryContract(
       closeStore = harness.close;
     });
 
+    it("extracts database names from replica-set MongoDB URIs", () => {
+      expect(
+        getMongoDatabaseName(
+          "mongodb://db1:27017,db2:27017/evianta?replicaSet=rs0",
+        ),
+      ).toBe("evianta");
+    });
+
     afterEach(async () => {
       await closeStore();
     });
@@ -155,6 +164,38 @@ function repositoryContract(
       expect(
         await cases.replaceOwned(makeCase("case-2", "owner-1"), "owner-1"),
       ).toBe(false);
+    });
+
+    it("compares session expiry timestamps as instants", async () => {
+      await repositories.sessions.insert({
+        id: "session-expired",
+        userId: "user-1",
+        issuedAt: timestamp,
+        expiresAt: "2026-01-15T01:00:00+02:00",
+        revokedAt: null,
+        createdAt: timestamp,
+      });
+      await repositories.sessions.insert({
+        id: "session-valid",
+        userId: "user-1",
+        issuedAt: timestamp,
+        expiresAt: "2026-01-15T00:00:00-05:00",
+        revokedAt: null,
+        createdAt: timestamp,
+      });
+
+      expect(
+        await repositories.sessions.findActiveById(
+          "session-expired",
+          timestamp,
+        ),
+      ).toBeNull();
+      expect(
+        await repositories.sessions.findActiveById(
+          "session-valid",
+          "2026-01-15T01:00:00.000Z",
+        ),
+      ).not.toBeNull();
     });
 
     it("preserves synthetic sample visibility without allowing owner edits", async () => {
@@ -239,6 +280,42 @@ function repositoryContract(
       ).toBeNull();
     });
 
+    it("finds cached extractions for encoded document IDs", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document:1",
+        caseId: "case-1",
+        name: "source.txt",
+        mimeType: "text/plain",
+        sizeBytes: 1,
+        state: "ready" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "object-key",
+        contentHash: "content-hash",
+      };
+      await repositories.documents.insert(document, ownerScope);
+      const extraction: ExtractedDocument = {
+        documentId: document.id,
+        kind: "text",
+        method: "parse",
+        confidence: 1,
+        pages: [],
+        tables: [],
+        warnings: [],
+        cacheIdentity: {
+          contentHash: "content-hash",
+          extractorVersion: "1",
+          modelVersion: null,
+        },
+      };
+      await repositories.extractions.saveForDocument(extraction, ownerScope);
+
+      expect(
+        await repositories.extractions.findForDocument(document.id, ownerScope),
+      ).toEqual(extraction);
+    });
+
     it("enforces case ownership for runs, tasks, findings and usage", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.cases.insert(makeCase("case-2", "owner-2"));
@@ -272,6 +349,28 @@ function repositoryContract(
       expect(
         await repositories.usage.listForRun("run-2", ownerScope),
       ).toHaveLength(0);
+    });
+
+    it("validates the run association when replacing a deliverable", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.cases.insert(makeCase("case-2", "owner-2"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-2", "case-2", "owner-2"));
+      const deliverable = makeDeliverable("deliverable-1", 1);
+      await repositories.deliverables.insert(deliverable, ownerScope);
+
+      await expect(
+        repositories.deliverables.replaceOwned(
+          { ...deliverable, runId: "run-2" },
+          ownerScope,
+        ),
+      ).rejects.toMatchObject({ code: "run-not-owned" });
+      expect(
+        await repositories.deliverables.findOwnedById(
+          deliverable.id,
+          ownerScope,
+        ),
+      ).toEqual(deliverable);
     });
 
     it("invalidates approval after a deliverable version changes", async () => {
@@ -331,6 +430,36 @@ function repositoryContract(
       ).rejects.toMatchObject({ code: "event-sequence-conflict" });
       expect(
         await repositories.events.listAfter("case-1", 0, ownerScope),
+      ).toHaveLength(1);
+    });
+
+    it("keeps cursor filtering consistent with case sorting", async () => {
+      const store = createInMemoryStore({ pageSize: 1 });
+      await store.repositories.cases.insert(makeCase("B", "owner-1"));
+      await store.repositories.cases.insert(makeCase("a", "owner-1"));
+
+      const firstPage = await store.repositories.cases.listOwned("owner-1");
+      expect(firstPage.map((record) => record.id)).toEqual(["B"]);
+      const secondPage = await store.repositories.cases.listOwned(
+        "owner-1",
+        firstPage[0]!.id,
+      );
+      expect(secondPage.map((record) => record.id)).toEqual(["a"]);
+    });
+
+    it("keeps persisted usage scope when the caller mutates its object", async () => {
+      const store = createInMemoryStore();
+      const repositories = store.repositories;
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const scope = { ...ownerScope };
+      await repositories.usage.insert(makeUsage("usage-1"), "run-1", scope);
+
+      scope.caseId = "case-2";
+      scope.ownerId = "owner-2";
+
+      expect(
+        await repositories.usage.listForRun("run-1", ownerScope),
       ).toHaveLength(1);
     });
   });
@@ -408,7 +537,7 @@ describe("MongoDB repositories", () => {
         runId: "run-1",
         ownerId: "owner-1",
         leaseId: "lease-1",
-        expiresAt: "2026-01-15T00:01:00.000Z",
+        expiresAt: "2026-01-15T00:01:00-05:00",
         at: timestamp,
       };
       const first = await harness.store.acquireRunLease(lease);
@@ -420,14 +549,41 @@ describe("MongoDB repositories", () => {
           at: "2026-01-15T00:00:30.000Z",
         }),
       ).toBeNull();
+      expect(
+        await harness.store.acquireRunLease({
+          ...lease,
+          leaseId: "lease-2",
+          at: "2026-01-15T01:00:00.000Z",
+        }),
+      ).toBeNull();
       const reclaimed = await harness.store.acquireRunLease({
         ...lease,
         leaseId: "lease-2",
-        expiresAt: "2026-01-15T00:03:00.000Z",
-        at: "2026-01-15T00:02:00.000Z",
+        expiresAt: "2026-01-15T05:03:00.000Z",
+        at: "2026-01-15T05:02:00.000Z",
       });
       expect(reclaimed?.fencingToken).toBe(2);
       expect(reclaimed?.leaseId).toBe("lease-2");
+      expect(first).not.toBeNull();
+      expect(
+        await harness.store.repositories.runs.updateOwned(
+          {
+            ...first!,
+            status: "completed",
+            leaseId: null,
+            leaseExpiresAt: null,
+            updatedAt: "2026-01-15T05:02:30.000Z",
+          },
+          "owner-1",
+        ),
+      ).toBe(false);
+      expect(
+        await harness.store.repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({
+        status: "running",
+        fencingToken: 2,
+        leaseId: "lease-2",
+      });
     } finally {
       await harness.client.db(harness.dbName).dropDatabase();
       await harness.store.close();

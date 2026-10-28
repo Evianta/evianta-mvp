@@ -167,7 +167,7 @@ export class InMemoryStore {
                 (!cursorCase ||
                   record.createdAt < cursorCase.createdAt ||
                   (record.createdAt === cursorCase.createdAt &&
-                    record.id < cursorCase.id)),
+                    record.id.localeCompare(cursorCase.id) < 0)),
             )
             .sort(
               (a, b) =>
@@ -265,7 +265,9 @@ export class InMemoryStore {
       sessions: {
         findActiveById: async (id, at) => {
           const record = this.sessions.get(id);
-          return record && record.revokedAt === null && record.expiresAt > at
+          return record &&
+            record.revokedAt === null &&
+            Date.parse(record.expiresAt) > Date.parse(at)
             ? parse(SessionRecordSchema, record)
             : null;
         },
@@ -439,7 +441,8 @@ export class InMemoryStore {
             !current ||
             current.ownerId !== ownerId ||
             record.ownerId !== ownerId ||
-            current.caseId !== record.caseId
+            current.caseId !== record.caseId ||
+            current.fencingToken !== record.fencingToken
           ) {
             return false;
           }
@@ -508,6 +511,17 @@ export class InMemoryStore {
           }
           const current = this.deliverables.get(record.id);
           if (!current || current.caseId !== scope.caseId) return false;
+          const run = this.runs.get(record.runId);
+          if (
+            !run ||
+            run.ownerId !== scope.ownerId ||
+            run.caseId !== scope.caseId
+          ) {
+            throw new StoreError(
+              "Run does not belong to this case",
+              "run-not-owned",
+            );
+          }
           if (current.version !== record.version) {
             for (const [id, approval] of this.approvals) {
               if (approval.deliverableId === record.id) {
@@ -641,7 +655,11 @@ export class InMemoryStore {
               "run-not-owned",
             );
           }
-          this.usage.set(record.id, { record, runId, scope });
+          this.usage.set(record.id, {
+            record,
+            runId,
+            scope: { ...scope },
+          });
         },
       },
     };

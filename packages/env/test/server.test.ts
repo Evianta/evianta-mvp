@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { getMongoDbUri, getRequiredEnv } from "../src/server.js";
+import {
+  getMongoDatabaseName,
+  getMongoDbUri,
+  getRequiredEnv,
+} from "../src/server.js";
 
 describe("getRequiredEnv", () => {
   it("returns a configured value", () => {
@@ -16,9 +20,22 @@ describe("getRequiredEnv", () => {
           MONGODB_URI: "mongodb://localhost:27017/evianta",
         }),
       ).toBe("mongodb://localhost:27017/evianta");
+      expect(
+        getMongoDbUri({
+          MONGODB_URI: "mongodb://db1:27017,db2:27017/evianta?replicaSet=rs0",
+        }),
+      ).toBe("mongodb://db1:27017,db2:27017/evianta?replicaSet=rs0");
       expect(() =>
         getMongoDbUri({ MONGODB_URI: "mongodb://localhost:27017/" }),
       ).toThrow("MONGODB_URI must include a database name");
+    });
+
+    it("extracts database names from replica-set seed lists", () => {
+      expect(
+        getMongoDatabaseName(
+          "mongodb://db1:27017,db2:27017/evianta?replicaSet=rs0",
+        ),
+      ).toBe("evianta");
     });
 
     it("rejects malformed or non-MongoDB URIs", () => {

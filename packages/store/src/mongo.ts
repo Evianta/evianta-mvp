@@ -58,27 +58,20 @@ import {
   type OptionalUnlessRequiredId,
   MongoServerError,
 } from "mongodb";
-import { getMongoDbUri } from "@evianta/env/server";
+import {
+  getMongoDatabaseName as parseMongoDatabaseName,
+  getMongoDbUri,
+} from "@evianta/env/server";
 import { z, type ZodType } from "zod";
 
 type Stored<T> = T & Document & { _id: string };
 const MongoUriSchema = z.string().superRefine((uri, context) => {
-  let parsed: URL;
   try {
-    parsed = new URL(uri);
-  } catch {
-    context.addIssue({ code: "custom", message: "Invalid MongoDB URI" });
-    return;
-  }
-  if (parsed.protocol !== "mongodb:" && parsed.protocol !== "mongodb+srv:") {
+    parseMongoDatabaseName(uri);
+  } catch (error) {
     context.addIssue({
       code: "custom",
-      message: "MongoDB URI must use mongodb:// or mongodb+srv://",
-    });
-  } else if (!parsed.pathname || parsed.pathname === "/") {
-    context.addIssue({
-      code: "custom",
-      message: "MongoDB URI must include a database name",
+      message: error instanceof Error ? error.message : "Invalid MongoDB URI",
     });
   }
 });
@@ -193,7 +186,9 @@ export class MongoStore {
   readonly tasks: Collection<Stored<Task>>;
   readonly findings: Collection<Stored<Finding>>;
   readonly evidence: Collection<Stored<Evidence>>;
-  readonly deliverables: Collection<Stored<Deliverable>>;
+  readonly deliverables: Collection<
+    Stored<Deliverable> & { approvalRevision?: number }
+  >;
   readonly approvals: Collection<Stored<Approval>>;
   readonly runs: Collection<Stored<RunRecord> & { activeCaseKey?: string }>;
   readonly events: Collection<Stored<RunEvent>>;
@@ -566,7 +561,12 @@ export class MongoStore {
       await this.sessions.findOne({
         _id: id,
         revokedAt: null,
-        expiresAt: { $gt: at },
+        $expr: {
+          $gt: [
+            { $dateFromString: { dateString: "$expiresAt", onError: null } },
+            new Date(at),
+          ],
+        },
       }),
     );
   }
@@ -661,7 +661,12 @@ export class MongoStore {
   ): Promise<ExtractedDocument | null> {
     if (!(await this.ownsCase(scope))) return null;
     const record = await this.extractions.findOne(
-      { _id: { $regex: `^${escapeRegex(documentId)}:` }, caseId: scope.caseId },
+      {
+        _id: {
+          $regex: `^${escapeRegex(encodeURIComponent(documentId))}:`,
+        },
+        caseId: scope.caseId,
+      },
       { sort: { cachedAt: -1 } },
     );
     return decode(ExtractedDocumentSchema, record);
@@ -805,18 +810,17 @@ export class MongoStore {
   async runUpdateOwned(run: RunRecord, ownerId: string): Promise<boolean> {
     const parsed = RunRecordSchema.parse(run);
     if (parsed.ownerId !== ownerId) return false;
-    const previous = await this.runs.findOne({
-      _id: parsed.id,
-      ownerId,
-      caseId: parsed.caseId,
-    });
-    if (!previous) return false;
     const active =
       parsed.status === "queued" || parsed.status === "running"
         ? { activeCaseKey: `${parsed.ownerId}:${parsed.caseId}` }
         : {};
     const result = await this.runs.replaceOne(
-      { _id: parsed.id, ownerId, caseId: parsed.caseId },
+      {
+        _id: parsed.id,
+        ownerId,
+        caseId: parsed.caseId,
+        fencingToken: parsed.fencingToken,
+      },
       { ...documentFor(parsed), ...active },
     );
     return result.matchedCount === 1;
@@ -830,7 +834,19 @@ export class MongoStore {
         status: "running",
         $or: [
           { leaseExpiresAt: null },
-          { leaseExpiresAt: { $lte: request.at } },
+          {
+            $expr: {
+              $lte: [
+                {
+                  $dateFromString: {
+                    dateString: "$leaseExpiresAt",
+                    onError: null,
+                  },
+                },
+                new Date(request.at),
+              ],
+            },
+          },
         ],
       },
       {
@@ -913,6 +929,20 @@ export class MongoStore {
         { session },
       );
       if (!previous) return false;
+      const run = await this.runs.findOne(
+        {
+          _id: parsed.runId,
+          ownerId: scope.ownerId,
+          caseId: scope.caseId,
+        },
+        { session },
+      );
+      if (!run) {
+        throw new StoreError(
+          "Run does not belong to this case",
+          "run-not-owned",
+        );
+      }
       const result = await this.deliverables.replaceOne(
         { _id: parsed.id, caseId: scope.caseId, ownerId: scope.ownerId },
         { ...documentFor(parsed), ownerId: scope.ownerId },
@@ -952,21 +982,29 @@ export class MongoStore {
     const parsed = ApprovalSchema.parse(approval);
     if (parsed.caseId !== scope.caseId) throw new CaseNotOwnedError();
     await this.requireOwnedCase(scope);
-    const deliverable = await this.deliverables.findOne({
-      _id: parsed.deliverableId,
-      caseId: scope.caseId,
-      ownerId: scope.ownerId,
-      version: parsed.deliverableVersion,
-    });
-    if (!deliverable) {
-      throw new StoreError(
-        "Deliverable version is not current",
-        "stale-approval",
+    await this.withTransaction(async (session) => {
+      const result = await this.deliverables.updateOne(
+        {
+          _id: parsed.deliverableId,
+          caseId: scope.caseId,
+          ownerId: scope.ownerId,
+          version: parsed.deliverableVersion,
+        },
+        { $inc: { approvalRevision: 1 } },
+        { session },
       );
-    }
-    await insertUnique(this.approvals, ApprovalSchema, {
-      ...parsed,
-      ownerId: scope.ownerId,
+      if (result.matchedCount !== 1) {
+        throw new StoreError(
+          "Deliverable version is not current",
+          "stale-approval",
+        );
+      }
+      await insertUnique(
+        this.approvals,
+        ApprovalSchema,
+        { ...parsed, ownerId: scope.ownerId },
+        session,
+      );
     });
   }
 
@@ -1073,8 +1111,7 @@ function escapeRegex(value: string): string {
 }
 
 export function getMongoDatabaseName(uri: string): string {
-  const parsed = MongoUriSchema.parse(uri);
-  return decodeURIComponent(new URL(parsed).pathname.slice(1));
+  return parseMongoDatabaseName(MongoUriSchema.parse(uri));
 }
 
 export async function connectMongoStore(
