@@ -253,6 +253,43 @@ describe("@evianta/ai", () => {
     expect(chunks).toEqual([]);
   });
 
+  it("raises provider errors after partial streamed content", async () => {
+    const provider = new MuseProvider({
+      apiKey: "test-key",
+      fetchImplementation: async () =>
+        new Response(
+          [
+            'data: {"choices":[{"delta":{"content":"partial"}}]}',
+            "",
+            'data: {"error":{"message":"upstream failure","type":"server_error"}}',
+            "",
+            "data: [DONE]",
+            "",
+            "",
+          ].join("\n"),
+        ),
+    });
+    const model = modelForTier("cheap", { ...models, provider: "muse" });
+    const chunks: string[] = [];
+    const consume = async () => {
+      for await (const chunk of provider.streamText({
+        model,
+        system: "Respond",
+        input: "hello",
+        maxOutputTokens: 50,
+        signal: new AbortController().signal,
+      })) {
+        chunks.push(chunk);
+      }
+    };
+
+    await expect(consume()).rejects.toMatchObject({
+      code: "provider-request-failed",
+      message: "The model provider stream failed",
+    });
+    expect(chunks).toEqual(["partial"]);
+  });
+
   it("cancels the provider response when a stream consumer stops early", async () => {
     const cancel = vi.fn();
     const body = new ReadableStream<Uint8Array>({

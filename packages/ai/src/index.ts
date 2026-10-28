@@ -876,11 +876,19 @@ export class MuseProvider implements ModelProvider {
             return;
           }
           const event = JSON.parse(data) as {
+            error?: unknown;
             choices?: {
               delta?: { content?: string; refusal?: string };
               finish_reason?: string;
             }[];
           };
+          if (event.error) {
+            throw new ProviderRequestError(
+              "The model provider stream failed",
+              undefined,
+              undefined,
+            );
+          }
           const choice = event.choices?.[0];
           if (
             typeof choice?.delta?.refusal === "string" &&
