@@ -116,8 +116,47 @@ function sharedContract(
         ),
       ).rejects.toMatchObject({ code: "too-large" });
     });
+
+    it("rejects header-invalid MIME types before consuming the upload stream", async () => {
+      ({ store, close } = await setup());
+      let consumed = false;
+      const stream: BoundedStream = {
+        ...boundedStream(),
+        body: (async function* () {
+          consumed = true;
+          yield payload;
+        })(),
+      };
+
+      await expect(
+        store.uploadAsync("case-1", "text/plain\0", stream),
+      ).rejects.toMatchObject({ code: "invalid-upload" });
+      expect(consumed).toBe(false);
+    });
   });
 }
+
+it("does not allocate buffers for empty upload chunks", async () => {
+  const store = new InMemoryDocumentStore(32);
+  const from = vi.spyOn(Buffer, "from");
+  try {
+    const stream: BoundedStream = {
+      ...boundedStream(),
+      body: (async function* () {
+        for (let index = 0; index < 10_000; index += 1) {
+          yield new Uint8Array(0);
+        }
+        yield payload;
+      })(),
+    };
+
+    await store.uploadAsync("case-1", "text/plain", stream);
+
+    expect(from).toHaveBeenCalledTimes(1);
+  } finally {
+    from.mockRestore();
+  }
+});
 
 describe("in-memory document store", () => {
   sharedContract("document store contract", async () => ({

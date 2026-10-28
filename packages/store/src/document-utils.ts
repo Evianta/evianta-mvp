@@ -27,7 +27,7 @@ export async function collectUpload(
   if (
     !mimeType.includes("/") ||
     mimeType.length > 255 ||
-    /[\r\n]/.test(mimeType)
+    /[^\x20-\x7E]/.test(mimeType)
   ) {
     throw new DocumentStoreError("Invalid MIME type", "invalid-upload");
   }
@@ -63,6 +63,7 @@ export async function collectUpload(
           "invalid-upload",
         );
       }
+      if (chunk.byteLength === 0) continue;
       contentLength += chunk.byteLength;
       if (contentLength > maxBytes || contentLength > stream.contentLength) {
         throw new DocumentStoreError(
