@@ -116,12 +116,14 @@ export class S3DocumentStore implements SignedDocumentStore {
       );
     }
     const contentLength = response.ContentLength;
+    const contentHash = response.Metadata?.["content-sha256"];
     if (
       typeof contentLength !== "number" ||
       !Number.isSafeInteger(contentLength) ||
       contentLength < 0 ||
       !response.ContentType ||
-      !/^[0-9a-f]{64}$/.test(response.Metadata?.["content-sha256"] ?? "")
+      typeof contentHash !== "string" ||
+      !/^[0-9a-f]{64}$/.test(contentHash)
     ) {
       throw new DocumentStoreError(
         "S3 object is missing required metadata",
@@ -139,7 +141,7 @@ export class S3DocumentStore implements SignedDocumentStore {
       body: response.Body,
       contentType: response.ContentType,
       contentLength,
-      contentHash: response.Metadata["content-sha256"],
+      contentHash,
     };
   }
 
