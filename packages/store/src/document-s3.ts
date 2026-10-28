@@ -13,6 +13,7 @@ import type {
 import { DocumentStoreError } from "./document-errors.js";
 import {
   collectUpload,
+  destroyBody,
   readObjectBuffer,
   validateObjectKey,
 } from "./document-utils.js";
@@ -125,12 +126,14 @@ export class S3DocumentStore implements SignedDocumentStore {
       typeof contentHash !== "string" ||
       !/^[0-9a-f]{64}$/.test(contentHash)
     ) {
+      destroyBody(response.Body);
       throw new DocumentStoreError(
         "S3 object is missing required metadata",
         "corrupt-object",
       );
     }
     if (!isAsyncByteIterable(response.Body)) {
+      destroyBody(response.Body);
       throw new DocumentStoreError(
         "S3 object body is not a readable byte stream",
         "corrupt-object",
@@ -210,17 +213,12 @@ function isAsyncByteIterable(
 function isMissingObject(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   if (
-    "name" in error &&
-    (error.name === "NoSuchKey" || error.name === "NotFound")
+    ("name" in error &&
+      (error.name === "NoSuchKey" || error.name === "NotFound")) ||
+    ("Code" in error &&
+      (error.Code === "NoSuchKey" || error.Code === "NotFound"))
   ) {
     return true;
-  }
-  if ("$metadata" in error && typeof error.$metadata === "object") {
-    return (
-      error.$metadata !== null &&
-      "httpStatusCode" in error.$metadata &&
-      error.$metadata.httpStatusCode === 404
-    );
   }
   return false;
 }

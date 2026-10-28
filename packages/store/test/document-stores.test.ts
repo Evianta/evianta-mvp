@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -11,7 +11,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { mockClient } from "aws-sdk-client-mock";
 import type { BoundedStream, DocumentStore } from "@evianta/core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DocumentStoreError } from "../src/document-errors.js";
 import { FileSystemDocumentStore } from "../src/document-filesystem.js";
 import { InMemoryDocumentStore } from "../src/document-memory.js";
@@ -116,8 +116,47 @@ function sharedContract(
         ),
       ).rejects.toMatchObject({ code: "too-large" });
     });
+
+    it("rejects header-invalid MIME types before consuming the upload stream", async () => {
+      ({ store, close } = await setup());
+      let consumed = false;
+      const stream: BoundedStream = {
+        ...boundedStream(),
+        body: (async function* () {
+          consumed = true;
+          yield payload;
+        })(),
+      };
+
+      await expect(
+        store.uploadAsync("case-1", "text/plain\0", stream),
+      ).rejects.toMatchObject({ code: "invalid-upload" });
+      expect(consumed).toBe(false);
+    });
   });
 }
+
+it("does not allocate buffers for empty upload chunks", async () => {
+  const store = new InMemoryDocumentStore(32);
+  const from = vi.spyOn(Buffer, "from");
+  try {
+    const stream: BoundedStream = {
+      ...boundedStream(),
+      body: (async function* () {
+        for (let index = 0; index < 10_000; index += 1) {
+          yield new Uint8Array(0);
+        }
+        yield payload;
+      })(),
+    };
+
+    await store.uploadAsync("case-1", "text/plain", stream);
+
+    expect(from).toHaveBeenCalledTimes(1);
+  } finally {
+    from.mockRestore();
+  }
+});
 
 describe("in-memory document store", () => {
   sharedContract("document store contract", async () => ({
@@ -159,6 +198,32 @@ describe("filesystem document store", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "keeps uploaded document files private to the service account",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "evianta-documents-"));
+      const store = new FileSystemDocumentStore({ directory });
+
+      try {
+        const key = await store.uploadAsync(
+          "case-1",
+          "text/plain",
+          boundedStream(),
+        );
+        const objectDirectory = join(directory, key);
+        const objectDirectoryStat = await stat(objectDirectory);
+        const dataStat = await stat(join(objectDirectory, "data"));
+        const metadataStat = await stat(join(objectDirectory, "metadata.json"));
+
+        expect(objectDirectoryStat.mode & 0o777).toBe(0o700);
+        expect(dataStat.mode & 0o777).toBe(0o600);
+        expect(metadataStat.mode & 0o777).toBe(0o600);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("S3 document store", () => {
@@ -219,6 +284,49 @@ describe("S3 document store", () => {
     expect(
       await store.readStreamAsync("00000000-0000-0000-0000-000000000000"),
     ).toBeNull();
+  });
+
+  it("does not treat a missing bucket as a missing object", async () => {
+    s3Mock.on(GetObjectCommand).rejects(
+      Object.assign(new Error("bucket not found"), {
+        name: "NoSuchBucket",
+        $metadata: { httpStatusCode: 404 },
+      }),
+    );
+
+    await expect(
+      store.readStreamAsync("00000000-0000-0000-0000-000000000000"),
+    ).rejects.toMatchObject({ code: "s3-read-failed" });
+  });
+
+  it("destroys S3 bodies rejected for invalid metadata or read limits", async () => {
+    const invalidMetadataBody = Readable.from([payload]);
+    const destroyInvalidMetadataBody = vi.spyOn(invalidMetadataBody, "destroy");
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: invalidMetadataBody,
+      ContentLength: payload.byteLength,
+      ContentType: "text/plain",
+      Metadata: {},
+    });
+
+    await expect(
+      store.readStreamAsync("00000000-0000-0000-0000-000000000000"),
+    ).rejects.toMatchObject({ code: "corrupt-object" });
+    expect(destroyInvalidMetadataBody).toHaveBeenCalledOnce();
+
+    const invalidLimitBody = Readable.from([payload]);
+    const destroyInvalidLimitBody = vi.spyOn(invalidLimitBody, "destroy");
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: invalidLimitBody,
+      ContentLength: payload.byteLength,
+      ContentType: "text/plain",
+      Metadata: { "content-sha256": contentHash },
+    });
+
+    await expect(
+      store.readBufferAsync("00000000-0000-0000-0000-000000000000", -1),
+    ).rejects.toMatchObject({ code: "invalid-limit" });
+    expect(destroyInvalidLimitBody).toHaveBeenCalledOnce();
   });
 
   it("caps signed URL expiry and does not send an AWS request", async () => {
