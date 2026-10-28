@@ -58,7 +58,34 @@ export function CaseIntake({
 }: {
   sourceSample?: SyntheticWorkflowFixture;
 }) {
-  const { session, api } = useSession();
+  const { session } = useSession();
+
+  if (!session) {
+    return (
+      <div className="reading-column">
+        <p className="page-eyebrow">New private case</p>
+        <h1 className="page-title">Start with the context.</h1>
+        <p className="page-description">
+          {sourceSample
+            ? `You are preparing a private copy of “${sourceSample.case.title}”. The public sample will remain read-only.`
+            : "Choose a workflow and add the records you want to review. Your private files are never part of a public sample."}
+        </p>
+        <PrivateGate />
+      </div>
+    );
+  }
+
+  return (
+    <SessionCaseIntake key={session.accessToken} sourceSample={sourceSample} />
+  );
+}
+
+function SessionCaseIntake({
+  sourceSample,
+}: {
+  sourceSample?: SyntheticWorkflowFixture;
+}) {
+  const { api } = useSession();
   const router = useRouter();
   const [useCase, setUseCase] = useState<UseCase>(
     sourceSample?.case.useCase ?? "msme-payment",
@@ -75,25 +102,15 @@ export function CaseIntake({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [createdCaseId, setCreatedCaseId] = useState<string | null>(null);
-  const sessionTokenRef = useRef<string | null>(session?.accessToken ?? null);
+  const active = useRef(true);
   const spec = workflowSpecs[useCase];
-  const resetForm = () => {
-    setUseCase(sourceSample?.case.useCase ?? "msme-payment");
-    setTitle(sourceSample ? `${sourceSample.case.title} (copy)` : "");
-    setDescription(sourceSample?.case.description ?? "");
-    setFiles([]);
-    setExtractionMethod("mixed");
-    setError(null);
-    setPending(false);
-    setCreatedCaseId(null);
-  };
 
   useEffect(() => {
-    sessionTokenRef.current = session?.accessToken ?? null;
-    if (!session) {
-      resetForm();
-    }
-  }, [session]);
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
   const openQuestions = useMemo(
     () =>
       deriveIntakeOpenQuestions(
@@ -102,21 +119,6 @@ export function CaseIntake({
       ),
     [files, useCase],
   );
-
-  if (!session) {
-    return (
-      <div className="reading-column">
-        <p className="page-eyebrow">New private case</p>
-        <h1 className="page-title">Start with the context.</h1>
-        <p className="page-description">
-          {sourceSample
-            ? `You are preparing a private copy of “${sourceSample.case.title}”. The public sample will remain read-only.`
-            : "Choose a workflow and add the records you want to review. Your private files are never part of a public sample."}
-        </p>
-        <PrivateGate />
-      </div>
-    );
-  }
 
   function chooseFiles(event: ChangeEvent<HTMLInputElement>) {
     const selected = Array.from(event.target.files ?? []);
@@ -155,12 +157,6 @@ export function CaseIntake({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const sessionToken = session?.accessToken;
-    if (!sessionToken) {
-      setError("Your session expired. Sign in again.");
-      return;
-    }
-    sessionTokenRef.current = sessionToken;
     setError(null);
     setCreatedCaseId(null);
     const invalidFile = files.find(({ file }) =>
@@ -173,21 +169,16 @@ export function CaseIntake({
     setPending(true);
     let createdId: string | null = null;
     try {
-      if (sessionTokenRef.current !== sessionToken) {
-        throw new Error("Your session ended before the case finished uploading.");
-      }
       const created = await api.createCase({
         title: title.trim(),
         description: description.trim(),
         useCase,
         sourceCaseId: sourceSample?.case.id ?? null,
       });
+      if (!active.current) return;
       createdId = created.id;
       setCreatedCaseId(created.id);
       for (const { file } of files) {
-        if (sessionTokenRef.current !== sessionToken) {
-          throw new Error("Your session ended before the case finished uploading.");
-        }
         setFiles((current) =>
           current.map((item) =>
             item.file === file ? { ...item, state: "uploading" } : item,
@@ -195,15 +186,14 @@ export function CaseIntake({
         );
         let document: DocumentMetadataDto;
         try {
-          if (sessionTokenRef.current !== sessionToken) {
-            throw new Error("Your session ended before the case finished uploading.");
-          }
           document = await api.uploadDocument(
             created.id,
             file,
             extractionMethod,
           );
+          if (!active.current) return;
         } catch (reason) {
+          if (!active.current) return;
           setFiles((current) =>
             current.map((item) =>
               item.file === file ? { ...item, state: "failed" } : item,
@@ -217,11 +207,9 @@ export function CaseIntake({
           ),
         );
       }
-      if (sessionTokenRef.current !== sessionToken) {
-        throw new Error("Your session ended before the case finished uploading.");
-      }
       router.push(`/cases/${created.id}`);
     } catch (reason) {
+      if (!active.current) return;
       const detail =
         reason instanceof Error
           ? reason.message
@@ -232,7 +220,7 @@ export function CaseIntake({
           : detail,
       );
     } finally {
-      setPending(false);
+      if (active.current) setPending(false);
     }
   }
 

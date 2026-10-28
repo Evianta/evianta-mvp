@@ -91,10 +91,12 @@ export function CaseWorkspaceClient({ caseId }: { caseId: string }) {
       };
 
     setLoading(true);
-    void api
-      .getCase(caseId)
-      .then((result) => {
-        if (active) setRecord(result);
+    void Promise.all([api.getCase(caseId), api.getLatestRun(caseId)])
+      .then(([result, latestRun]) => {
+        if (active) {
+          setRecord(result);
+          setRun(latestRun);
+        }
       })
       .catch((reason: unknown) => {
         if (active)
@@ -114,7 +116,12 @@ export function CaseWorkspaceClient({ caseId }: { caseId: string }) {
   }, [api, caseId, session]);
 
   useEffect(() => {
-    if (!run || !(run.status === "running" || run.status === "queued") || !session) return;
+    if (
+      !run ||
+      !(run.status === "running" || run.status === "queued") ||
+      !session
+    )
+      return;
     const controller = new AbortController();
     void api
       .streamRunEvents(run.id, {

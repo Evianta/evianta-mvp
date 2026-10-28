@@ -20,6 +20,11 @@ test("public sample landing page is accessible in both themes", async ({
   await expect(page.locator("html")).toHaveClass(/dark/);
   const darkViolations = await new AxeBuilder({ page }).analyze();
   expect(darkViolations.violations).toEqual([]);
+
+  await page.setViewportSize({ width: 700, height: 900 });
+  await expect(page.locator(".command-trigger")).toHaveAccessibleName(
+    "Search workspace K shortcut",
+  );
 });
 
 test("sample pages are read-only and copying asks for a key", async ({

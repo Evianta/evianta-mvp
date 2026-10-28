@@ -43,12 +43,12 @@ export function CommandPalette() {
       <button
         type="button"
         className="command-trigger"
-        aria-label="Search workspace"
+        aria-label="Search workspace K shortcut"
         onClick={() => setOpen(true)}
       >
         <Search size={16} aria-hidden="true" />
         <span>Search workspace</span>
-        <kbd>
+        <kbd aria-hidden="true">
           <CommandIcon size={11} aria-hidden="true" /> K
         </kbd>
       </button>

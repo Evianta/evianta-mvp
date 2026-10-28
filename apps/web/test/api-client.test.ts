@@ -1,9 +1,70 @@
-import { syntheticWorkflowFixtures } from "@evianta/core";
+import { syntheticWorkflowFixtures, type RunDto } from "@evianta/core";
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../src/api/errors.js";
 import { FetchWebApiClient } from "../src/api/client.js";
 
 describe("FetchWebApiClient", () => {
+  const run: RunDto = {
+    id: "run-1",
+    caseId: "case-1",
+    planVersion: 1,
+    status: "running",
+    priorRunId: null,
+    cancellationRequested: false,
+    inputRequired: false,
+    usage: syntheticWorkflowFixtures.dataAnalysis.case.usage,
+    createdAt: "2026-01-15T00:00:00.000Z",
+    updatedAt: "2026-01-15T00:00:00.000Z",
+  };
+
+  it.each([null, run, { ...run, status: "failed" }])(
+    "loads a nullable latest run through the authenticated API",
+    async (latestRun) => {
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(Response.json({ run: latestRun }));
+      const client = new FetchWebApiClient({
+        getToken: () => "session-token",
+        onUnauthorized: vi.fn(),
+        fetcher,
+      });
+
+      expect(await client.getLatestRun("case/1")).toEqual(latestRun);
+      expect(fetcher.mock.calls[0][0]).toBe("/cases/case%2F1/runs/latest");
+      expect(fetcher.mock.calls[0][1]?.cache).toBe("no-store");
+    },
+  );
+
+  it.each([403, 404, 500])(
+    "does not treat a latest-run lookup failure (%i) as an empty case",
+    async (status) => {
+      const client = new FetchWebApiClient({
+        getToken: () => "session-token",
+        onUnauthorized: vi.fn(),
+        fetcher: vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(
+            Response.json({ error: { message: "Lookup failed." } }, { status }),
+          ),
+      });
+      await expect(client.getLatestRun("case-1")).rejects.toMatchObject({
+        status,
+        message: "Lookup failed.",
+      });
+    },
+  );
+
+  it("rejects a malformed latest-run response", async () => {
+    const client = new FetchWebApiClient({
+      getToken: () => "session-token",
+      onUnauthorized: vi.fn(),
+      fetcher: vi.fn<typeof fetch>().mockResolvedValue(Response.json({})),
+    });
+    await expect(client.getLatestRun("case-1")).rejects.toMatchObject({
+      status: 502,
+    });
+  });
+
   it("uses the in-memory bearer token and disables private response caching", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       Response.json({

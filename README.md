@@ -49,6 +49,20 @@ through `/auth/token`; JWTs remain in memory, and private requests use
 from a different origin. Run browser and axe checks with
 `pnpm --filter @evianta/web test:e2e`.
 
+For production, run `pnpm --filter @evianta/web build`, then
+`pnpm --filter @evianta/web start`. This uses the regular Next server; deploy the
+complete `.next` build and runtime dependencies, not a standalone server bundle.
+Next serves the generated client scripts, styles and fonts from that build.
+
+The private workspace requires `GET /cases/:caseId/runs/latest` to return
+`{ "run": RunDto | null }`, validated by `LatestRunResponseSchema`. The API must
+authorize ownership of the case, return its active run or most recent run, and
+return `null` only when the case has no runs. Authorization and lookup failures
+must remain errors. The workspace reloads this run on navigation and replays its
+event stream from the beginning. As with the other private endpoints, the HTTP
+handler belongs to the upcoming API implementation; the API app is currently a
+placeholder.
+
 ## Environment and generated files
 
 `.env.example` contains only non-secret local defaults. Copy it to `.env` when

@@ -30,7 +30,7 @@
     "test:e2e": "playwright test",
     "prebuild": "pnpm --filter @evianta/core build",
     "build": "next build",
-    "start": "node .next/standalone/server.js"
+    "start": "next start"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",

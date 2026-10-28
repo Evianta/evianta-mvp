@@ -4,12 +4,14 @@ import {
   DocumentResponseSchema,
   type ExtractionMethod,
   ListCasesResponseSchema,
+  LatestRunResponseSchema,
   RunResponseSchema,
   type Case,
   type CaseResponse,
   type CreateCaseRequest,
   type DocumentResponse,
   type ListCasesResponse,
+  type LatestRunResponse,
   type RunResponse,
   type RunDto,
 } from "@evianta/core";
@@ -55,6 +57,7 @@ type ResponseSchema<T> = {
 export interface WebApiClient {
   listCases(): Promise<Case[]>;
   getCase(caseId: string): Promise<Case>;
+  getLatestRun(caseId: string): Promise<RunDto | null>;
   createCase(request: CreateCaseRequest): Promise<Case>;
   uploadDocument(
     caseId: string,
@@ -127,6 +130,14 @@ export class FetchWebApiClient implements WebApiClient {
       this.jsonInit("POST", input),
     );
     return response.case;
+  }
+
+  async getLatestRun(caseId: string): Promise<RunDto | null> {
+    const response = await this.request<LatestRunResponse>(
+      `/cases/${encodeURIComponent(caseId)}/runs/latest`,
+      LatestRunResponseSchema,
+    );
+    return response.run;
   }
 
   async uploadDocument(
