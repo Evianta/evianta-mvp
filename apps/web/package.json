@@ -20,10 +20,15 @@
     "zod": "4.4.3"
   },
   "scripts": {
+    "predev": "pnpm --filter @evianta/core build",
     "dev": "next dev",
+    "pretypecheck": "pnpm --filter @evianta/core build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "pnpm --filter @evianta/core build",
     "test": "vitest run --passWithNoTests",
+    "pretest:e2e": "pnpm --filter @evianta/core build",
     "test:e2e": "playwright test",
+    "prebuild": "pnpm --filter @evianta/core build",
     "build": "next build",
     "start": "node .next/standalone/server.js"
   },
