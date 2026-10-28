@@ -30,7 +30,7 @@ cloud services or model providers.
 | ----------------- | ----------------------------------------------------------------- |
 | `packages/core`   | Shared domain schemas, ports and synthetic workflow fixtures      |
 | `packages/env`    | Server-side environment validation                                |
-| `packages/store`  | Persistence boundary; storage implementations come later          |
+| `packages/store`  | MongoDB repositories and matching in-memory repository contracts  |
 | `packages/ai`     | Muse/mock provider adapters, structured output and usage boundary |
 | `packages/agents` | Agent boundary; orchestration comes later                         |
 | `apps/api`        | API application boundary; HTTP features come later                |

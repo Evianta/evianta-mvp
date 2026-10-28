@@ -13,6 +13,29 @@ export function getRequiredEnv(
   return value;
 }
 
+export interface MongoConfig {
+  uri: string;
+  dbName: string;
+}
+
+export function getMongoConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): MongoConfig {
+  const uri = getRequiredEnv("MONGODB_URI", env).trim();
+  if (!/^mongodb(?:\+srv)?:\/\//i.test(uri)) {
+    throw new Error("MONGODB_URI must use mongodb:// or mongodb+srv://");
+  }
+
+  const dbName = getRequiredEnv("MONGODB_DB", env).trim();
+  if (
+    /[/\\. "$*<>:|?\0]/.test(dbName) ||
+    Buffer.byteLength(dbName, "utf8") > 63
+  ) {
+    throw new Error("MONGODB_DB must be a valid MongoDB database name");
+  }
+  return { uri, dbName };
+}
+
 export interface AiEnvironment {
   provider: "muse" | "mock";
   modelApiKey?: string;

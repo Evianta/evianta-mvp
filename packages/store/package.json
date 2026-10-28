@@ -10,11 +10,17 @@
     }
   },
   "dependencies": {
-    "@evianta/core": "workspace:*"
+    "@evianta/core": "workspace:*",
+    "@evianta/env": "workspace:*",
+    "mongodb": "^7.7.0",
+    "zod": "4.4.3"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.3.0"
   }
 }
