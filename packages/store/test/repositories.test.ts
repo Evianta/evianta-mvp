@@ -21,7 +21,7 @@ import {
   it,
 } from "vitest";
 import { createInMemoryStore } from "../src/memory.js";
-import { getMongoDatabaseName, MongoStore } from "../src/mongo.js";
+import { MongoStore } from "../src/mongo.js";
 
 const timestamp = "2026-01-15T00:00:00.000Z";
 const usageSummary = syntheticWorkflowFixtures.dataAnalysis.case.usage;
@@ -136,14 +136,6 @@ function repositoryContract(
       const harness = await setup();
       repositories = harness.repositories;
       closeStore = harness.close;
-    });
-
-    it("extracts database names from replica-set MongoDB URIs", () => {
-      expect(
-        getMongoDatabaseName(
-          "mongodb://db1:27017,db2:27017/evianta?replicaSet=rs0",
-        ),
-      ).toBe("evianta");
     });
 
     afterEach(async () => {

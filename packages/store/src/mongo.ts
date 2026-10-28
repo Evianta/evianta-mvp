@@ -58,10 +58,7 @@ import {
   type OptionalUnlessRequiredId,
   MongoServerError,
 } from "mongodb";
-import {
-  getMongoDatabaseName as parseMongoDatabaseName,
-  getMongoDbUri,
-} from "@evianta/env/server";
+import { getMongoConfig, type MongoConfig } from "@evianta/env/server";
 import { z, type ZodType } from "zod";
 
 type Stored<T> = T & Document & { _id: string };
@@ -78,16 +75,6 @@ const MongoRunLeaseSchema = z
     (request) => Date.parse(request.expiresAt) > Date.parse(request.at),
     "Lease expiry must be after acquisition time",
   );
-const MongoUriSchema = z.string().superRefine((uri, context) => {
-  try {
-    parseMongoDatabaseName(uri);
-  } catch (error) {
-    context.addIssue({
-      code: "custom",
-      message: error instanceof Error ? error.message : "Invalid MongoDB URI",
-    });
-  }
-});
 
 export class StoreError extends Error {
   constructor(
@@ -1215,20 +1202,12 @@ export class MongoStore {
   }
 }
 
-export function getMongoDatabaseName(uri: string): string {
-  return parseMongoDatabaseName(MongoUriSchema.parse(uri));
-}
-
 export async function connectMongoStore(
-  uri = getMongoDbUri(),
+  config: MongoConfig = getMongoConfig(),
 ): Promise<MongoStore> {
-  const parsedUri = MongoUriSchema.parse(uri);
-  const client = new (await import("mongodb")).MongoClient(parsedUri);
+  const client = new (await import("mongodb")).MongoClient(config.uri);
   await client.connect();
-  const store = new MongoStore({
-    client,
-    db: client.db(getMongoDatabaseName(parsedUri)),
-  });
+  const store = new MongoStore({ client, db: client.db(config.dbName) });
   try {
     await store.initialize();
     return store;
