@@ -38,6 +38,39 @@ describe("getRequiredEnv", () => {
       ).toBe("evianta");
     });
 
+    it("accepts credentials, IPv6 hosts and SRV URIs", () => {
+      expect(
+        getMongoDatabaseName("mongodb://user:p%40ss@[::1]:27017/evianta"),
+      ).toBe("evianta");
+      expect(
+        getMongoDatabaseName("mongodb+srv://u:p@cluster.example.net/evianta"),
+      ).toBe("evianta");
+    });
+
+    it("rejects invalid ports, hosts and decoded database names", () => {
+      for (const uri of [
+        "mongodb://localhost:not-a-port/evianta",
+        "mongodb://localhost:0/evianta",
+        "mongodb://localhost:70000/evianta",
+        "mongodb://db1:27017,/evianta",
+        "mongodb+srv://a.example.net,b.example.net/evianta",
+        "mongodb+srv://a.example.net:27017/evianta",
+      ]) {
+        expect(() => getMongoDatabaseName(uri)).toThrow(
+          "MONGODB_URI must be a valid MongoDB URI",
+        );
+      }
+      for (const uri of [
+        "mongodb://localhost/a%2Fb",
+        "mongodb://localhost/a%20b",
+        "mongodb://localhost/a%24b",
+      ]) {
+        expect(() => getMongoDatabaseName(uri)).toThrow(
+          "MONGODB_URI must include a valid database name",
+        );
+      }
+    });
+
     it("rejects malformed or non-MongoDB URIs", () => {
       expect(() => getMongoDbUri({ MONGODB_URI: "not-a-uri" })).toThrow(
         "MONGODB_URI must be a valid MongoDB URI",

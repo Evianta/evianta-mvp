@@ -595,7 +595,7 @@ export class InMemoryStore {
         },
       },
       events: {
-        append: async (event, scope) => {
+        append: async (event, scope, options) => {
           const record = parse(RunEventSchema, event);
           this.requireScope(record.caseId, scope);
           const run = this.runs.get(record.runId);
@@ -607,6 +607,12 @@ export class InMemoryStore {
             throw new StoreError(
               "Run does not belong to this case",
               "run-not-found",
+            );
+          }
+          if (options && run.fencingToken !== options.fencingToken) {
+            throw new StoreError(
+              "Run lease generation is stale",
+              "stale-fencing-token",
             );
           }
           if (

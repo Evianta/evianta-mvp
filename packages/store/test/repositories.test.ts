@@ -550,6 +550,48 @@ function repositoryContract(
       ).toHaveLength(1);
     });
 
+    it("reports a conflict when reactivating a run beside an active run", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert({
+        ...makeRun("run-old", "case-1", "owner-1"),
+        status: "completed",
+      });
+      await repositories.runs.insert(
+        makeRun("run-active", "case-1", "owner-1"),
+      );
+
+      await expect(
+        repositories.runs.updateOwned(
+          makeRun("run-old", "case-1", "owner-1"),
+          "owner-1",
+        ),
+      ).rejects.toMatchObject({ code: "duplicate-record" });
+    });
+
+    it("rejects events fenced with a stale lease generation", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const stale = {
+        id: "event-1",
+        caseId: "case-1",
+        runId: "run-1",
+        sequence: 1,
+        occurredAt: timestamp,
+        payload: { type: "run-started" as const, planVersion: 1 },
+      };
+
+      await expect(
+        repositories.events.append(stale, ownerScope, { fencingToken: 5 }),
+      ).rejects.toMatchObject({ code: "stale-fencing-token" });
+      expect(
+        await repositories.events.listAfter("case-1", 0, ownerScope),
+      ).toHaveLength(0);
+      await repositories.events.append(stale, ownerScope, { fencingToken: 0 });
+      expect(
+        await repositories.events.listAfter("case-1", 0, ownerScope),
+      ).toHaveLength(1);
+    });
+
     it("uses distinct cache identities for null and the string none", async () => {
       const store = createInMemoryStore();
       const { repositories } = store;
@@ -870,6 +912,26 @@ describe("MongoDB repositories", () => {
         fencingToken: 2,
         leaseId: "lease-2",
       });
+      const staleEvent = {
+        id: "event-stale",
+        caseId: "case-1",
+        runId: "run-1",
+        sequence: 1,
+        occurredAt: timestamp,
+        payload: { type: "run-started" as const, planVersion: 1 },
+      };
+      await expect(
+        harness.store.repositories.events.append(
+          staleEvent,
+          { ownerId: "owner-1", caseId: "case-1" },
+          { fencingToken: 1 },
+        ),
+      ).rejects.toMatchObject({ code: "stale-fencing-token" });
+      await harness.store.repositories.events.append(
+        staleEvent,
+        { ownerId: "owner-1", caseId: "case-1" },
+        { fencingToken: 2 },
+      );
     } finally {
       await harness.client.db(harness.dbName).dropDatabase();
       await harness.store.close();

@@ -121,7 +121,11 @@ export interface ApprovalRepository {
 }
 
 export interface RunEventRepository {
-  append(event: RunEvent, scope: OwnerScope): Promise<void>;
+  append(
+    event: RunEvent,
+    scope: OwnerScope,
+    options?: { fencingToken: number },
+  ): Promise<void>;
   listAfter(
     caseId: string,
     afterSequence: number,

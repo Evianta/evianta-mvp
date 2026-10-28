@@ -338,7 +338,8 @@ export class MongoStore {
           this.approvalInvalidateForDeliverable(id, scope),
       },
       events: {
-        append: (record, scope) => this.eventAppend(record, scope),
+        append: (record, scope, options) =>
+          this.eventAppend(record, scope, options),
         listAfter: (caseId, sequence, scope) =>
           this.eventListAfter(caseId, sequence, scope),
       },
@@ -718,12 +719,7 @@ export class MongoStore {
   ): Promise<ExtractedDocument | null> {
     if (!(await this.ownsCase(scope))) return null;
     const record = await this.extractions.findOne(
-      {
-        _id: {
-          $regex: `^${escapeRegex(encodeURIComponent(documentId))}:`,
-        },
-        caseId: scope.caseId,
-      },
+      { documentId, caseId: scope.caseId },
       { sort: { revision: -1 } },
     );
     return decode(ExtractedDocumentSchema, record);
@@ -891,16 +887,27 @@ export class MongoStore {
       parsed.status === "queued" || parsed.status === "running"
         ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
         : {};
-    const result = await this.runs.replaceOne(
-      {
-        _id: parsed.id,
-        ownerId,
-        caseId: parsed.caseId,
-        fencingToken: parsed.fencingToken,
-      },
-      { ...documentFor(parsed), ...active },
-    );
-    return result.matchedCount === 1;
+    try {
+      const result = await this.runs.replaceOne(
+        {
+          _id: parsed.id,
+          ownerId,
+          caseId: parsed.caseId,
+          fencingToken: parsed.fencingToken,
+        },
+        { ...documentFor(parsed), ...active },
+      );
+      return result.matchedCount === 1;
+    } catch (error) {
+      if (isDuplicateKey(error)) {
+        throw new StoreError(
+          "An active run already exists for this case",
+          "duplicate-record",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
   }
 
   async acquireRunLease(request: MongoRunLease): Promise<RunRecord | null> {
@@ -1098,7 +1105,11 @@ export class MongoStore {
     });
   }
 
-  async eventAppend(event: RunEvent, scope: OwnerScope): Promise<void> {
+  async eventAppend(
+    event: RunEvent,
+    scope: OwnerScope,
+    options?: { fencingToken: number },
+  ): Promise<void> {
     const parsed = RunEventSchema.parse(event);
     if (parsed.caseId !== scope.caseId || !(await this.ownsCase(scope))) {
       throw new CaseNotOwnedError();
@@ -1112,6 +1123,26 @@ export class MongoStore {
       throw new StoreError("Run does not belong to this case", "run-not-found");
     }
     await this.withTransaction(async (session) => {
+      if (options) {
+        // A conditional write to the run conflicts with a concurrent lease
+        // acquisition, so a stale worker cannot publish after reclamation.
+        const fenced = await this.runs.updateOne(
+          {
+            _id: parsed.runId,
+            caseId: parsed.caseId,
+            ownerId: scope.ownerId,
+            fencingToken: options.fencingToken,
+          },
+          { $inc: { eventWrites: 1 } },
+          { session },
+        );
+        if (fenced.matchedCount !== 1) {
+          throw new StoreError(
+            "Run lease generation is stale",
+            "stale-fencing-token",
+          );
+        }
+      }
       const current = await this.eventCounters.findOne(
         { _id: parsed.caseId },
         { session },
@@ -1182,10 +1213,6 @@ export class MongoStore {
       runId,
     });
   }
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function getMongoDatabaseName(uri: string): string {
