@@ -483,6 +483,7 @@ export const EvidenceLocationSchema = z
 export type EvidenceLocation = z.infer<typeof EvidenceLocationSchema>;
 
 export const DocumentEvidenceSchema = z.object({
+  kind: z.literal("document"),
   id: IdSchema,
   caseId: IdSchema,
   sourceRef: z.string().min(1),
@@ -493,6 +494,7 @@ export const DocumentEvidenceSchema = z.object({
 export type DocumentEvidence = z.infer<typeof DocumentEvidenceSchema>;
 
 export const ResearchEvidenceSchema = z.object({
+  kind: z.literal("research"),
   id: IdSchema,
   caseId: IdSchema,
   sourceRef: z.string().min(1),
@@ -508,8 +510,8 @@ export const ResearchEvidenceSchema = z.object({
 export type ResearchEvidence = z.infer<typeof ResearchEvidenceSchema>;
 
 export const EvidenceSchema = z.discriminatedUnion("kind", [
-  DocumentEvidenceSchema.extend({ kind: z.literal("document") }),
-  ResearchEvidenceSchema.extend({ kind: z.literal("research") }),
+  DocumentEvidenceSchema,
+  ResearchEvidenceSchema,
 ]);
 export type Evidence = z.infer<typeof EvidenceSchema>;
 

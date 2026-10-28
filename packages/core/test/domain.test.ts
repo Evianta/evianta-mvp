@@ -5,10 +5,13 @@ import {
   ApiErrorSchema,
   CaseSchema,
   CreateDocumentUploadRequestSchema,
+  DocumentEvidenceSchema,
   DocumentMetadataDtoSchema,
+  EvidenceSchema,
   EvidenceLocationSchema,
   EvaluationResultSchema,
   RunDtoSchema,
+  ResearchEvidenceSchema,
   SyntheticWorkflowFixtureSchema,
   TaskPlanSchema,
   UsageRecordSchema,
@@ -16,6 +19,14 @@ import {
   UsageUnitsSchema,
   isApprovalCurrent,
   syntheticWorkflowFixtures,
+} from "@evianta/core";
+import type {
+  DocumentEvidence,
+  Evidence,
+  OwnerScope,
+  ResearchEvidence,
+  UsageRecord,
+  UsageRepository,
 } from "@evianta/core";
 
 const now = "2026-01-15T00:00:00.000Z";
@@ -41,6 +52,53 @@ const makeTask = (id: string, dependencyIds: string[] = []) => ({
 });
 
 describe("domain schemas", () => {
+  it("preserves evidence discriminators across specific and union schemas", () => {
+    const common = {
+      id: "evidence-1",
+      caseId: "case-1",
+      sourceRef: "Source",
+      confidence: "high",
+    };
+    const document = DocumentEvidenceSchema.parse({
+      ...common,
+      kind: "document",
+      documentId: "document-1",
+      location: { page: 1 },
+    });
+    const research = ResearchEvidenceSchema.parse({
+      ...common,
+      kind: "research",
+      citation: {
+        url: "https://example.com/source",
+        title: "Source",
+        retrievedAt: now,
+        claim: "A sourced claim",
+        span: null,
+      },
+    });
+
+    expect(document.kind).toBe("document");
+    expect(research.kind).toBe("research");
+    expect(EvidenceSchema.parse(document)).toEqual(document);
+    expect(EvidenceSchema.parse(research)).toEqual(research);
+    expectTypeOf<DocumentEvidence>().toExtend<Evidence>();
+    expectTypeOf<ResearchEvidence>().toExtend<Evidence>();
+    expect(
+      DocumentEvidenceSchema.safeParse({ ...document, kind: "research" })
+        .success,
+    ).toBe(false);
+    expect(
+      ResearchEvidenceSchema.safeParse({ ...research, kind: "document" })
+        .success,
+    ).toBe(false);
+  });
+
+  it("requires explicit run identity when inserting usage", () => {
+    expectTypeOf<UsageRepository["insert"]>().parameters.toEqualTypeOf<
+      [usage: UsageRecord, runId: string, scope: OwnerScope]
+    >();
+  });
+
   it("enforces case ownership and synthetic-sample invariants", () => {
     const sample = syntheticWorkflowFixtures.dataAnalysis.case;
     expect(CaseSchema.safeParse(sample).success).toBe(true);

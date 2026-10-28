@@ -118,7 +118,7 @@ export interface RunEventRepository {
 
 export interface UsageRepository {
   listForRun(runId: string, scope: OwnerScope): Promise<UsageRecord[]>;
-  insert(usage: UsageRecord, scope: OwnerScope): Promise<void>;
+  insert(usage: UsageRecord, runId: string, scope: OwnerScope): Promise<void>;
 }
 
 export interface StoredObject {
