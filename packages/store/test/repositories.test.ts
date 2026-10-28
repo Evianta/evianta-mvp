@@ -42,6 +42,41 @@ function makeCase(
     sourceCaseId: null,
     ...overrides,
   });
+
+  it("paginates cases by instant time, not timestamp string ordering", async () => {
+    const harness = await createMongoHarness(1);
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("B", "owner-1", {
+          createdAt: "2026-01-15T01:00:00+02:00",
+        }),
+      );
+      await harness.store.repositories.cases.insert(
+        makeCase("a", "owner-1", { createdAt: "2026-01-14T23:00:00Z" }),
+      );
+      await harness.store.repositories.cases.insert(
+        makeCase("C", "owner-1", {
+          createdAt: "2026-01-15T00:00:00-05:00",
+        }),
+      );
+
+      const pageIds: string[] = [];
+      let cursor: string | undefined;
+      for (let index = 0; index < 3; index += 1) {
+        const page = await harness.store.repositories.cases.listOwned(
+          "owner-1",
+          cursor,
+        );
+        pageIds.push(...page.map((record) => record.id));
+        cursor = page[0]?.id;
+      }
+
+      expect(pageIds).toEqual(["C", "a", "B"]);
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
 }
 
 function makeRun(id: string, caseId: string, ownerId: string): RunRecord {
@@ -107,14 +142,14 @@ interface Harness {
   dbName: string;
 }
 
-async function createMongoHarness(): Promise<Harness> {
+async function createMongoHarness(pageSize = 50): Promise<Harness> {
   const uri = mongoReplSet!.getUri(
     `evianta_test_${randomUUID().replaceAll("-", "")}`,
   );
   const client = new MongoClient(uri);
   await client.connect();
   const dbName = new URL(uri).pathname.slice(1);
-  const store = new MongoStore({ client, db: client.db(dbName) });
+  const store = new MongoStore({ client, db: client.db(dbName), pageSize });
   await store.initialize();
   return { store, client, dbName };
 }
@@ -195,6 +230,83 @@ function repositoryContract(
           "session-valid",
           "2026-01-15T01:00:00.000Z",
         ),
+      ).not.toBeNull();
+    });
+
+    it("validates revocation timestamps before modifying records", async () => {
+      await repositories.accessKeys.insert({
+        id: "access-key-1",
+        userId: "user-1",
+        keyHash: "hash",
+        keyPrefix: "prefix",
+        lastUsedAt: null,
+        revokedAt: null,
+        createdAt: timestamp,
+      });
+      await repositories.sessions.insert({
+        id: "session-1",
+        userId: "user-1",
+        issuedAt: timestamp,
+        expiresAt: "2026-01-16T00:00:00.000Z",
+        revokedAt: null,
+        createdAt: timestamp,
+      });
+
+      await expect(
+        repositories.accessKeys.revoke("access-key-1", "yesterday"),
+      ).rejects.toThrow();
+      await expect(
+        repositories.sessions.revoke("session-1", "yesterday"),
+      ).rejects.toThrow();
+      expect(
+        await repositories.accessKeys.findActiveById("access-key-1"),
+      ).not.toBeNull();
+      expect(
+        await repositories.sessions.findActiveById("session-1", timestamp),
+      ).not.toBeNull();
+    });
+
+    it("upserts agent profiles by role even when the profile ID changes", async () => {
+      const profile = {
+        id: "profile-1",
+        role: "analyst",
+        displayName: "Analyst",
+        specialty: "analysis",
+        summary: "First version",
+        capabilities: [],
+        tools: [],
+        procedures: [],
+        outputFormats: [],
+        limitations: [],
+        modelTier: "cheap" as const,
+        enabled: true,
+      };
+      await repositories.agentProfiles.upsert(profile);
+      await repositories.agentProfiles.upsert({
+        ...profile,
+        id: "profile-2",
+        summary: "Updated version",
+      });
+
+      expect(await repositories.agentProfiles.findByRole("analyst")).toEqual({
+        ...profile,
+        id: "profile-2",
+        summary: "Updated version",
+      });
+      expect(await repositories.agentProfiles.listEnabled()).toHaveLength(1);
+    });
+
+    it("stores only one active run for the same owner and case tuple", async () => {
+      await repositories.cases.insert(makeCase("c", "a:b"));
+      await repositories.cases.insert(makeCase("b:c", "a"));
+      await repositories.runs.insert(makeRun("run-1", "c", "a:b"));
+      await repositories.runs.insert(makeRun("run-2", "b:c", "a"));
+
+      expect(
+        await repositories.runs.findOwnedById("run-1", "a:b"),
+      ).not.toBeNull();
+      expect(
+        await repositories.runs.findOwnedById("run-2", "a"),
       ).not.toBeNull();
     });
 
@@ -316,6 +428,46 @@ function repositoryContract(
       ).toEqual(extraction);
     });
 
+    it("returns the most recently saved extraction when saves share a millisecond", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document-revision",
+        caseId: "case-1",
+        name: "source.txt",
+        mimeType: "text/plain",
+        sizeBytes: 1,
+        state: "ready" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "object-key",
+        contentHash: "content-hash",
+      };
+      await repositories.documents.insert(document, ownerScope);
+      const extraction: ExtractedDocument = {
+        documentId: document.id,
+        kind: "text",
+        method: "parse",
+        confidence: 1,
+        pages: [],
+        tables: [],
+        warnings: [],
+        cacheIdentity: {
+          contentHash: "content-hash",
+          extractorVersion: "1",
+          modelVersion: null,
+        },
+      };
+      await repositories.extractions.saveForDocument(extraction, ownerScope);
+      await repositories.extractions.saveForDocument(
+        { ...extraction, method: "ocr" },
+        ownerScope,
+      );
+
+      expect(
+        await repositories.extractions.findForDocument(document.id, ownerScope),
+      ).toMatchObject({ method: "ocr" });
+    });
+
     it("enforces case ownership for runs, tasks, findings and usage", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.cases.insert(makeCase("case-2", "owner-2"));
@@ -433,18 +585,75 @@ function repositoryContract(
       ).toHaveLength(1);
     });
 
-    it("keeps cursor filtering consistent with case sorting", async () => {
-      const store = createInMemoryStore({ pageSize: 1 });
-      await store.repositories.cases.insert(makeCase("B", "owner-1"));
-      await store.repositories.cases.insert(makeCase("a", "owner-1"));
-
-      const firstPage = await store.repositories.cases.listOwned("owner-1");
-      expect(firstPage.map((record) => record.id)).toEqual(["B"]);
-      const secondPage = await store.repositories.cases.listOwned(
-        "owner-1",
-        firstPage[0]!.id,
+    it("uses distinct cache identities for null and the string none", async () => {
+      const store = createInMemoryStore();
+      const { repositories } = store;
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document-cache",
+        caseId: "case-1",
+        name: "source.txt",
+        mimeType: "text/plain",
+        sizeBytes: 1,
+        state: "ready" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "object-key",
+        contentHash: "content-hash",
+      };
+      await repositories.documents.insert(document, ownerScope);
+      const base: ExtractedDocument = {
+        documentId: document.id,
+        kind: "text",
+        method: "parse",
+        confidence: 1,
+        pages: [],
+        tables: [],
+        warnings: [],
+        cacheIdentity: {
+          contentHash: "content-hash",
+          extractorVersion: "1",
+          modelVersion: null,
+        },
+      };
+      await repositories.extractions.saveForDocument(base, ownerScope);
+      await repositories.extractions.saveForDocument(
+        {
+          ...base,
+          cacheIdentity: { ...base.cacheIdentity, modelVersion: "none" },
+        },
+        ownerScope,
       );
-      expect(secondPage.map((record) => record.id)).toEqual(["a"]);
+
+      expect(
+        await repositories.extractions.findForDocument(document.id, ownerScope),
+      ).toMatchObject({ cacheIdentity: { modelVersion: "none" } });
+    });
+
+    it("paginates cases by instant time, not timestamp string ordering", async () => {
+      const store = createInMemoryStore({ pageSize: 1 });
+      await store.repositories.cases.insert(
+        makeCase("B", "owner-1", { createdAt: "2026-01-15T01:00:00+02:00" }),
+      );
+      await store.repositories.cases.insert(
+        makeCase("a", "owner-1", { createdAt: "2026-01-14T23:00:00Z" }),
+      );
+      await store.repositories.cases.insert(
+        makeCase("C", "owner-1", { createdAt: "2026-01-15T00:00:00-05:00" }),
+      );
+
+      const pageIds: string[] = [];
+      let cursor: string | undefined;
+      for (let index = 0; index < 3; index += 1) {
+        const page = await store.repositories.cases.listOwned(
+          "owner-1",
+          cursor,
+        );
+        pageIds.push(...page.map((record) => record.id));
+        cursor = page[0]?.id;
+      }
+
+      expect(pageIds).toEqual(["C", "a", "B"]);
     });
 
     it("keeps persisted usage scope when the caller mutates its object", async () => {
@@ -524,6 +733,68 @@ describe("MongoDB repositories", () => {
     }
   });
 
+  it("keeps null and string none extraction cache identities separate", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("case-1", "owner-1"),
+      );
+      await harness.store.repositories.documents.insert(
+        {
+          id: "document-cache",
+          caseId: "case-1",
+          name: "source.txt",
+          mimeType: "text/plain",
+          sizeBytes: 1,
+          state: "ready",
+          uploadedAt: timestamp,
+          processedAt: null,
+          objectKey: "object-key",
+          contentHash: "content-hash",
+        },
+        ownerScope,
+      );
+      const extraction: ExtractedDocument = {
+        documentId: "document-cache",
+        kind: "text",
+        method: "parse",
+        confidence: 1,
+        pages: [],
+        tables: [],
+        warnings: [],
+        cacheIdentity: {
+          contentHash: "content-hash",
+          extractorVersion: "1",
+          modelVersion: null,
+        },
+      };
+      await harness.store.repositories.extractions.saveForDocument(
+        extraction,
+        ownerScope,
+      );
+      await harness.store.repositories.extractions.saveForDocument(
+        {
+          ...extraction,
+          cacheIdentity: {
+            ...extraction.cacheIdentity,
+            modelVersion: "none",
+          },
+        },
+        ownerScope,
+      );
+
+      expect(
+        await harness.store.extractions.countDocuments({
+          caseId: "case-1",
+          documentId: "document-cache",
+        }),
+      ).toBe(2);
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
+
   it("uses fencing tokens when expired run leases are reclaimed", async () => {
     const harness = await createMongoHarness();
     try {
@@ -542,6 +813,21 @@ describe("MongoDB repositories", () => {
       };
       const first = await harness.store.acquireRunLease(lease);
       expect(first?.fencingToken).toBe(1);
+      await expect(
+        harness.store.acquireRunLease({ ...lease, leaseId: "" }),
+      ).rejects.toThrow();
+      await expect(
+        harness.store.acquireRunLease({
+          ...lease,
+          expiresAt: "not-a-date",
+        }),
+      ).rejects.toThrow();
+      await expect(
+        harness.store.acquireRunLease({ ...lease, expiresAt: timestamp }),
+      ).rejects.toThrow();
+      expect(
+        await harness.store.repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({ fencingToken: 1, leaseId: "lease-1" });
       expect(
         await harness.store.acquireRunLease({
           ...lease,

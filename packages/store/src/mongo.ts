@@ -65,6 +65,19 @@ import {
 import { z, type ZodType } from "zod";
 
 type Stored<T> = T & Document & { _id: string };
+const TimestampSchema = z.string().datetime({ offset: true });
+const MongoRunLeaseSchema = z
+  .object({
+    runId: z.string().min(1),
+    ownerId: z.string().min(1),
+    leaseId: z.string().min(1),
+    expiresAt: TimestampSchema,
+    at: TimestampSchema,
+  })
+  .refine(
+    (request) => Date.parse(request.expiresAt) > Date.parse(request.at),
+    "Lease expiry must be after acquisition time",
+  );
 const MongoUriSchema = z.string().superRefine((uri, context) => {
   try {
     parseMongoDatabaseName(uri);
@@ -130,6 +143,10 @@ function indexValue<T extends { id: string }>(
   return { ...record, ...parsed, _id: parsed.id } as Stored<T>;
 }
 
+function activeCaseKey(ownerId: string, caseId: string): string {
+  return JSON.stringify([ownerId, caseId]);
+}
+
 function isDuplicateKey(error: unknown): boolean {
   return error instanceof MongoServerError && error.code === 11000;
 }
@@ -178,10 +195,17 @@ export class MongoStore {
   readonly users: Collection<Stored<UserRecord>>;
   readonly accessKeys: Collection<Stored<AccessKeyRecord>>;
   readonly sessions: Collection<Stored<SessionRecord>>;
-  readonly cases: Collection<Stored<Case>>;
+  readonly cases: Collection<Stored<Case> & { createdAtInstant?: Date }>;
   readonly documents: Collection<Stored<DocumentMetadataRecord>>;
   readonly extractions: Collection<
-    Stored<ExtractedDocument> & { caseId: string; cachedAt: string }
+    Stored<ExtractedDocument> & {
+      caseId: string;
+      cachedAt: string;
+      revision?: number;
+    }
+  >;
+  readonly extractionCounters: Collection<
+    Stored<{ id: string; revision: number }>
   >;
   readonly tasks: Collection<Stored<Task>>;
   readonly findings: Collection<Stored<Finding>>;
@@ -227,6 +251,7 @@ export class MongoStore {
     this.cases = db.collection("cases");
     this.documents = db.collection("documents");
     this.extractions = db.collection("extractions");
+    this.extractionCounters = db.collection("extractionCounters");
     this.tasks = db.collection("tasks");
     this.findings = db.collection("findings");
     this.evidence = db.collection("evidence");
@@ -326,12 +351,29 @@ export class MongoStore {
   }
 
   async initialize(): Promise<void> {
+    await this.cases.updateMany({ createdAtInstant: { $exists: false } }, [
+      {
+        $set: {
+          createdAtInstant: {
+            $dateFromString: { dateString: "$createdAt" },
+          },
+        },
+      },
+    ]);
+    await this.extractions.updateMany(
+      { revision: { $exists: false } },
+      { $set: { revision: 0 } },
+    );
     await Promise.all([
       this.agents.createIndex({ role: 1 }, { unique: true }),
       this.users.createIndex({ emailKey: 1 }, { unique: true }),
       this.accessKeys.createIndex({ userId: 1, revokedAt: 1 }),
       this.sessions.createIndex({ userId: 1, expiresAt: 1, revokedAt: 1 }),
-      this.cases.createIndex({ ownerId: 1, createdAt: -1, id: -1 }),
+      this.cases.createIndex({
+        ownerId: 1,
+        createdAtInstant: -1,
+        id: -1,
+      }),
       this.documents.createIndex({ caseId: 1, id: 1 }, { unique: true }),
       this.extractions.createIndex(
         {
@@ -342,7 +384,7 @@ export class MongoStore {
         },
         { unique: true },
       ),
-      this.extractions.createIndex({ caseId: 1, documentId: 1, cachedAt: -1 }),
+      this.extractions.createIndex({ caseId: 1, documentId: 1, revision: -1 }),
       this.tasks.createIndex({ caseId: 1, runId: 1, id: 1 }, { unique: true }),
       this.tasks.createIndex({ caseId: 1, runId: 1 }),
       this.findings.createIndex({ caseId: 1, id: 1 }, { unique: true }),
@@ -406,9 +448,14 @@ export class MongoStore {
 
   async agentUpsert(profile: AgentProfile): Promise<void> {
     const parsed = AgentProfileSchema.parse(profile);
-    await this.agents.replaceOne({ role: parsed.role }, documentFor(parsed), {
-      upsert: true,
-    });
+    await this.agents.updateOne(
+      { role: parsed.role },
+      {
+        $set: parsed,
+        $setOnInsert: { _id: parsed.role },
+      },
+      { upsert: true },
+    );
   }
 
   async caseFindOwnedById(id: string, ownerId: string): Promise<Case | null> {
@@ -450,20 +497,27 @@ export class MongoStore {
     };
     if (before) {
       query.$or = [
-        { createdAt: { $lt: before.createdAt } },
-        { createdAt: before.createdAt, id: { $lt: before.id } },
+        { createdAtInstant: { $lt: new Date(before.createdAt) } },
+        {
+          createdAtInstant: new Date(before.createdAt),
+          id: { $lt: before.id },
+        },
       ];
     }
     const records = await this.cases
       .find(query)
-      .sort({ createdAt: -1, id: -1 })
+      .sort({ createdAtInstant: -1, id: -1 })
       .limit(this.pageSize)
       .toArray();
     return records.map((record) => decode(CaseSchema, record)!);
   }
 
   async caseInsert(record: Case): Promise<void> {
-    await insertUnique(this.cases, CaseSchema, record);
+    const parsed = CaseSchema.parse(record);
+    await insertUnique(this.cases, CaseSchema, {
+      ...parsed,
+      createdAtInstant: new Date(parsed.createdAt),
+    } as Case & Document);
   }
 
   async caseReplaceOwned(record: Case, ownerId: string): Promise<boolean> {
@@ -471,7 +525,7 @@ export class MongoStore {
     if (parsed.ownerId !== ownerId || parsed.isSample) return false;
     const result = await this.cases.replaceOne(
       { _id: parsed.id, ownerId, isSample: false },
-      documentFor(parsed),
+      { ...documentFor(parsed), createdAtInstant: new Date(parsed.createdAt) },
     );
     return result.matchedCount === 1;
   }
@@ -545,9 +599,10 @@ export class MongoStore {
   }
 
   async accessKeyRevoke(id: string, revokedAt: string): Promise<boolean> {
+    const validatedAt = TimestampSchema.parse(revokedAt);
     const result = await this.accessKeys.updateOne(
       { _id: id, revokedAt: null },
-      { $set: { revokedAt } },
+      { $set: { revokedAt: validatedAt } },
     );
     return result.modifiedCount === 1;
   }
@@ -556,6 +611,7 @@ export class MongoStore {
     id: string,
     at: string,
   ): Promise<SessionRecord | null> {
+    const atDate = new Date(TimestampSchema.parse(at));
     return decode(
       SessionRecordSchema,
       await this.sessions.findOne({
@@ -564,7 +620,7 @@ export class MongoStore {
         $expr: {
           $gt: [
             { $dateFromString: { dateString: "$expiresAt", onError: null } },
-            new Date(at),
+            atDate,
           ],
         },
       }),
@@ -576,9 +632,10 @@ export class MongoStore {
   }
 
   async sessionRevoke(id: string, revokedAt: string): Promise<boolean> {
+    const validatedAt = TimestampSchema.parse(revokedAt);
     const result = await this.sessions.updateOne(
       { _id: id, revokedAt: null },
-      { $set: { revokedAt } },
+      { $set: { revokedAt: validatedAt } },
     );
     return result.modifiedCount === 1;
   }
@@ -667,7 +724,7 @@ export class MongoStore {
         },
         caseId: scope.caseId,
       },
-      { sort: { cachedAt: -1 } },
+      { sort: { revision: -1 } },
     );
     return decode(ExtractedDocumentSchema, record);
   }
@@ -693,10 +750,25 @@ export class MongoStore {
       parsed.documentId,
       parsed.cacheIdentity.contentHash,
       parsed.cacheIdentity.extractorVersion,
-      parsed.cacheIdentity.modelVersion ?? "none",
+      parsed.cacheIdentity.modelVersion ?? "",
     ]
       .map(encodeURIComponent)
       .join(":");
+    const counterId = JSON.stringify([scope.caseId, parsed.documentId]);
+    const counter = await this.extractionCounters.findOneAndUpdate(
+      { _id: counterId },
+      {
+        $inc: { revision: 1 },
+        $setOnInsert: { id: counterId },
+      },
+      { upsert: true, returnDocument: "after" },
+    );
+    if (!counter) {
+      throw new StoreError(
+        "Could not assign extraction revision",
+        "extraction-revision-failed",
+      );
+    }
     await this.extractions.replaceOne(
       { _id: cacheId },
       {
@@ -704,6 +776,7 @@ export class MongoStore {
         documentId: parsed.documentId,
         caseId: scope.caseId,
         cachedAt: new Date().toISOString(),
+        revision: counter.revision,
       },
       { upsert: true },
     );
@@ -799,7 +872,7 @@ export class MongoStore {
     if (!parent) throw new CaseNotOwnedError();
     const active =
       parsed.status === "queued" || parsed.status === "running"
-        ? { activeCaseKey: `${parsed.ownerId}:${parsed.caseId}` }
+        ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
         : {};
     await insertUnique(this.runs, RunRecordSchema, {
       ...parsed,
@@ -812,7 +885,7 @@ export class MongoStore {
     if (parsed.ownerId !== ownerId) return false;
     const active =
       parsed.status === "queued" || parsed.status === "running"
-        ? { activeCaseKey: `${parsed.ownerId}:${parsed.caseId}` }
+        ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
         : {};
     const result = await this.runs.replaceOne(
       {
@@ -827,10 +900,11 @@ export class MongoStore {
   }
 
   async acquireRunLease(request: MongoRunLease): Promise<RunRecord | null> {
+    const parsedRequest = MongoRunLeaseSchema.parse(request);
     const result = await this.runs.findOneAndUpdate(
       {
-        _id: request.runId,
-        ownerId: request.ownerId,
+        _id: parsedRequest.runId,
+        ownerId: parsedRequest.ownerId,
         status: "running",
         $or: [
           { leaseExpiresAt: null },
@@ -843,7 +917,7 @@ export class MongoStore {
                     onError: null,
                   },
                 },
-                new Date(request.at),
+                new Date(parsedRequest.at),
               ],
             },
           },
@@ -851,9 +925,9 @@ export class MongoStore {
       },
       {
         $set: {
-          leaseId: request.leaseId,
-          leaseExpiresAt: request.expiresAt,
-          updatedAt: request.at,
+          leaseId: parsedRequest.leaseId,
+          leaseExpiresAt: parsedRequest.expiresAt,
+          updatedAt: parsedRequest.at,
         },
         $inc: { fencingToken: 1 },
       },

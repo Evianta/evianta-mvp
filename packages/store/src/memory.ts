@@ -48,10 +48,11 @@ import {
   type UsageRepository,
 } from "@evianta/core";
 import { CaseNotOwnedError, InvalidCursorError, StoreError } from "./mongo.js";
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
 
 type Identified = { id: string };
 type DataMap<T extends Identified> = Map<string, T>;
+const TimestampSchema = z.string().datetime({ offset: true });
 
 function parse<T>(schema: ZodType<T>, value: unknown): T {
   return schema.parse(structuredClone(value));
@@ -72,8 +73,9 @@ export class InMemoryStore {
   private readonly documents: DataMap<DocumentMetadataRecord> = new Map();
   private readonly extractions = new Map<
     string,
-    { record: ExtractedDocument; caseId: string; cachedAt: number }
+    { record: ExtractedDocument; caseId: string; revision: number }
   >();
+  private extractionRevision = 0;
   private readonly tasks: DataMap<Task> = new Map();
   private readonly findings: DataMap<Finding> = new Map();
   private readonly evidence: DataMap<Evidence> = new Map();
@@ -165,15 +167,18 @@ export class InMemoryStore {
                 !record.isSample &&
                 record.status !== "deleted" &&
                 (!cursorCase ||
-                  record.createdAt < cursorCase.createdAt ||
-                  (record.createdAt === cursorCase.createdAt &&
-                    record.id.localeCompare(cursorCase.id) < 0)),
+                  Date.parse(record.createdAt) <
+                    Date.parse(cursorCase.createdAt) ||
+                  (Date.parse(record.createdAt) ===
+                    Date.parse(cursorCase.createdAt) &&
+                    record.id < cursorCase.id)),
             )
-            .sort(
-              (a, b) =>
-                b.createdAt.localeCompare(a.createdAt) ||
-                b.id.localeCompare(a.id),
-            )
+            .sort((a, b) => {
+              const byCreatedAt =
+                Date.parse(b.createdAt) - Date.parse(a.createdAt);
+              if (byCreatedAt !== 0) return byCreatedAt;
+              return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+            })
             .slice(0, this.pageSize)
             .map((record) => parse(CaseSchema, record));
         },
@@ -253,21 +258,26 @@ export class InMemoryStore {
           this.accessKeys.set(record.id, record);
         },
         revoke: async (id, revokedAt) => {
+          const validatedAt = TimestampSchema.parse(revokedAt);
           const record = this.accessKeys.get(id);
           if (!record || record.revokedAt !== null) return false;
           this.accessKeys.set(
             id,
-            parse(AccessKeyRecordSchema, { ...record, revokedAt }),
+            parse(AccessKeyRecordSchema, {
+              ...record,
+              revokedAt: validatedAt,
+            }),
           );
           return true;
         },
       },
       sessions: {
         findActiveById: async (id, at) => {
+          const atTime = Date.parse(TimestampSchema.parse(at));
           const record = this.sessions.get(id);
           return record &&
             record.revokedAt === null &&
-            Date.parse(record.expiresAt) > Date.parse(at)
+            Date.parse(record.expiresAt) > atTime
             ? parse(SessionRecordSchema, record)
             : null;
         },
@@ -277,11 +287,15 @@ export class InMemoryStore {
           this.sessions.set(record.id, record);
         },
         revoke: async (id, revokedAt) => {
+          const validatedAt = TimestampSchema.parse(revokedAt);
           const record = this.sessions.get(id);
           if (!record || record.revokedAt !== null) return false;
           this.sessions.set(
             id,
-            parse(SessionRecordSchema, { ...record, revokedAt }),
+            parse(SessionRecordSchema, {
+              ...record,
+              revokedAt: validatedAt,
+            }),
           );
           return true;
         },
@@ -335,7 +349,7 @@ export class InMemoryStore {
                 item.record.documentId === documentId &&
                 item.caseId === scope.caseId,
             )
-            .sort((a, b) => b.cachedAt - a.cachedAt);
+            .sort((a, b) => b.revision - a.revision);
           return records[0]
             ? parse(ExtractedDocumentSchema, records[0].record)
             : null;
@@ -354,7 +368,7 @@ export class InMemoryStore {
           this.extractions.set(id, {
             record,
             caseId: scope.caseId,
-            cachedAt: Date.now(),
+            revision: ++this.extractionRevision,
           });
         },
       },
@@ -712,7 +726,7 @@ export class InMemoryStore {
       record.documentId,
       record.cacheIdentity.contentHash,
       record.cacheIdentity.extractorVersion,
-      record.cacheIdentity.modelVersion ?? "none",
+      record.cacheIdentity.modelVersion ?? "",
     ]
       .map(encodeURIComponent)
       .join(":");
