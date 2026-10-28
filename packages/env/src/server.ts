@@ -27,7 +27,10 @@ export function getMongoConfig(
   }
 
   const dbName = getRequiredEnv("MONGODB_DB", env).trim();
-  if (/[/\\. "$*<>:|?\0]/.test(dbName) || dbName.length > 63) {
+  if (
+    /[/\\. "$*<>:|?\0]/.test(dbName) ||
+    Buffer.byteLength(dbName, "utf8") > 63
+  ) {
     throw new Error("MONGODB_DB must be a valid MongoDB database name");
   }
   return { uri, dbName };

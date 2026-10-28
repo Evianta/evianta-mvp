@@ -54,7 +54,14 @@ describe("getMongoConfig", () => {
   });
 
   it("rejects invalid database names", () => {
-    for (const dbName of ["a/b", "a b", "a.b", "a$b", "a".repeat(64)]) {
+    for (const dbName of [
+      "a/b",
+      "a b",
+      "a.b",
+      "a$b",
+      "a".repeat(64),
+      "é".repeat(32),
+    ]) {
       expect(() =>
         getMongoConfig({
           MONGODB_URI: "mongodb://localhost:27017",
