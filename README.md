@@ -26,15 +26,15 @@ cloud services or model providers.
 
 ## Workspace responsibilities
 
-| Path              | Current boundary and planned ownership                          |
-| ----------------- | --------------------------------------------------------------- |
-| `packages/core`   | Shared domain schemas, ports and synthetic workflow fixtures    |
-| `packages/env`    | Server-side environment validation                              |
-| `packages/store`  | Persistence boundary; storage implementations come later        |
-| `packages/ai`     | Provider boundary; adapters come later                          |
-| `packages/agents` | Agent boundary; orchestration comes later                       |
-| `apps/api`        | API application boundary; HTTP features come later              |
-| `apps/web`        | Web application boundary; UI features come in the web work pack |
+| Path              | Current boundary and planned ownership                           |
+| ----------------- | ---------------------------------------------------------------- |
+| `packages/core`   | Shared domain schemas, ports and synthetic workflow fixtures     |
+| `packages/env`    | Server-side environment validation                               |
+| `packages/store`  | MongoDB repositories and matching in-memory repository contracts |
+| `packages/ai`     | Provider boundary; adapters come later                           |
+| `packages/agents` | Agent boundary; orchestration comes later                        |
+| `apps/api`        | API application boundary; HTTP features come later               |
+| `apps/web`        | Web application boundary; UI features come in the web work pack  |
 
 Keep shared types in `core`, environment reads in `env`, persistence in
 `store`, and provider access in `ai`. Use `workspace:*` for internal

@@ -1,0 +1,436 @@
+import {
+  CaseSchema,
+  syntheticWorkflowFixtures,
+  type Case,
+  type Deliverable,
+  type OwnerScope,
+  type RunRecord,
+  type UsageRecord,
+} from "@evianta/core";
+import { randomUUID } from "node:crypto";
+import { MongoClient } from "mongodb";
+import { MongoMemoryReplSet } from "mongodb-memory-server";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from "vitest";
+import { createInMemoryStore } from "../src/memory.js";
+import { MongoStore } from "../src/mongo.js";
+
+const timestamp = "2026-01-15T00:00:00.000Z";
+const usageSummary = syntheticWorkflowFixtures.dataAnalysis.case.usage;
+const ownerScope: OwnerScope = { ownerId: "owner-1", caseId: "case-1" };
+
+function makeCase(
+  id: string,
+  ownerId: string,
+  overrides: Partial<Case> = {},
+): Case {
+  return CaseSchema.parse({
+    ...syntheticWorkflowFixtures.dataAnalysis.case,
+    id,
+    title: id,
+    ownerId,
+    isSample: false,
+    synthetic: true,
+    sourceCaseId: null,
+    ...overrides,
+  });
+}
+
+function makeRun(id: string, caseId: string, ownerId: string): RunRecord {
+  return {
+    id,
+    caseId,
+    ownerId,
+    threadId: `thread-${id}`,
+    planVersion: 1,
+    status: "running",
+    priorRunId: null,
+    leaseId: null,
+    fencingToken: 0,
+    leaseExpiresAt: null,
+    cancellationRequested: false,
+    inputRequired: false,
+    usage: usageSummary,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+function makeDeliverable(id: string, version: number): Deliverable {
+  return {
+    id,
+    caseId: ownerScope.caseId,
+    runId: "run-1",
+    version,
+    format: "report",
+    title: "Report",
+    summary: "Synthetic result",
+    sections: [],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+function makeUsage(id: string, attemptId = `attempt-${id}`): UsageRecord {
+  return {
+    id,
+    attemptId,
+    provider: "mock",
+    model: "mock-spark",
+    settings: {},
+    units: {
+      input: 0,
+      output: 0,
+      total: 0,
+      reasoning: null,
+      cacheRead: null,
+      cacheWrite: null,
+      search: null,
+    },
+    costUsd: 0,
+    costStatus: "estimated",
+    recordedAt: timestamp,
+  };
+}
+
+interface Harness {
+  store: MongoStore;
+  client: MongoClient;
+  dbName: string;
+}
+
+async function createMongoHarness(): Promise<Harness> {
+  const uri = mongoReplSet!.getUri(
+    `evianta_test_${randomUUID().replaceAll("-", "")}`,
+  );
+  const client = new MongoClient(uri);
+  await client.connect();
+  const dbName = new URL(uri).pathname.slice(1);
+  const store = new MongoStore({ client, db: client.db(dbName) });
+  await store.initialize();
+  return { store, client, dbName };
+}
+
+let mongoReplSet: MongoMemoryReplSet | undefined;
+
+function repositoryContract(
+  name: string,
+  setup: () => Promise<{
+    repositories: ReturnType<typeof createInMemoryStore>["repositories"];
+    close: () => Promise<void>;
+  }>,
+): void {
+  describe(name, () => {
+    let repositories: Awaited<ReturnType<typeof setup>>["repositories"];
+    let closeStore: () => Promise<void>;
+
+    beforeEach(async () => {
+      const harness = await setup();
+      repositories = harness.repositories;
+      closeStore = harness.close;
+    });
+
+    afterEach(async () => {
+      await closeStore();
+    });
+
+    it("validates case persistence and isolates owner-scoped records", async () => {
+      const cases = repositories.cases;
+      await cases.insert(makeCase("case-1", "owner-1"));
+      await cases.insert(makeCase("case-2", "owner-2"));
+
+      expect(await cases.findOwnedById("case-1", "owner-1")).toMatchObject({
+        id: "case-1",
+        ownerId: "owner-1",
+      });
+      expect(await cases.findOwnedById("case-2", "owner-1")).toBeNull();
+      expect(await cases.listOwned("owner-1")).toHaveLength(1);
+      expect(
+        await cases.replaceOwned(makeCase("case-2", "owner-1"), "owner-1"),
+      ).toBe(false);
+    });
+
+    it("preserves synthetic sample visibility without allowing owner edits", async () => {
+      const sample = syntheticWorkflowFixtures.dataAnalysis.case;
+      await repositories.cases.insert(sample);
+
+      expect(await repositories.cases.findPublicSampleById(sample.id)).toEqual(
+        sample,
+      );
+      expect(
+        await repositories.cases.findOwnedById(sample.id, "owner-1"),
+      ).toBeNull();
+      expect(await repositories.cases.replaceOwned(sample, "owner-1")).toBe(
+        false,
+      );
+    });
+
+    it("rejects malformed records and duplicate user emails", async () => {
+      const invalid = { ...makeCase("invalid-case", "owner-1"), title: "" };
+      await expect(repositories.cases.insert(invalid)).rejects.toThrow();
+
+      const user = {
+        id: "user-1",
+        email: "Example@evianta.test",
+        displayName: "Example",
+        role: "user" as const,
+        disabledAt: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      await repositories.users.insert(user);
+      expect(
+        await repositories.users.findByEmail(" example@evianta.test "),
+      ).toEqual(user);
+      await expect(
+        repositories.users.insert({
+          ...user,
+          id: "user-2",
+          email: user.email.toLowerCase(),
+        }),
+      ).rejects.toMatchObject({ code: "duplicate-record" });
+    });
+
+    it("isolates documents and strips private metadata from DTOs", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.cases.insert(makeCase("case-2", "owner-2"));
+      const documents = repositories.documents;
+      const record = {
+        id: "document-1",
+        caseId: "case-1",
+        name: "source.csv",
+        mimeType: "text/csv",
+        sizeBytes: 16,
+        state: "ready" as const,
+        uploadedAt: timestamp,
+        processedAt: timestamp,
+        objectKey: "opaque-object-key",
+        contentHash: "sha256-value",
+      };
+
+      await documents.insert(record, ownerScope);
+      expect(await documents.findOwned("document-1", ownerScope)).toEqual(
+        record,
+      );
+      expect(await documents.listOwned(ownerScope)).toEqual([
+        {
+          id: "document-1",
+          caseId: "case-1",
+          name: "source.csv",
+          mimeType: "text/csv",
+          sizeBytes: 16,
+          state: "ready",
+          uploadedAt: timestamp,
+          processedAt: timestamp,
+        },
+      ]);
+      expect(
+        await documents.findOwned("document-1", {
+          ownerId: "owner-2",
+          caseId: "case-2",
+        }),
+      ).toBeNull();
+    });
+
+    it("enforces case ownership for runs, tasks, findings and usage", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.cases.insert(makeCase("case-2", "owner-2"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-2", "case-2", "owner-2"));
+
+      await expect(
+        repositories.tasks.insert(
+          {
+            id: "task-1",
+            caseId: "case-2",
+            runId: "run-2",
+            role: "analyst",
+            dependencyIds: [],
+            status: "pending",
+            attemptCount: 0,
+            lastError: null,
+            usage: usageSummary,
+          },
+          ownerScope,
+        ),
+      ).rejects.toMatchObject({ code: "case-not-owned" });
+      await repositories.usage.insert(
+        makeUsage("usage-1"),
+        "run-1",
+        ownerScope,
+      );
+      expect(
+        await repositories.usage.listForRun("run-1", ownerScope),
+      ).toHaveLength(1);
+      expect(
+        await repositories.usage.listForRun("run-2", ownerScope),
+      ).toHaveLength(0);
+    });
+
+    it("invalidates approval after a deliverable version changes", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const deliverable = makeDeliverable("deliverable-1", 1);
+      await repositories.deliverables.insert(deliverable, ownerScope);
+      await repositories.approvals.insert(
+        {
+          id: "approval-1",
+          caseId: ownerScope.caseId,
+          deliverableId: deliverable.id,
+          deliverableVersion: 1,
+          actorId: "owner-1",
+          approvedAt: timestamp,
+          unresolvedQuestionIds: [],
+          note: "",
+        },
+        ownerScope,
+      );
+      expect(
+        await repositories.approvals.findForDeliverable(
+          deliverable.id,
+          ownerScope,
+        ),
+      ).not.toBeNull();
+
+      expect(
+        await repositories.deliverables.replaceOwned(
+          makeDeliverable(deliverable.id, 2),
+          ownerScope,
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.approvals.findForDeliverable(
+          deliverable.id,
+          ownerScope,
+        ),
+      ).toBeNull();
+    });
+
+    it("rejects out-of-order events and preserves monotonic visibility", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const event = (id: string, sequence: number) => ({
+        id,
+        caseId: "case-1",
+        runId: "run-1",
+        sequence,
+        occurredAt: timestamp,
+        payload: { type: "run-started" as const, planVersion: 1 },
+      });
+
+      await repositories.events.append(event("event-2", 2), ownerScope);
+      await expect(
+        repositories.events.append(event("event-1", 1), ownerScope),
+      ).rejects.toMatchObject({ code: "event-sequence-conflict" });
+      expect(
+        await repositories.events.listAfter("case-1", 0, ownerScope),
+      ).toHaveLength(1);
+    });
+  });
+}
+
+describe("in-memory repositories", () => {
+  repositoryContract("repository contract", async () => {
+    const store = createInMemoryStore();
+    return {
+      repositories: store.repositories,
+      close: async () => undefined,
+    };
+  });
+});
+
+describe("MongoDB repositories", () => {
+  beforeAll(async () => {
+    mongoReplSet = await MongoMemoryReplSet.create({
+      replSet: { count: 1 },
+    });
+  }, 300_000);
+
+  afterAll(async () => {
+    await mongoReplSet?.stop();
+  });
+
+  repositoryContract("repository contract", async () => {
+    const harness = await createMongoHarness();
+    return {
+      repositories: harness.store.repositories as ReturnType<
+        typeof createInMemoryStore
+      >["repositories"],
+      close: async () => {
+        await harness.client.db(harness.dbName).dropDatabase();
+        await harness.store.close();
+      },
+    };
+  });
+
+  it("aborts all writes when a transaction fails", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await expect(
+        harness.store.withTransaction(async (session) => {
+          await harness.store.cases.insertOne(
+            {
+              _id: "transaction-case",
+              id: "transaction-case",
+              ...makeCase("transaction-case", "owner-1"),
+            },
+            { session },
+          );
+          throw new Error("force rollback");
+        }),
+      ).rejects.toThrow("force rollback");
+      expect(
+        await harness.store.cases.findOne({ _id: "transaction-case" }),
+      ).toBeNull();
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
+
+  it("uses fencing tokens when expired run leases are reclaimed", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("case-1", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert(
+        makeRun("run-1", "case-1", "owner-1"),
+      );
+      const lease = {
+        runId: "run-1",
+        ownerId: "owner-1",
+        leaseId: "lease-1",
+        expiresAt: "2026-01-15T00:01:00.000Z",
+        at: timestamp,
+      };
+      const first = await harness.store.acquireRunLease(lease);
+      expect(first?.fencingToken).toBe(1);
+      expect(
+        await harness.store.acquireRunLease({
+          ...lease,
+          leaseId: "lease-2",
+          at: "2026-01-15T00:00:30.000Z",
+        }),
+      ).toBeNull();
+      const reclaimed = await harness.store.acquireRunLease({
+        ...lease,
+        leaseId: "lease-2",
+        expiresAt: "2026-01-15T00:03:00.000Z",
+        at: "2026-01-15T00:02:00.000Z",
+      });
+      expect(reclaimed?.fencingToken).toBe(2);
+      expect(reclaimed?.leaseId).toBe("lease-2");
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
+});

@@ -1,11 +1,13 @@
 import type {
   Case,
   AccessKeyRecord,
+  AgentProfile,
   Approval,
   DocumentMetadataRecord,
   DocumentMetadataDto,
   Deliverable,
   ExtractedDocument,
+  Evidence,
   Finding,
   RunEvent,
   RunRecord,
@@ -21,12 +23,23 @@ export interface OwnerScope {
   caseId: string;
 }
 
+export interface AgentProfileRepository {
+  listEnabled(): Promise<AgentProfile[]>;
+  findByRole(role: string): Promise<AgentProfile | null>;
+  upsert(profile: AgentProfile): Promise<void>;
+}
+
 export interface CaseRepository {
   findOwnedById(id: string, ownerId: string): Promise<Case | null>;
   findPublicSampleById(id: string): Promise<Case | null>;
   listOwned(ownerId: string, cursor?: string): Promise<Case[]>;
   insert(record: Case): Promise<void>;
   replaceOwned(record: Case, ownerId: string): Promise<boolean>;
+}
+
+export interface EvidenceRepository {
+  listForCase(scope: OwnerScope): Promise<Evidence[]>;
+  insert(evidence: Evidence, scope: OwnerScope): Promise<void>;
 }
 
 export interface UserRepository {
@@ -54,7 +67,7 @@ export interface DocumentRepository {
     scope: OwnerScope,
   ): Promise<DocumentMetadataRecord | null>;
   listOwned(scope: OwnerScope): Promise<DocumentMetadataDto[]>;
-  insert(record: DocumentMetadataRecord): Promise<void>;
+  insert(record: DocumentMetadataRecord, scope: OwnerScope): Promise<void>;
   replaceOwned(
     record: DocumentMetadataRecord,
     scope: OwnerScope,
@@ -108,7 +121,7 @@ export interface ApprovalRepository {
 }
 
 export interface RunEventRepository {
-  append(event: RunEvent): Promise<void>;
+  append(event: RunEvent, scope: OwnerScope): Promise<void>;
   listAfter(
     caseId: string,
     afterSequence: number,
