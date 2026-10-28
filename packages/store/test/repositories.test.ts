@@ -42,41 +42,6 @@ function makeCase(
     sourceCaseId: null,
     ...overrides,
   });
-
-  it("paginates cases by instant time, not timestamp string ordering", async () => {
-    const harness = await createMongoHarness(1);
-    try {
-      await harness.store.repositories.cases.insert(
-        makeCase("B", "owner-1", {
-          createdAt: "2026-01-15T01:00:00+02:00",
-        }),
-      );
-      await harness.store.repositories.cases.insert(
-        makeCase("a", "owner-1", { createdAt: "2026-01-14T23:00:00Z" }),
-      );
-      await harness.store.repositories.cases.insert(
-        makeCase("C", "owner-1", {
-          createdAt: "2026-01-15T00:00:00-05:00",
-        }),
-      );
-
-      const pageIds: string[] = [];
-      let cursor: string | undefined;
-      for (let index = 0; index < 3; index += 1) {
-        const page = await harness.store.repositories.cases.listOwned(
-          "owner-1",
-          cursor,
-        );
-        pageIds.push(...page.map((record) => record.id));
-        cursor = page[0]?.id;
-      }
-
-      expect(pageIds).toEqual(["C", "a", "B"]);
-    } finally {
-      await harness.client.db(harness.dbName).dropDatabase();
-      await harness.store.close();
-    }
-  });
 }
 
 function makeRun(id: string, caseId: string, ownerId: string): RunRecord {
@@ -706,6 +671,41 @@ describe("MongoDB repositories", () => {
         await harness.store.close();
       },
     };
+  });
+
+  it("paginates cases by instant time, not timestamp string ordering", async () => {
+    const harness = await createMongoHarness(1);
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("B", "owner-1", {
+          createdAt: "2026-01-15T01:00:00+02:00",
+        }),
+      );
+      await harness.store.repositories.cases.insert(
+        makeCase("a", "owner-1", { createdAt: "2026-01-14T23:00:00Z" }),
+      );
+      await harness.store.repositories.cases.insert(
+        makeCase("C", "owner-1", {
+          createdAt: "2026-01-15T00:00:00-05:00",
+        }),
+      );
+
+      const pageIds: string[] = [];
+      let cursor: string | undefined;
+      for (let index = 0; index < 3; index += 1) {
+        const page = await harness.store.repositories.cases.listOwned(
+          "owner-1",
+          cursor,
+        );
+        pageIds.push(...page.map((record) => record.id));
+        cursor = page[0]?.id;
+      }
+
+      expect(pageIds).toEqual(["C", "a", "B"]);
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
   });
 
   it("aborts all writes when a transaction fails", async () => {

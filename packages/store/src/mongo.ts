@@ -755,31 +755,35 @@ export class MongoStore {
       .map(encodeURIComponent)
       .join(":");
     const counterId = JSON.stringify([scope.caseId, parsed.documentId]);
-    const counter = await this.extractionCounters.findOneAndUpdate(
-      { _id: counterId },
-      {
-        $inc: { revision: 1 },
-        $setOnInsert: { id: counterId },
-      },
-      { upsert: true, returnDocument: "after" },
-    );
-    if (!counter) {
-      throw new StoreError(
-        "Could not assign extraction revision",
-        "extraction-revision-failed",
+    // The counter update and replacement share one transaction so a delayed
+    // save cannot overwrite a newer revision with an older one.
+    await this.withTransaction(async (session) => {
+      const counter = await this.extractionCounters.findOneAndUpdate(
+        { _id: counterId },
+        {
+          $inc: { revision: 1 },
+          $setOnInsert: { id: counterId },
+        },
+        { upsert: true, returnDocument: "after", session },
       );
-    }
-    await this.extractions.replaceOne(
-      { _id: cacheId },
-      {
-        ...documentFor({ ...parsed, id: cacheId }),
-        documentId: parsed.documentId,
-        caseId: scope.caseId,
-        cachedAt: new Date().toISOString(),
-        revision: counter.revision,
-      },
-      { upsert: true },
-    );
+      if (!counter) {
+        throw new StoreError(
+          "Could not assign extraction revision",
+          "extraction-revision-failed",
+        );
+      }
+      await this.extractions.replaceOne(
+        { _id: cacheId },
+        {
+          ...documentFor({ ...parsed, id: cacheId }),
+          documentId: parsed.documentId,
+          caseId: scope.caseId,
+          cachedAt: new Date().toISOString(),
+          revision: counter.revision,
+        },
+        { upsert: true, session },
+      );
+    });
   }
 
   async evidenceListForCase(scope: OwnerScope): Promise<Evidence[]> {
