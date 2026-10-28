@@ -141,10 +141,31 @@ export interface StoredObject {
   contentHash: string;
 }
 
+export interface BoundedStream {
+  body: AsyncIterable<Uint8Array>;
+  contentLength: number;
+  contentHash: string;
+}
+
 export interface DocumentStore {
-  put(objectKey: string, object: StoredObject): Promise<void>;
-  get(objectKey: string): Promise<StoredObject | null>;
-  delete(objectKey: string): Promise<void>;
+  uploadAsync(
+    caseId: string,
+    mimeType: string,
+    boundedStream: BoundedStream,
+  ): Promise<string>;
+  readBufferAsync(
+    objectKey: string,
+    maxBytes: number,
+  ): Promise<Uint8Array | null>;
+  readStreamAsync(objectKey: string): Promise<StoredObject | null>;
+  deleteAsync(objectKey: string): Promise<void>;
+}
+
+export interface SignedDocumentStore extends DocumentStore {
+  getSignedUrlAsync(
+    objectKey: string,
+    expiresInSeconds: number,
+  ): Promise<string>;
 }
 
 export interface UsageReservationRequest {

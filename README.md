@@ -26,15 +26,15 @@ cloud services or model providers.
 
 ## Workspace responsibilities
 
-| Path              | Current boundary and planned ownership                           |
-| ----------------- | ---------------------------------------------------------------- |
-| `packages/core`   | Shared domain schemas, ports and synthetic workflow fixtures     |
-| `packages/env`    | Server-side environment validation                               |
-| `packages/store`  | MongoDB repositories and matching in-memory repository contracts |
-| `packages/ai`     | Provider boundary; adapters come later                           |
-| `packages/agents` | Agent boundary; orchestration comes later                        |
-| `apps/api`        | API application boundary; HTTP features come later               |
-| `apps/web`        | Web application boundary; UI features come in the web work pack  |
+| Path              | Current boundary and planned ownership                          |
+| ----------------- | --------------------------------------------------------------- |
+| `packages/core`   | Shared domain schemas, ports and synthetic workflow fixtures    |
+| `packages/env`    | Server-side environment and storage configuration validation    |
+| `packages/store`  | MongoDB repositories and private document storage adapters      |
+| `packages/ai`     | Provider boundary; adapters come later                          |
+| `packages/agents` | Agent boundary; orchestration comes later                       |
+| `apps/api`        | API application boundary; HTTP features come later              |
+| `apps/web`        | Web application boundary; UI features come in the web work pack |
 
 Keep shared types in `core`, environment reads in `env`, persistence in
 `store`, and provider access in `ai`. Use `workspace:*` for internal
@@ -46,7 +46,10 @@ do not add placeholder product behavior to a package boundary.
 
 `.env.example` contains only non-secret local defaults. Copy it to `.env` when
 local configuration is needed; `.env` files (except the example) and generated
-build/test output are ignored by Git. Add settings to the example alongside
-the work package that introduces them. Secrets must be read through the
-server-only `@evianta/env/server` entry point and must never be exposed to the
-web client.
+build/test output are ignored by Git. Local document bytes are stored under
+`.data/documents`; production must use a private S3 bucket configured with
+`AWS_REGION`, `S3_BUCKET`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+S3 download URLs are short-lived and capped at one hour. Add settings to the
+example alongside the work package that introduces them. Secrets must be read
+through the server-only `@evianta/env/server` entry point and must never be
+exposed to the web client.
