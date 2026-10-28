@@ -43,6 +43,7 @@ export function CommandPalette() {
       <button
         type="button"
         className="command-trigger"
+        aria-label="Search workspace"
         onClick={() => setOpen(true)}
       >
         <Search size={16} aria-hidden="true" />

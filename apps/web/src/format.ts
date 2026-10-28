@@ -6,6 +6,7 @@ export const inrFormatter = new Intl.NumberFormat("en-IN", {
 
 export const dateFormatter = new Intl.DateTimeFormat("en-IN", {
   dateStyle: "medium",
+  timeZone: "Asia/Kolkata",
 });
 
 export function formatInr(value: number): string {

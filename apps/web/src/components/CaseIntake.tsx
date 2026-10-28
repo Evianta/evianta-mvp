@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  useEffect,
+  useRef,
   useMemo,
   useState,
   type ChangeEvent,
@@ -73,7 +75,25 @@ export function CaseIntake({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [createdCaseId, setCreatedCaseId] = useState<string | null>(null);
+  const sessionTokenRef = useRef<string | null>(session?.accessToken ?? null);
   const spec = workflowSpecs[useCase];
+  const resetForm = () => {
+    setUseCase(sourceSample?.case.useCase ?? "msme-payment");
+    setTitle(sourceSample ? `${sourceSample.case.title} (copy)` : "");
+    setDescription(sourceSample?.case.description ?? "");
+    setFiles([]);
+    setExtractionMethod("mixed");
+    setError(null);
+    setPending(false);
+    setCreatedCaseId(null);
+  };
+
+  useEffect(() => {
+    sessionTokenRef.current = session?.accessToken ?? null;
+    if (!session) {
+      resetForm();
+    }
+  }, [session]);
   const openQuestions = useMemo(
     () =>
       deriveIntakeOpenQuestions(
@@ -135,6 +155,12 @@ export function CaseIntake({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const sessionToken = session?.accessToken;
+    if (!sessionToken) {
+      setError("Your session expired. Sign in again.");
+      return;
+    }
+    sessionTokenRef.current = sessionToken;
     setError(null);
     setCreatedCaseId(null);
     const invalidFile = files.find(({ file }) =>
@@ -147,6 +173,9 @@ export function CaseIntake({
     setPending(true);
     let createdId: string | null = null;
     try {
+      if (sessionTokenRef.current !== sessionToken) {
+        throw new Error("Your session ended before the case finished uploading.");
+      }
       const created = await api.createCase({
         title: title.trim(),
         description: description.trim(),
@@ -156,6 +185,9 @@ export function CaseIntake({
       createdId = created.id;
       setCreatedCaseId(created.id);
       for (const { file } of files) {
+        if (sessionTokenRef.current !== sessionToken) {
+          throw new Error("Your session ended before the case finished uploading.");
+        }
         setFiles((current) =>
           current.map((item) =>
             item.file === file ? { ...item, state: "uploading" } : item,
@@ -163,6 +195,9 @@ export function CaseIntake({
         );
         let document: DocumentMetadataDto;
         try {
+          if (sessionTokenRef.current !== sessionToken) {
+            throw new Error("Your session ended before the case finished uploading.");
+          }
           document = await api.uploadDocument(
             created.id,
             file,
@@ -181,6 +216,9 @@ export function CaseIntake({
             item.file === file ? { ...item, state: document.state } : item,
           ),
         );
+      }
+      if (sessionTokenRef.current !== sessionToken) {
+        throw new Error("Your session ended before the case finished uploading.");
       }
       router.push(`/cases/${created.id}`);
     } catch (reason) {

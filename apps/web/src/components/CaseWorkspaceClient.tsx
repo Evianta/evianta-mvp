@@ -114,7 +114,7 @@ export function CaseWorkspaceClient({ caseId }: { caseId: string }) {
   }, [api, caseId, session]);
 
   useEffect(() => {
-    if (!run || run.status !== "running" || !session) return;
+    if (!run || !(run.status === "running" || run.status === "queued") || !session) return;
     const controller = new AbortController();
     void api
       .streamRunEvents(run.id, {
@@ -131,6 +131,12 @@ export function CaseWorkspaceClient({ caseId }: { caseId: string }) {
           setRun((current) => {
             if (!current) return current;
             switch (event.payload.type) {
+              case "run-started":
+                return {
+                  ...current,
+                  status: "running",
+                  updatedAt: event.occurredAt,
+                };
               case "run-completed":
                 return {
                   ...current,
@@ -283,7 +289,7 @@ export function CaseWorkspaceClient({ caseId }: { caseId: string }) {
 
   if (!record) return null;
 
-  const activeRun = run?.status === "running";
+  const activeRun = run ? ["running", "queued"].includes(run.status) : false;
   const canRetry =
     run && terminalStatuses.has(run.status) && run.status !== "completed";
 

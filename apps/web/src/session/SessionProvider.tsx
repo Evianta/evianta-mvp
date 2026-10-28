@@ -65,16 +65,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       },
       async signOut() {
         const token = controller.getToken();
+        api.clearPrivateState();
+        controller.clear();
         if (!token) {
-          api.clearPrivateState();
           return;
         }
-        try {
-          await api.revokeSession(token);
-        } finally {
-          api.clearPrivateState();
-          controller.clear();
-        }
+        await api.revokeSession(token);
       },
     }),
     [api, controller, session],

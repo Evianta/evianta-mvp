@@ -152,6 +152,12 @@ export async function streamRunEvents(
         options.onEvent(runEvent);
         if (isTerminal(runEvent)) return;
       }
+      if (attempt === maxReconnects) {
+        throw new ApiError(
+          503,
+          "The run event stream disconnected before a terminal event arrived.",
+        );
+      }
     } catch (error) {
       if (options.signal.aborted) return;
       if (error instanceof ApiError && error.status === 401) throw error;

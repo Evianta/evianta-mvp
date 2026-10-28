@@ -25,7 +25,7 @@ export function CasesClient() {
   const { session, api } = useSession();
   const [cases, setCases] = useState<Case[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<unknown>(null);
+  const [error, setError] = useState<Error | null>(null);
   const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
@@ -47,8 +47,8 @@ export function CasesClient() {
         if (active) {
           setError(
             reason instanceof Error
-              ? reason.message
-              : "Cases could not be loaded.",
+              ? reason
+              : new Error("Cases could not be loaded."),
           );
         }
       })
@@ -113,9 +113,7 @@ export function CasesClient() {
               The case register could not be loaded.
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {error instanceof Error
-                ? error.message
-                : "Cases could not be loaded."}
+              {error.message}
             </p>
             <Button
               className="mt-4"

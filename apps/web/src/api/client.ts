@@ -1,14 +1,14 @@
 import {
   CaseResponseSchema,
   CreateCaseRequestSchema,
-  DocumentMetadataDtoSchema,
+  DocumentResponseSchema,
   type ExtractionMethod,
   ListCasesResponseSchema,
   RunResponseSchema,
   type Case,
   type CaseResponse,
   type CreateCaseRequest,
-  type DocumentMetadataDto,
+  type DocumentResponse,
   type ListCasesResponse,
   type RunResponse,
   type RunDto,
@@ -60,7 +60,7 @@ export interface WebApiClient {
     caseId: string,
     file: File,
     extractionMethod: ExtractionMethod,
-  ): Promise<DocumentMetadataDto>;
+  ): Promise<DocumentResponse["document"]>;
   startRun(caseId: string, input?: Record<string, unknown>): Promise<RunDto>;
   retryRun(runId: string): Promise<RunDto>;
   cancelRun(runId: string): Promise<RunDto>;
@@ -95,11 +95,20 @@ export class FetchWebApiClient implements WebApiClient {
   }
 
   async listCases(): Promise<Case[]> {
-    const response = await this.request<ListCasesResponse>(
-      "/cases",
-      ListCasesResponseSchema,
-    );
-    return response.cases;
+    const collected: Case[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      const params = new URLSearchParams();
+      if (cursor) params.set("cursor", cursor);
+      const response = await this.request<ListCasesResponse>(
+        params.size > 0 ? `/cases?${params.toString()}` : "/cases",
+        ListCasesResponseSchema,
+      );
+      collected.push(...response.cases);
+      if (!response.nextCursor) break;
+      cursor = response.nextCursor;
+    }
+    return collected;
   }
 
   async getCase(caseId: string): Promise<Case> {
@@ -124,16 +133,16 @@ export class FetchWebApiClient implements WebApiClient {
     caseId: string,
     file: File,
     extractionMethod: ExtractionMethod,
-  ): Promise<DocumentMetadataDto> {
+  ): Promise<DocumentResponse["document"]> {
     const formData = new FormData();
     formData.set("file", file);
     formData.set("extractionMethod", extractionMethod);
-    const response = await this.request<DocumentMetadataDto>(
+    const response = await this.request<DocumentResponse>(
       `/cases/${encodeURIComponent(caseId)}/documents`,
-      DocumentMetadataDtoSchema,
+      DocumentResponseSchema,
       { method: "POST", body: formData },
     );
-    return response;
+    return response.document;
   }
 
   async startRun(
@@ -300,13 +309,24 @@ export class FetchWebApiClient implements WebApiClient {
     if (detail) {
       try {
         const body: unknown = JSON.parse(detail);
-        if (
+        const errorMessage =
           typeof body === "object" &&
           body !== null &&
-          "message" in body &&
-          typeof body.message === "string"
-        ) {
-          message = body.message.slice(0, 500);
+          "error" in body &&
+          typeof body.error === "object" &&
+          body.error !== null &&
+          "message" in body.error &&
+          typeof body.error.message === "string"
+            ? body.error.message
+            : typeof body === "object" &&
+                body !== null &&
+                "message" in body &&
+                typeof body.message === "string"
+              ? body.message
+              : undefined;
+
+        if (errorMessage) {
+          message = errorMessage.slice(0, 500);
         } else {
           message = detail.slice(0, 500);
         }
