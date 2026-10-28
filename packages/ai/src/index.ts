@@ -158,13 +158,13 @@ export class ProviderRequestError extends AiError {
 }
 
 export class ProviderRefusalError extends AiError {
-  constructor() {
+  constructor(readonly units?: UsageUnits) {
     super("The model refused the request", "provider-refusal");
   }
 }
 
 export class ProviderTruncationError extends AiError {
-  constructor() {
+  constructor(readonly units?: UsageUnits) {
     super("The model response was truncated", "provider-truncated");
   }
 }
@@ -349,18 +349,19 @@ export function createAi(options: AiClientOptions): AiClient {
     if (request.webSearch && !model.capabilities.includes("web-search")) {
       throw new UnsupportedCapabilityError("web-search");
     }
+    if (request.webSearch && request.images?.length) {
+      throw new AiError(
+        "Web search cannot be combined with image inputs",
+        "unsupported-request-combination",
+      );
+    }
     validateImages(request.images);
 
-    const timeout = combineSignals(
-      request.signal,
-      request.timeoutMs ?? defaultTimeout,
-    );
     const requestedOutputTokens =
       request.maxOutputTokens ??
       options.maxOutputTokens ??
       model.maxOutputTokens;
     if (!Number.isInteger(requestedOutputTokens) || requestedOutputTokens < 1) {
-      timeout.clear();
       throw new Error("maxOutputTokens must be a positive integer");
     }
     const maxOutputTokens = Math.min(
@@ -371,6 +372,10 @@ export function createAi(options: AiClientOptions): AiClient {
       string,
       unknown
     >;
+    const timeout = combineSignals(
+      request.signal,
+      request.timeoutMs ?? defaultTimeout,
+    );
     const structuredInput = input;
     let correction: string | undefined;
     let correctionUsed = false;
@@ -408,10 +413,17 @@ export function createAi(options: AiClientOptions): AiClient {
             provider: model.provider,
             model: model.model,
             outcome:
-              error instanceof ProviderRequestError && error.statusCode === 429
+              (error instanceof ProviderRequestError &&
+                error.statusCode === 429) ||
+              error instanceof ProviderRefusalError ||
+              error instanceof ProviderTruncationError
                 ? "failed"
                 : "unknown",
-            units: unknownUsage(),
+            units:
+              error instanceof ProviderRefusalError ||
+              error instanceof ProviderTruncationError
+                ? (error.units ?? unknownUsage())
+                : unknownUsage(),
             errorCode:
               error instanceof AiError ? error.code : "provider-unknown",
           });
@@ -589,8 +601,9 @@ function normalizeUsage(usage: ApiUsage | undefined): UsageUnits {
 }
 
 function responseText(body: Record<string, unknown>): string {
-  if (body.status === "refused") throw new ProviderRefusalError();
-  if (body.status === "incomplete") throw new ProviderTruncationError();
+  const units = normalizeUsage(body.usage as ApiUsage | undefined);
+  if (body.status === "refused") throw new ProviderRefusalError(units);
+  if (body.status === "incomplete") throw new ProviderTruncationError(units);
   if (typeof body.output_text === "string") return body.output_text;
   const choices = body.choices;
   if (Array.isArray(choices)) {
@@ -600,8 +613,10 @@ function responseText(body: Record<string, unknown>): string {
           message?: { content?: string; refusal?: string };
         }
       | undefined;
-    if (choice?.message?.refusal) throw new ProviderRefusalError();
-    if (choice?.finish_reason === "length") throw new ProviderTruncationError();
+    if (choice?.message?.refusal) throw new ProviderRefusalError(units);
+    if (choice?.finish_reason === "length") {
+      throw new ProviderTruncationError(units);
+    }
     if (typeof choice?.message?.content === "string") {
       return choice.message.content;
     }
@@ -620,7 +635,7 @@ function responseText(body: Record<string, unknown>): string {
           ((block as { type?: unknown }).type === "refusal" ||
             typeof (block as { refusal?: unknown }).refusal === "string")
         ) {
-          throw new ProviderRefusalError();
+          throw new ProviderRefusalError(units);
         }
         if (
           block &&
@@ -721,14 +736,27 @@ export class MuseProvider implements ModelProvider {
     ) {
       throw new UnsupportedCapabilityError("web-search");
     }
-    if (
-      request.webSearch &&
-      (typeof request.input !== "string" || request.input.trim().length > 500)
-    ) {
+    if (request.webSearch && request.images?.length) {
       throw new AiError(
-        "Web-search input must be an explicit query of at most 500 characters",
-        "invalid-web-search-query",
+        "Web search cannot be combined with image inputs",
+        "unsupported-request-combination",
       );
+    }
+    let webSearchQuery: string | undefined;
+    if (request.webSearch) {
+      if (typeof request.input !== "string") {
+        throw new AiError(
+          "Web-search input must be an explicit query of at most 500 characters",
+          "invalid-web-search-query",
+        );
+      }
+      webSearchQuery = request.input.trim();
+      if (webSearchQuery.length > 500) {
+        throw new AiError(
+          "Web-search input must be an explicit query of at most 500 characters",
+          "invalid-web-search-query",
+        );
+      }
     }
 
     const isGrounded = request.webSearch;
@@ -758,7 +786,7 @@ export class MuseProvider implements ModelProvider {
           input: [
             {
               role: "user",
-              content: request.webSearch ? request.input : userContent,
+              content: webSearchQuery,
             },
           ],
           max_output_tokens: request.maxOutputTokens,
@@ -829,10 +857,11 @@ export class MuseProvider implements ModelProvider {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let completed = false;
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) throw new ProviderTruncationError();
         buffer += decoder.decode(value, { stream: true });
         const frames = buffer.split(/\r?\n\r?\n/);
         buffer = frames.pop() ?? "";
@@ -842,14 +871,23 @@ export class MuseProvider implements ModelProvider {
             .find((entry) => entry.startsWith("data:"));
           if (!line) continue;
           const data = line.slice(5).trim();
-          if (data === "[DONE]") return;
+          if (data === "[DONE]") {
+            completed = true;
+            return;
+          }
           const event = JSON.parse(data) as {
             choices?: {
-              delta?: { content?: string };
+              delta?: { content?: string; refusal?: string };
               finish_reason?: string;
             }[];
           };
           const choice = event.choices?.[0];
+          if (
+            typeof choice?.delta?.refusal === "string" &&
+            choice.delta.refusal.length > 0
+          ) {
+            throw new ProviderRefusalError();
+          }
           if (choice?.finish_reason === "length") {
             throw new ProviderTruncationError();
           }
@@ -859,7 +897,11 @@ export class MuseProvider implements ModelProvider {
         }
       }
     } finally {
-      reader.releaseLock();
+      try {
+        if (!completed) await reader.cancel();
+      } finally {
+        reader.releaseLock();
+      }
     }
   }
 

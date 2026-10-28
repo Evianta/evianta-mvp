@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { UseCaseSchema } from "../../core/src/domain.js";
 import {
   AdmissionRejectedError,
@@ -149,6 +150,30 @@ describe("@evianta/ai", () => {
     expect(accounting.record).not.toHaveBeenCalled();
   });
 
+  it("does not attach a timeout listener when output schema conversion fails", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    const client = createAi({ provider, accounting, models });
+    const signal = new AbortController().signal;
+    const addEventListener = vi.spyOn(signal, "addEventListener");
+
+    await expect(
+      client.runStructured({
+        tier: "cheap",
+        inputSchema: UseCaseSchema,
+        outputSchema: z.string().transform((value) => value),
+        system: "Return JSON",
+        input: "data-analysis",
+        usageContext: { userId: "user-1" },
+        signal,
+      }),
+    ).rejects.toThrow();
+
+    expect(addEventListener).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it("accounts for streamed calls as unknown until provider usage is available", async () => {
     const accounting = createAccounting();
     const client = createAi({
@@ -172,6 +197,92 @@ describe("@evianta/ai", () => {
     expect(accounting.record).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: "unknown" }),
     );
+  });
+
+  it("rejects a streamed response that ends before the completion marker", async () => {
+    const provider = new MuseProvider({
+      apiKey: "test-key",
+      fetchImplementation: async () =>
+        new Response('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'),
+    });
+    const model = modelForTier("cheap", { ...models, provider: "muse" });
+    const chunks: string[] = [];
+    const consume = async () => {
+      for await (const _chunk of provider.streamText({
+        model,
+        system: "Respond",
+        input: "hello",
+        maxOutputTokens: 50,
+        signal: new AbortController().signal,
+      })) {
+        chunks.push(_chunk);
+      }
+    };
+
+    await expect(consume()).rejects.toMatchObject({
+      code: "provider-truncated",
+    });
+    expect(chunks).toEqual(["partial"]);
+  });
+
+  it("raises provider refusals received in a stream", async () => {
+    const provider = new MuseProvider({
+      apiKey: "test-key",
+      fetchImplementation: async () =>
+        new Response(
+          'data: {"choices":[{"delta":{"refusal":"I cannot help"}}]}\n\n',
+        ),
+    });
+    const model = modelForTier("cheap", { ...models, provider: "muse" });
+    const chunks: string[] = [];
+    const consume = async () => {
+      for await (const chunk of provider.streamText({
+        model,
+        system: "Respond",
+        input: "hello",
+        maxOutputTokens: 50,
+        signal: new AbortController().signal,
+      })) {
+        chunks.push(chunk);
+      }
+    };
+
+    await expect(consume()).rejects.toMatchObject({
+      code: "provider-refusal",
+    });
+    expect(chunks).toEqual([]);
+  });
+
+  it("cancels the provider response when a stream consumer stops early", async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            'data: {"choices":[{"delta":{"content":"first"}}]}\n\n',
+          ),
+        );
+      },
+      cancel,
+    });
+    const provider = new MuseProvider({
+      apiKey: "test-key",
+      fetchImplementation: async () => new Response(body),
+    });
+    const model = modelForTier("cheap", { ...models, provider: "muse" });
+
+    for await (const chunk of provider.streamText({
+      model,
+      system: "Respond",
+      input: "hello",
+      maxOutputTokens: 50,
+      signal: new AbortController().signal,
+    })) {
+      expect(chunk).toBe("first");
+      break;
+    }
+
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it("uses the configured Muse endpoint and normalizes response usage", async () => {
@@ -271,7 +382,7 @@ describe("@evianta/ai", () => {
     const result = await provider.generateStructured({
       model,
       system: "Research the query",
-      input: "GST input tax credit rule",
+      input: "   GST input tax credit rule   ",
       schema: { type: "string" },
       maxOutputTokens: 50,
       signal: new AbortController().signal,
@@ -316,6 +427,114 @@ describe("@evianta/ai", () => {
         webSearch: true,
       }),
     ).rejects.toMatchObject({ code: "invalid-web-search-query" });
+    await expect(
+      provider.generateStructured({
+        model,
+        system: "Research",
+        input: "x".repeat(501),
+        schema: { type: "string" },
+        maxOutputTokens: 50,
+        signal: new AbortController().signal,
+        webSearch: true,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-web-search-query" });
     expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
+  it("rejects image inputs combined with web search before dispatch", async () => {
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    const client = createAi({
+      provider,
+      accounting: createAccounting(),
+      models,
+    });
+
+    await expect(
+      client.runStructured({
+        tier: "cheap",
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+        system: "Research this image",
+        input: "data-analysis",
+        usageContext: { userId: "user-1" },
+        images: [{ mimeType: "image/png", bytes: new Uint8Array([1]) }],
+        webSearch: true,
+      }),
+    ).rejects.toMatchObject({ code: "unsupported-request-combination" });
+
+    expect(dispatch).not.toHaveBeenCalled();
+
+    const fetchImplementation: typeof fetch = vi.fn();
+    const museProvider = new MuseProvider({
+      apiKey: "test-key",
+      fetchImplementation,
+    });
+    const museModel = modelForTier("cheap", {
+      provider: "muse",
+      sparkModel: "spark",
+      wonderModel: "wonder",
+      capabilitiesByTier: {
+        cheap: ["structured-json", "vision", "web-search"],
+      },
+    });
+
+    await expect(
+      museProvider.generateStructured({
+        model: museModel,
+        system: "Research this image",
+        input: "What is in this picture?",
+        schema: { type: "string" },
+        maxOutputTokens: 50,
+        signal: new AbortController().signal,
+        images: [{ mimeType: "image/png", bytes: new Uint8Array([1]) }],
+        webSearch: true,
+      }),
+    ).rejects.toMatchObject({ code: "unsupported-request-combination" });
+
+    expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
+  it("records known usage for provider refusals and truncations", async () => {
+    for (const [status, errorCode] of [
+      ["refused", "provider-refusal"],
+      ["incomplete", "provider-truncated"],
+    ] as const) {
+      const accounting = createAccounting();
+      const provider = new MuseProvider({
+        apiKey: "test-key",
+        fetchImplementation: async () =>
+          new Response(
+            JSON.stringify({
+              status,
+              usage: { input_tokens: 8, output_tokens: 2, total_tokens: 10 },
+            }),
+            { status: 200 },
+          ),
+      });
+      const client = createAi({
+        provider,
+        accounting,
+        models: { ...models, provider: "muse" },
+      });
+
+      await expect(
+        client.runStructured({
+          tier: "cheap",
+          inputSchema: UseCaseSchema,
+          outputSchema: UseCaseSchema,
+          system: "Return a workflow type",
+          input: "data-analysis",
+          usageContext: { userId: "user-1" },
+        }),
+      ).rejects.toMatchObject({ code: errorCode });
+
+      expect(accounting.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outcome: "failed",
+          units: expect.objectContaining({ input: 8, output: 2, total: 10 }),
+        }),
+      );
+    }
   });
 });
