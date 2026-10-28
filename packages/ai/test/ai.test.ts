@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { UseCaseSchema } from "@evianta/core";
+import { UseCaseSchema } from "../../core/src/domain.js";
 import {
   AdmissionRejectedError,
   createAi,
