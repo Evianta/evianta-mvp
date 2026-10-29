@@ -42,6 +42,7 @@ import { StatusBadge } from "./Badges";
 interface SelectedDocument {
   file: File;
   state: "selected" | "uploading" | DocumentState;
+  uploadFailed: boolean;
 }
 
 const documentStateLabels: Record<SelectedDocument["state"], string> = {
@@ -131,9 +132,11 @@ function SessionCaseIntake({
     setError(null);
     setFiles((current) => [
       ...current,
-      ...selected.map(
-        (file): SelectedDocument => ({ file, state: "selected" }),
-      ),
+      ...selected.map((file): SelectedDocument => ({
+        file,
+        state: "selected",
+        uploadFailed: false,
+      })),
     ]);
     event.target.value = "";
   }
@@ -149,16 +152,17 @@ function SessionCaseIntake({
     setError(null);
     setFiles((current) => [
       ...current,
-      ...selected.map(
-        (file): SelectedDocument => ({ file, state: "selected" }),
-      ),
+      ...selected.map((file): SelectedDocument => ({
+        file,
+        state: "selected",
+        uploadFailed: false,
+      })),
     ]);
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    setCreatedCaseId(null);
     const invalidFile = files.find(({ file }) =>
       validateUploadFile(file, spec),
     );
@@ -167,18 +171,24 @@ function SessionCaseIntake({
       return;
     }
     setPending(true);
-    let createdId: string | null = null;
+    let createdId = createdCaseId;
     try {
-      const created = await api.createCase({
-        title: title.trim(),
-        description: description.trim(),
-        useCase,
-        sourceCaseId: sourceSample?.case.id ?? null,
-      });
-      if (!active.current) return;
-      createdId = created.id;
-      setCreatedCaseId(created.id);
-      for (const { file } of files) {
+      if (!createdId) {
+        const created = await api.createCase({
+          title: title.trim(),
+          description: description.trim(),
+          useCase,
+          sourceCaseId: sourceSample?.case.id ?? null,
+        });
+        if (!active.current) return;
+        createdId = created.id;
+        setCreatedCaseId(created.id);
+      }
+      if (!createdId) {
+        throw new Error("The case could not be created.");
+      }
+      for (const { file, state, uploadFailed } of files) {
+        if (state !== "selected" && !uploadFailed) continue;
         setFiles((current) =>
           current.map((item) =>
             item.file === file ? { ...item, state: "uploading" } : item,
@@ -187,7 +197,7 @@ function SessionCaseIntake({
         let document: DocumentMetadataDto;
         try {
           document = await api.uploadDocument(
-            created.id,
+            createdId,
             file,
             extractionMethod,
           );
@@ -196,18 +206,22 @@ function SessionCaseIntake({
           if (!active.current) return;
           setFiles((current) =>
             current.map((item) =>
-              item.file === file ? { ...item, state: "failed" } : item,
+              item.file === file
+                ? { ...item, state: "failed", uploadFailed: true }
+                : item,
             ),
           );
           throw reason;
         }
         setFiles((current) =>
           current.map((item) =>
-            item.file === file ? { ...item, state: document.state } : item,
+            item.file === file
+              ? { ...item, state: document.state, uploadFailed: false }
+              : item,
           ),
         );
       }
-      router.push(`/cases/${created.id}`);
+      router.push(`/cases/${createdId}`);
     } catch (reason) {
       if (!active.current) return;
       const detail =
@@ -281,6 +295,7 @@ function SessionCaseIntake({
               id="case-title"
               maxLength={200}
               value={title}
+              disabled={Boolean(createdCaseId)}
               onChange={(event) => setTitle(event.target.value)}
               placeholder="For example, Q4 vendor payment review"
               required
@@ -297,6 +312,7 @@ function SessionCaseIntake({
               className="select-input"
               id="workflow"
               value={useCase}
+              disabled={Boolean(createdCaseId)}
               onChange={(event) => {
                 const parsed = UseCaseSchema.safeParse(event.target.value);
                 if (parsed.success) setUseCase(parsed.data);
@@ -346,6 +362,7 @@ function SessionCaseIntake({
               id="case-description"
               maxLength={5000}
               value={description}
+              disabled={Boolean(createdCaseId)}
               onChange={(event) => setDescription(event.target.value)}
               placeholder="Add the question, period, parties, or other relevant context."
             />
@@ -513,11 +530,18 @@ function SessionCaseIntake({
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-[11px] text-muted-foreground">
-            Uploads go to private storage. No analysis starts until you choose
-            to run it.
+            {createdCaseId
+              ? "The case already exists. Retrying sends only documents that have not uploaded successfully."
+              : "Uploads go to private storage. No analysis starts until you choose to run it."}
           </p>
           <Button type="submit" disabled={pending || !title.trim()}>
-            {pending ? "Creating case..." : "Create private case"}
+            {pending
+              ? createdCaseId
+                ? "Uploading documents..."
+                : "Creating case..."
+              : createdCaseId
+                ? "Retry remaining uploads"
+                : "Create private case"}
             {!pending && <Plus size={15} aria-hidden="true" />}
           </Button>
         </div>

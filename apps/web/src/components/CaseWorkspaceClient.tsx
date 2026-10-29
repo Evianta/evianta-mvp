@@ -68,6 +68,18 @@ function formatUsd(value: number): string {
 }
 
 export function CaseWorkspaceClient({ caseId }: { caseId: string }) {
+  const { session } = useSession();
+  if (!session) return <PrivateGate />;
+
+  return (
+    <SessionCaseWorkspace
+      key={`${caseId}:${session.accessToken}`}
+      caseId={caseId}
+    />
+  );
+}
+
+function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   const [timelineRef] = useAutoAnimate<HTMLOListElement>();
   const { session, api } = useSession();
   const [record, setRecord] = useState<Case | null>(null);
@@ -254,9 +266,10 @@ export function CaseWorkspaceClient({ caseId }: { caseId: string }) {
     setError(null);
     setPendingAction(true);
     try {
+      const retried = await api.retryRun(run.id);
       setEvents([]);
       lastSequence.current = 0;
-      setRun(await api.retryRun(run.id));
+      setRun(retried);
     } catch (reason) {
       setError(
         reason instanceof Error

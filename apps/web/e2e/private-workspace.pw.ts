@@ -77,6 +77,12 @@ for (const phase of ["create", "upload"] as const) {
       });
 
       await page.goto("/cases/new");
+      await expect(
+        page.getByRole("link", { name: "New case" }),
+      ).toHaveAttribute("aria-current", "page");
+      await expect(
+        page.getByRole("link", { name: "Your cases" }),
+      ).not.toHaveAttribute("aria-current", "page");
       await signIn(page);
       await page
         .getByLabel("Case title", { exact: true })
@@ -149,6 +155,63 @@ for (const phase of ["create", "upload"] as const) {
   }
 }
 
+test("resumes failed uploads in the existing case", async ({ page }) => {
+  await mockAuth(page);
+  let createCount = 0;
+  let uploadCount = 0;
+  await page.route("**/cases", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    createCount += 1;
+    await route.fulfill({ json: { case: record } });
+  });
+  await page.route("**/cases/private-case/documents", async (route) => {
+    uploadCount += 1;
+    if (uploadCount === 2) {
+      await route.fulfill({
+        status: 500,
+        json: { error: { message: "Temporary upload failure." } },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        document: syntheticWorkflowFixtures.dataAnalysis.documents[0],
+      },
+    });
+  });
+
+  await page.goto("/cases/new");
+  await signIn(page);
+  await page.getByLabel("Case title", { exact: true }).fill("Recovery case");
+  await page.getByLabel("Workflow", { exact: true }).selectOption("data-analysis");
+  await page.locator("#case-files").setInputFiles([
+    {
+      name: "first.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("a,b\n1,2"),
+    },
+    {
+      name: "second.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("a,b\n3,4"),
+    },
+  ]);
+  await page.getByRole("button", { name: "Create private case" }).click();
+  await expect(
+    page.getByRole("alert").filter({
+      hasText: "Case created, but an upload did not finish",
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Retry remaining uploads" }).click();
+  await expect.poll(() => uploadCount).toBe(3);
+  await expect(page).toHaveURL(/\/cases\/private-case$/);
+  expect(createCount).toBe(1);
+  expect(uploadCount).toBe(3);
+});
+
 for (const status of ["queued", "running", "failed", "none"] as const) {
   test(`restores ${status} run state when reopening a case`, async ({
     page,
@@ -219,7 +282,7 @@ for (const status of ["queued", "running", "failed", "none"] as const) {
     await page.getByRole("link", { name: record.title, exact: true }).click();
     await expect(page.getByRole("button", { name: action })).toBeVisible();
     expect(lookups).toBeGreaterThan(initialLookups);
-    if (status === "queued" || status === "running") {
+    if (status !== "none") {
       await expect(
         page.getByRole("list", { name: "Run event timeline" }),
       ).toContainText("A review task started");

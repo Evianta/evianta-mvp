@@ -59,7 +59,8 @@ export function AccessKeyDialogProvider({ children }: { children: ReactNode }) {
       <Dialog.Root
         open={open}
         onOpenChange={(nextOpen) => {
-          if (!pending) setOpen(nextOpen);
+          if (pending) return;
+          setOpen(nextOpen);
           if (!nextOpen) {
             setAccessKey("");
             setError(null);

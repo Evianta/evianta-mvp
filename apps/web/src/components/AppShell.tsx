@@ -73,7 +73,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               item.match === "home"
                 ? pathname === "/" || pathname.startsWith("/samples/")
                 : item.match === "/cases"
-                  ? pathname === "/cases" || /^\/cases\/[^/]+$/.test(pathname)
+                  ? pathname === "/cases" ||
+                    (/^\/cases\/[^/]+$/.test(pathname) &&
+                      pathname !== "/cases/new")
                   : pathname === item.match ||
                     pathname.startsWith(`${item.match}/`);
             const Icon = item.icon;

@@ -153,6 +153,35 @@ describe("FetchWebApiClient", () => {
     expect(onUnauthorized).toHaveBeenCalledOnce();
   });
 
+  it("does not invalidate a newer session after an old request returns 401", async () => {
+    let token = "old-session";
+    let resolveResponse!: (response: Response) => void;
+    const onUnauthorized = vi.fn();
+    const fetcher = vi.fn<typeof fetch>(
+      () =>
+        new Promise((resolve) => {
+          resolveResponse = resolve;
+        }),
+    );
+    const client = new FetchWebApiClient({
+      getToken: () => token,
+      onUnauthorized,
+      fetcher,
+    });
+
+    const request = client.listCases();
+    token = "new-session";
+    resolveResponse(
+      Response.json(
+        { error: { message: "The old session expired." } },
+        { status: 401 },
+      ),
+    );
+
+    await expect(request).rejects.toMatchObject({ status: 401 });
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
   it("surfaces server-side admin denial without substituting fixture data", async () => {
     const client = new FetchWebApiClient({
       getToken: () => "user-token",

@@ -221,8 +221,10 @@ export class FetchWebApiClient implements WebApiClient {
         onResync: options.onResync,
         replayOnly: options.replayOnly,
         onUnauthorized: () => {
-          this.clearPrivateState();
-          this.options.onUnauthorized();
+          if (this.options.getToken() === token) {
+            this.clearPrivateState();
+            this.options.onUnauthorized();
+          }
         },
         fetcher: this.fetcher,
       });
@@ -288,7 +290,7 @@ export class FetchWebApiClient implements WebApiClient {
       headers,
       cache: "no-store",
     });
-    if (response.status === 401) {
+    if (response.status === 401 && this.options.getToken() === token) {
       this.clearPrivateState();
       this.options.onUnauthorized();
     }
