@@ -233,7 +233,12 @@ export interface UsageLedgerFilter {
 
 export interface UsageLedgerRepository {
   list(filter?: UsageLedgerFilter): Promise<UsageLedgerEntry[]>;
-  recoverExpired(at: string): Promise<void>;
+  listForRun(
+    ownerId: string,
+    caseId: string,
+    runId: string,
+  ): Promise<UsageLedgerEntry[]>;
+  recoverExpired(at: string, limit?: number): Promise<number>;
 }
 
 export interface RunAdmissionRequest {
@@ -255,6 +260,15 @@ export interface RunAdmissionLease {
 
 export interface RunAdmissionPort {
   acquire(request: RunAdmissionRequest): Promise<RunAdmissionLease>;
+  renew(request: {
+    ownerId: string;
+    caseId: string;
+    runId: string;
+    leaseId: string;
+    fencingToken: number;
+    at: string;
+    expiresAt: string;
+  }): Promise<RunAdmissionLease | null>;
   waitForInput(request: {
     ownerId: string;
     caseId: string;

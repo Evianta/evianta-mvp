@@ -29,6 +29,9 @@ import { z } from "zod";
 import { CaseNotOwnedError, StoreError } from "./errors.js";
 
 type StoredDocument = Document & { _id: string };
+const MAX_EXPIRED_RECOVERY_BATCH = 1_000;
+const DEFAULT_EXPIRED_RECOVERY_BATCH = 100;
+const LEDGER_MIGRATION_BATCH = 500;
 
 const unknownUnits = UsageUnitsSchema.parse({
   input: null,
@@ -195,6 +198,7 @@ export class MongoUsageRepository
         { $set: updates },
       );
     }
+    await this.backfillLedgerInstants();
     await Promise.all([
       this.prices.createIndex(
         { provider: 1, model: 1, settingsKey: 1, version: 1 },
@@ -207,8 +211,23 @@ export class MongoUsageRepository
         effectiveAt: -1,
       }),
       this.ledger.createIndex({ attemptId: 1 }, { unique: true }),
-      this.ledger.createIndex({ ownerId: 1, createdAt: -1 }),
-      this.ledger.createIndex({ ownerId: 1, runId: 1, createdAt: 1 }),
+      this.ledger.createIndex({
+        ownerId: 1,
+        createdAtInstant: -1,
+        attemptId: -1,
+      }),
+      this.ledger.createIndex({
+        ownerId: 1,
+        caseId: 1,
+        runId: 1,
+        createdAtInstant: 1,
+        attemptId: 1,
+      }),
+      this.reservations.createIndex({
+        status: 1,
+        recoveryCheckedAt: 1,
+        expiresAt: 1,
+      }),
     ]);
   }
 
@@ -389,8 +408,12 @@ export class MongoUsageRepository
             ownerId: request.ownerId,
             caseId: request.caseId,
             status: "running",
+            leaseId: request.leaseId,
             fencingToken: request.fencingToken,
             cancellationRequested: false,
+            $expr: {
+              $gt: [{ $toDate: "$leaseExpiresAt" }, new Date(request.at)],
+            },
           },
           { session },
         );
@@ -410,6 +433,27 @@ export class MongoUsageRepository
         if (!run || !admission) {
           throw new StoreError(
             "Usage admission requires the run's active fenced lease",
+            "run-admission-required",
+          );
+        }
+        const fencedAdmission = await this.runAdmissions.updateOne(
+          {
+            _id: runAdmissionId(request.ownerId, request.caseId),
+            runId: request.runId,
+            state: "active",
+            leaseId: request.leaseId,
+            fencingToken: request.fencingToken,
+            leaseExpiresAt: admission.leaseExpiresAt,
+            $expr: {
+              $gt: [{ $toDate: "$leaseExpiresAt" }, new Date(request.at)],
+            },
+          },
+          { $inc: { usageReservationFence: 1 } },
+          { session },
+        );
+        if (fencedAdmission.matchedCount !== 1) {
+          throw new StoreError(
+            "The run admission changed during usage reservation",
             "run-admission-required",
           );
         }
@@ -446,6 +490,7 @@ export class MongoUsageRepository
           createdAt: request.at,
           updatedAt: request.at,
           expiresAt: request.expiresAt,
+          recoveryCheckedAt: null,
         });
         const entry = UsageLedgerEntrySchema.parse({
           id: request.attemptId,
@@ -480,7 +525,14 @@ export class MongoUsageRepository
           { ...reservation, _id: reservation.id },
           { session },
         );
-        await this.ledger.insertOne({ ...entry, _id: entry.id }, { session });
+        await this.ledger.insertOne(
+          {
+            ...entry,
+            _id: entry.id,
+            createdAtInstant: new Date(Date.parse(entry.createdAt)),
+          },
+          { session },
+        );
         return reservation;
       });
     } catch (error) {
@@ -545,7 +597,12 @@ export class MongoUsageRepository
         );
       }
 
-      if (entry.outcome !== "admitted") {
+      const expiredAdmission =
+        entry.outcome === "unknown" &&
+        entry.errorCode === "admission-expired" &&
+        entry.reservationStatus === "reserved" &&
+        reservation.status === "reserved";
+      if (entry.outcome !== "admitted" && !expiredAdmission) {
         this.assertSameSettlement(entry, settlement);
         return;
       }
@@ -609,7 +666,11 @@ export class MongoUsageRepository
       );
       const ledgerResult = await this.ledger.replaceOne(
         { _id: entry.id },
-        { ...updatedEntry, _id: entry.id },
+        {
+          ...updatedEntry,
+          _id: entry.id,
+          createdAtInstant: new Date(Date.parse(updatedEntry.createdAt)),
+        },
         { session },
       );
       if (
@@ -708,10 +769,7 @@ export class MongoUsageRepository
         "invalid-query-limit",
       );
     }
-    const pipeline: Document[] = [
-      { $match: query },
-      { $set: { createdAtInstant: { $toDate: "$createdAt" } } },
-    ];
+    const pipeline: Document[] = [{ $match: query }];
     if (from !== undefined || to !== undefined) {
       pipeline.push({
         $match: {
@@ -732,28 +790,111 @@ export class MongoUsageRepository
     );
   }
 
-  async recoverExpired(at: string): Promise<void> {
+  async listForRun(
+    ownerId: string,
+    caseId: string,
+    runId: string,
+  ): Promise<UsageLedgerEntry[]> {
+    const records = await this.ledger
+      .find({ ownerId, caseId, runId })
+      .sort({ createdAtInstant: 1, attemptId: 1 })
+      .toArray();
+    return records.map((record) => decode(UsageLedgerEntrySchema, record)!);
+  }
+
+  async recoverExpired(
+    at: string,
+    limit = DEFAULT_EXPIRED_RECOVERY_BATCH,
+  ): Promise<number> {
     const recoveryAt = canonicalTimestamp(at);
-    const cursor = this.reservations.find({
-      status: "reserved",
-      $expr: {
-        $lte: [{ $toDate: "$expiresAt" }, new Date(recoveryAt)],
-      },
-    });
-    for await (const document of cursor) {
-      const reservation = decode(UsageReservationSchema, document);
-      if (!reservation) continue;
-      await this.ledger.updateOne(
-        { attemptId: reservation.attemptId, outcome: "admitted" },
-        {
-          $set: {
-            outcome: "unknown",
-            errorCode: "admission-expired",
-            updatedAt: recoveryAt,
-            settledAt: recoveryAt,
-          },
-        },
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_EXPIRED_RECOVERY_BATCH
+    ) {
+      throw new StoreError(
+        "Usage recovery batch size must be between 1 and 1000",
+        "invalid-recovery-limit",
       );
+    }
+    return this.withTransaction(async (session) => {
+      const expired = await this.reservations
+        .find(
+          {
+            status: "reserved",
+            recoveryCheckedAt: null,
+            expiresAt: { $lte: recoveryAt },
+          },
+          { session },
+        )
+        .sort({ expiresAt: 1, _id: 1 })
+        .limit(limit)
+        .toArray();
+      let recovered = 0;
+      for (const document of expired) {
+        const reservation = decode(UsageReservationSchema, document);
+        if (!reservation) continue;
+        await this.ledger.updateOne(
+          { attemptId: reservation.attemptId, outcome: "admitted" },
+          {
+            $set: {
+              outcome: "unknown",
+              errorCode: "admission-expired",
+              updatedAt: recoveryAt,
+              settledAt: recoveryAt,
+            },
+          },
+          { session },
+        );
+        const result = await this.reservations.updateOne(
+          {
+            _id: reservation.id,
+            status: "reserved",
+            recoveryCheckedAt: null,
+            expiresAt: { $lte: recoveryAt },
+          },
+          {
+            $set: {
+              recoveryCheckedAt: recoveryAt,
+              updatedAt: recoveryAt,
+            },
+          },
+          { session },
+        );
+        recovered += result.matchedCount;
+      }
+      return recovered;
+    });
+  }
+
+  private async backfillLedgerInstants(): Promise<void> {
+    while (true) {
+      const batch = await this.ledger
+        .find({ createdAtInstant: { $exists: false } })
+        .project({ createdAt: 1 })
+        .sort({ _id: 1 })
+        .limit(LEDGER_MIGRATION_BATCH)
+        .toArray();
+      if (batch.length === 0) return;
+      const updates = batch.map((record) => {
+        const createdAt = Date.parse(String(record.createdAt));
+        if (!Number.isFinite(createdAt)) {
+          throw new StoreError(
+            "Cannot migrate a usage entry with an invalid creation time",
+            "invalid-usage-timestamp",
+          );
+        }
+        return {
+          updateOne: {
+            filter: {
+              _id: record._id,
+              createdAtInstant: { $exists: false },
+            },
+            update: { $set: { createdAtInstant: new Date(createdAt) } },
+          },
+        };
+      });
+      await this.ledger.bulkWrite(updates, { ordered: false });
     }
   }
 

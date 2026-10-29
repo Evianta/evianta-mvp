@@ -54,7 +54,6 @@ export class UsageAdminService {
         "admin-required",
       );
     }
-    await this.ledger.recoverExpired(new Date().toISOString());
     const limit = filter.limit ?? 500;
     const entries = await this.ledger.list({ ...filter, limit });
     const totals = emptyTotals();

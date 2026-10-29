@@ -24,6 +24,7 @@ function createAccounting(): UsageAccounting {
     mode: "admitted",
     admit: vi.fn(),
     record: vi.fn(),
+    cancel: vi.fn(),
   };
 }
 
@@ -73,6 +74,62 @@ describe("@evianta/ai", () => {
         units: expect.any(Object),
       }),
     );
+  });
+
+  it("does not reserve or dispatch requests cancelled before admission", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    const client = createAi({ provider, accounting, models });
+    const controller = new AbortController();
+    controller.abort(new Error("request cancelled"));
+    const request = {
+      tier: "cheap" as const,
+      system: "Answer the question",
+      input: "data-analysis",
+      usageContext: { userId: "user-1", caseId: "case-1" },
+      signal: controller.signal,
+    };
+
+    await expect(
+      client.runStructured({
+        ...request,
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+      }),
+    ).rejects.toThrow("request cancelled");
+    const consumeStream = async () => {
+      for await (const chunk of client.streamText(request)) void chunk;
+    };
+    await expect(consumeStream()).rejects.toThrow("request cancelled");
+
+    expect(accounting.admit).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("releases a reservation cancelled immediately before dispatch", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    const client = createAi({ provider, accounting, models });
+    const controller = new AbortController();
+    controller.abort(new Error("lease lost"));
+    vi.mocked(accounting.admit).mockResolvedValue(controller.signal);
+
+    await expect(
+      client.runStructured({
+        tier: "cheap",
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+        system: "Answer the question",
+        input: "data-analysis",
+        usageContext: { userId: "user-1", caseId: "case-1" },
+      }),
+    ).rejects.toThrow("lease lost");
+
+    expect(accounting.admit).toHaveBeenCalledOnce();
+    expect(accounting.cancel).toHaveBeenCalledOnce();
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("allows one correction attempt for invalid structured output", async () => {
@@ -197,6 +254,7 @@ describe("@evianta/ai", () => {
         accounting: {
           admit: vi.fn(),
           record: vi.fn(),
+          cancel: vi.fn(),
         },
         models: {
           ...models,

@@ -906,6 +906,7 @@ export const UsageReservationSchema = z
     createdAt: TimestampSchema,
     updatedAt: TimestampSchema,
     expiresAt: TimestampSchema,
+    recoveryCheckedAt: TimestampSchema.nullable().optional(),
   })
   .superRefine((reservation, context) => {
     if (

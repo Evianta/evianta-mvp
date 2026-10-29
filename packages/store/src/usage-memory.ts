@@ -225,6 +225,9 @@ export class InMemoryUsageRepository
       !run ||
       run.status !== "running" ||
       run.cancellationRequested ||
+      run.leaseId !== input.leaseId ||
+      !run.leaseExpiresAt ||
+      Date.parse(run.leaseExpiresAt) <= Date.parse(input.at) ||
       run.fencingToken !== input.fencingToken ||
       !this.hasActiveLease(input)
     ) {
@@ -323,6 +326,7 @@ export class InMemoryUsageRepository
       createdAt: input.at,
       updatedAt: input.at,
       expiresAt: input.expiresAt,
+      recoveryCheckedAt: null,
     });
     const entry = UsageLedgerEntrySchema.parse({
       id: input.attemptId,
@@ -387,7 +391,12 @@ export class InMemoryUsageRepository
       entry.price,
       entry.searchRequested,
     );
-    if (entry.outcome !== "admitted") {
+    const expiredAdmission =
+      entry.outcome === "unknown" &&
+      entry.errorCode === "admission-expired" &&
+      entry.reservationStatus === "reserved" &&
+      reservation.status === "reserved";
+    if (entry.outcome !== "admitted" && !expiredAdmission) {
       if (
         entry.outcome !== input.outcome ||
         entry.costStatus !== estimate.status ||
@@ -551,7 +560,27 @@ export class InMemoryUsageRepository
       .map((entry) => structuredClone(entry));
   }
 
-  async recoverExpired(at: string): Promise<void> {
+  async listForRun(
+    ownerId: string,
+    caseId: string,
+    runId: string,
+  ): Promise<UsageLedgerEntry[]> {
+    return [...this.ledger.values()]
+      .filter(
+        (entry) =>
+          entry.ownerId === ownerId &&
+          entry.caseId === caseId &&
+          entry.runId === runId,
+      )
+      .sort(
+        (left, right) =>
+          Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
+          left.attemptId.localeCompare(right.attemptId),
+      )
+      .map((entry) => structuredClone(entry));
+  }
+
+  async recoverExpired(at: string, limit = 100): Promise<number> {
     const atMs = Date.parse(at);
     if (!Number.isFinite(atMs)) {
       throw new StoreError(
@@ -559,16 +588,25 @@ export class InMemoryUsageRepository
         "invalid-timestamp",
       );
     }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new StoreError(
+        "Usage recovery batch size must be between 1 and 1000",
+        "invalid-recovery-limit",
+      );
+    }
+    let recovered = 0;
     for (const [attemptId, entry] of this.ledger) {
       if (entry.outcome !== "admitted") continue;
       const reservation = this.reservations.get(`reservation:${attemptId}`);
       if (
         !reservation ||
         reservation.status !== "reserved" ||
+        reservation.recoveryCheckedAt != null ||
         Date.parse(reservation.expiresAt) > atMs
       ) {
         continue;
       }
+      if (recovered >= limit) break;
       this.ledger.set(
         entry.id,
         UsageLedgerEntrySchema.parse({
@@ -579,6 +617,15 @@ export class InMemoryUsageRepository
           settledAt: new Date(atMs).toISOString(),
         }),
       );
+      this.reservations.set(
+        reservation.id,
+        UsageReservationSchema.parse({
+          ...reservation,
+          recoveryCheckedAt: new Date(atMs).toISOString(),
+        }),
+      );
+      recovered += 1;
     }
+    return recovered;
   }
 }

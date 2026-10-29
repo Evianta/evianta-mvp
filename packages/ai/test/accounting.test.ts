@@ -3,6 +3,7 @@ import type {
   UsagePrice,
   UsagePriceRepository,
   UsageReservation,
+  RunAdmissionPort,
 } from "@evianta/core";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -32,7 +33,11 @@ const price: UsagePrice = {
   effectiveAt: "2026-01-01T00:00:00.000Z",
 };
 
-function setup(priceRecord: UsagePrice | null = price) {
+function setup(
+  priceRecord: UsagePrice | null = price,
+  now: () => Date = () => new Date("2026-06-01T12:00:00.000Z"),
+  runLeaseTtlSeconds = 900,
+) {
   const reservation: UsageReservation = {
     id: "reservation:attempt-1",
     attemptId: "attempt-1",
@@ -54,21 +59,40 @@ function setup(priceRecord: UsagePrice | null = price) {
     settle: vi.fn(async () => {}),
     release: vi.fn(async () => {}),
   };
+  const runAdmission: RunAdmissionPort = {
+    acquire: async () => {
+      throw new Error("Not used by accounting tests");
+    },
+    renew: vi.fn(async (request) => ({
+      leaseId: request.leaseId,
+      fencingToken: request.fencingToken,
+      expiresAt: request.expiresAt,
+    })),
+    waitForInput: async () => null,
+    resume: async (request) => ({
+      leaseId: request.leaseId,
+      fencingToken: request.fencingToken,
+      expiresAt: request.expiresAt,
+    }),
+    release: async () => false,
+  };
   const prices: UsagePriceRepository = {
     findActive: vi.fn(async () => priceRecord),
     insert: vi.fn(async () => {}),
   };
   const accounting = createAdmittedUsageAccounting({
     admission,
+    runAdmission,
     prices,
     limits: {
       userSpendLimitUsd: 10,
       globalSpendLimitUsd: 100,
       spendPeriodSeconds: 86_400,
     },
-    now: () => new Date("2026-06-01T12:00:00.000Z"),
+    now,
+    runLeaseTtlSeconds,
   });
-  return { accounting, admission, prices };
+  return { accounting, admission, prices, runAdmission };
 }
 
 function admittedAttempt(): Omit<
@@ -125,6 +149,52 @@ describe("admitted usage accounting", () => {
         globalSpendLimitUsd: 100,
       }),
     );
+  });
+
+  it("uses a fresh timestamp after loading the active price", async () => {
+    const now = vi
+      .fn<() => Date>()
+      .mockReturnValueOnce(new Date("2026-06-01T12:00:00.000Z"))
+      .mockReturnValueOnce(new Date("2026-06-01T12:01:00.000Z"))
+      .mockReturnValue(new Date("2026-06-01T12:01:00.000Z"));
+    const { accounting, admission, prices } = setup(price, now);
+    await accounting.admit(admittedAttempt());
+
+    expect(prices.findActive).toHaveBeenCalledWith(
+      "muse",
+      "spark",
+      settingsKey,
+      "2026-06-01T12:00:00.000Z",
+    );
+    expect(admission.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        at: "2026-06-01T12:01:00.000Z",
+        expiresAt: "2026-06-01T12:16:00.000Z",
+      }),
+    );
+  });
+
+  it("aborts active work when a lease heartbeat is rejected", async () => {
+    vi.useFakeTimers();
+    try {
+      const { accounting, runAdmission } = setup(price, undefined, 3);
+      vi.mocked(runAdmission.renew)
+        .mockResolvedValueOnce({
+          leaseId: "lease-1",
+          fencingToken: 1,
+          expiresAt: "2026-06-01T12:15:00.000Z",
+        })
+        .mockResolvedValueOnce(null);
+
+      const signal = await accounting.admit(admittedAttempt());
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(signal?.aborted).toBe(true);
+
+      await accounting.cancel("attempt-1");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("settles known provider usage using the versioned model price", async () => {

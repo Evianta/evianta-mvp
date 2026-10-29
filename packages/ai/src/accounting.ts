@@ -4,6 +4,7 @@ import {
   estimateUsageCost as calculateUsageCost,
 } from "@evianta/core";
 import type {
+  RunAdmissionPort,
   UsageAdmissionPort,
   UsagePrice,
   UsagePriceRepository,
@@ -24,10 +25,22 @@ export interface UsageBudgetLimits {
 
 export interface AdmittedUsageAccountingOptions {
   admission: UsageAdmissionPort;
+  runAdmission: RunAdmissionPort;
   prices: UsagePriceRepository;
   limits: UsageBudgetLimits;
   now?: () => Date;
   reservationTtlSeconds?: number;
+  runLeaseTtlSeconds?: number;
+}
+
+interface ActiveUsageAttempt {
+  reservation: Awaited<ReturnType<UsageAdmissionPort["reserve"]>>;
+  price: UsagePrice;
+  searchRequested: boolean;
+  heartbeat: AbortController;
+  timer?: ReturnType<typeof setTimeout>;
+  renewal?: Promise<void>;
+  stopped: boolean;
 }
 
 function stableValue(value: unknown): string {
@@ -63,16 +76,10 @@ export function estimateUsageCost(
 export function createAdmittedUsageAccounting(
   options: AdmittedUsageAccountingOptions,
 ): UsageAccounting {
-  const attempts = new Map<
-    string,
-    {
-      reservation: Awaited<ReturnType<UsageAdmissionPort["reserve"]>>;
-      price: UsagePrice;
-      searchRequested: boolean;
-    }
-  >();
+  const attempts = new Map<string, ActiveUsageAttempt>();
   const now = options.now ?? (() => new Date());
   const reservationTtlSeconds = options.reservationTtlSeconds ?? 900;
+  const runLeaseTtlSeconds = options.runLeaseTtlSeconds ?? 900;
 
   if (
     !Number.isFinite(options.limits.userSpendLimitUsd) ||
@@ -82,9 +89,21 @@ export function createAdmittedUsageAccounting(
     !Number.isInteger(options.limits.spendPeriodSeconds) ||
     options.limits.spendPeriodSeconds <= 0 ||
     !Number.isInteger(reservationTtlSeconds) ||
-    reservationTtlSeconds <= 0
+    reservationTtlSeconds <= 0 ||
+    !Number.isInteger(runLeaseTtlSeconds) ||
+    runLeaseTtlSeconds < 3
   ) {
     throw new Error("Usage budgets and reservation expiry must be positive");
+  }
+  const heartbeatIntervalMs = Math.max(
+    1_000,
+    Math.floor((runLeaseTtlSeconds * 1_000) / 3),
+  );
+
+  async function stopHeartbeat(attempt: ActiveUsageAttempt): Promise<void> {
+    attempt.stopped = true;
+    if (attempt.timer) clearTimeout(attempt.timer);
+    await attempt.renewal;
   }
 
   return {
@@ -93,6 +112,7 @@ export function createAdmittedUsageAccounting(
       const { caseId, runId } = attempt.context;
       const { leaseId, fencingToken } = attempt.context;
       if (
+        !attempt.context.userId ||
         !caseId ||
         !runId ||
         !leaseId ||
@@ -114,13 +134,16 @@ export function createAdmittedUsageAccounting(
           "Paid model calls require bounded input and output allowances",
         );
       }
-      const at = now();
+      if (attempts.has(attempt.attemptId)) {
+        throw new Error(`Usage attempt ${attempt.attemptId} is already active`);
+      }
       const settingsKey = pricingSettingsKey(attempt.settings);
+      const lookupAt = now().toISOString();
       const price = await options.prices.findActive(
         attempt.provider,
         attempt.model,
         settingsKey,
-        at.toISOString(),
+        lookupAt,
       );
       if (!price) {
         throw new AdmissionRejectedError(
@@ -138,6 +161,13 @@ export function createAdmittedUsageAccounting(
           "No price is configured for the requested web-search capability",
         );
       }
+      const admittedAt = now();
+      if (!Number.isFinite(admittedAt.getTime())) {
+        throw new AdmissionRejectedError(
+          "Usage admission requires a valid current time",
+        );
+      }
+      const at = admittedAt.toISOString();
       const reservation = await options.admission.reserve({
         attemptId: attempt.attemptId,
         idempotencyKey: attempt.attemptId,
@@ -157,16 +187,79 @@ export function createAdmittedUsageAccounting(
         userSpendLimitUsd: options.limits.userSpendLimitUsd,
         globalSpendLimitUsd: options.limits.globalSpendLimitUsd,
         periodSeconds: options.limits.spendPeriodSeconds,
-        at: at.toISOString(),
+        at,
         expiresAt: new Date(
-          at.getTime() + reservationTtlSeconds * 1000,
+          admittedAt.getTime() + reservationTtlSeconds * 1000,
         ).toISOString(),
       });
-      attempts.set(attempt.attemptId, {
+      const leaseRequestBase = {
+        ownerId: attempt.context.userId,
+        caseId,
+        runId,
+        leaseId,
+        fencingToken,
+      };
+      const renewLease = async (): Promise<boolean> => {
+        const renewedAt = now();
+        if (!Number.isFinite(renewedAt.getTime())) {
+          throw new AdmissionRejectedError(
+            "Run lease renewal requires a valid current time",
+          );
+        }
+        const lease = await options.runAdmission.renew({
+          ...leaseRequestBase,
+          at: renewedAt.toISOString(),
+          expiresAt: new Date(
+            renewedAt.getTime() + runLeaseTtlSeconds * 1000,
+          ).toISOString(),
+        });
+        return lease !== null;
+      };
+      let leaseActive: boolean;
+      try {
+        leaseActive = await renewLease();
+      } catch (error) {
+        await options.admission.release(reservation.id, "cancelled");
+        throw error;
+      }
+      if (!leaseActive) {
+        await options.admission.release(reservation.id, "cancelled");
+        throw new AdmissionRejectedError(
+          "The run lease expired before provider dispatch",
+        );
+      }
+      const active: ActiveUsageAttempt = {
         reservation,
         price,
         searchRequested: attempt.searchRequested,
-      });
+        heartbeat: new AbortController(),
+        stopped: false,
+      };
+      const scheduleHeartbeat = (): void => {
+        active.timer = setTimeout(() => {
+          active.renewal = (async () => {
+            try {
+              if (!(await renewLease())) {
+                active.heartbeat.abort(
+                  new AdmissionRejectedError(
+                    "The run lease was lost during provider execution",
+                  ),
+                );
+              }
+            } catch (error) {
+              active.heartbeat.abort(error);
+            }
+          })().finally(() => {
+            active.renewal = undefined;
+            if (!active.stopped && !active.heartbeat.signal.aborted) {
+              scheduleHeartbeat();
+            }
+          });
+        }, heartbeatIntervalMs);
+      };
+      attempts.set(attempt.attemptId, active);
+      scheduleHeartbeat();
+      return active.heartbeat.signal;
     },
     async record(attempt: UsageAttempt) {
       const admitted = attempts.get(attempt.attemptId);
@@ -175,6 +268,7 @@ export function createAdmittedUsageAccounting(
           `Usage attempt ${attempt.attemptId} has no active reservation`,
         );
       }
+      await stopHeartbeat(admitted);
       const estimate = estimateUsageCost(
         attempt.units,
         admitted.price,
@@ -189,6 +283,13 @@ export function createAdmittedUsageAccounting(
       });
       attempts.delete(attempt.attemptId);
       return estimate;
+    },
+    async cancel(attemptId: string) {
+      const admitted = attempts.get(attemptId);
+      if (!admitted) return;
+      await stopHeartbeat(admitted);
+      await options.admission.release(admitted.reservation.id, "cancelled");
+      attempts.delete(attemptId);
     },
   };
 }

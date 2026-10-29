@@ -6,7 +6,7 @@ export interface UsageCostEstimate {
 }
 
 const USD_SUBUNITS_PER_DOLLAR = 100_000_000;
-const TOKEN_RATE_DENOMINATOR = 1_000_000n;
+const USD_SUBUNITS_PER_TOKEN_PER_RATE = 100n;
 
 export function usdToSubunits(value: number): number {
   if (!Number.isFinite(value) || value < 0) {
@@ -28,19 +28,48 @@ export function usdFromSubunits(subunits: number): number {
   return subunits / USD_SUBUNITS_PER_DOLLAR;
 }
 
-function rateSubunits(value: number): bigint {
-  return BigInt(usdToSubunits(value));
+function decimalParts(value: number): { coefficient: bigint; scale: number } {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("Usage prices must be finite and non-negative");
+  }
+  const [mantissa, exponentText] = value.toString().toLowerCase().split("e");
+  const exponent = exponentText ? Number(exponentText) : 0;
+  const [whole, fraction = ""] = mantissa.split(".");
+  const scale = fraction.length - exponent;
+  const coefficient = BigInt(`${whole}${fraction}`);
+  return scale < 0
+    ? { coefficient: coefficient * 10n ** BigInt(-scale), scale: 0 }
+    : { coefficient, scale };
 }
 
-function roundUpSubunits(numerator: bigint): number {
+function roundUpSubunits(numerator: bigint, denominator: bigint): number {
   const nonNegative = numerator > 0n ? numerator : 0n;
-  const subunits =
-    (nonNegative + TOKEN_RATE_DENOMINATOR - 1n) / TOKEN_RATE_DENOMINATOR;
+  const subunits = (nonNegative + denominator - 1n) / denominator;
   const result = Number(subunits);
   if (!Number.isSafeInteger(result)) {
     throw new Error("Usage cost exceeds the supported precision range");
   }
   return result;
+}
+
+function weightedRateNumerator(
+  components: Array<{ tokens: number; rate: number; direction?: 1 | -1 }>,
+): { numerator: bigint; denominator: bigint } {
+  const rates = components.map(({ rate }) => decimalParts(rate));
+  const scale = Math.max(...rates.map(({ scale: rateScale }) => rateScale));
+  const denominator = 10n ** BigInt(scale);
+  const numerator = components.reduce((total, component, index) => {
+    const rate = rates[index]!;
+    const scaledRate = rate.coefficient * 10n ** BigInt(scale - rate.scale);
+    return (
+      total +
+      BigInt(component.tokens) *
+        scaledRate *
+        USD_SUBUNITS_PER_TOKEN_PER_RATE *
+        BigInt(component.direction ?? 1)
+    );
+  }, 0n);
+  return { numerator, denominator };
 }
 
 export function estimateUsageAllowance(
@@ -64,10 +93,11 @@ export function estimateUsageAllowance(
     price.cacheReadUsdPerMillion,
     price.cacheWriteUsdPerMillion,
   );
-  const numerator =
-    BigInt(inputTokens) * rateSubunits(conservativeInputRate) +
-    BigInt(outputTokens) * rateSubunits(price.outputUsdPerMillion);
-  return usdFromSubunits(roundUpSubunits(numerator));
+  const { numerator, denominator } = weightedRateNumerator([
+    { tokens: inputTokens, rate: conservativeInputRate },
+    { tokens: outputTokens, rate: price.outputUsdPerMillion },
+  ]);
+  return usdFromSubunits(roundUpSubunits(numerator, denominator));
 }
 
 export function estimateUsageCost(
@@ -98,21 +128,29 @@ export function estimateUsageCost(
     return { status: "unknown", costUsd: null };
   }
 
-  let numerator =
-    BigInt(units.input) * rateSubunits(inputRate) +
-    BigInt(units.output) * rateSubunits(price.outputUsdPerMillion);
+  const components: Array<{
+    tokens: number;
+    rate: number;
+    direction?: 1 | -1;
+  }> = [
+    { tokens: units.input, rate: inputRate },
+    { tokens: units.output, rate: price.outputUsdPerMillion },
+  ];
   if (cacheRead !== null) {
-    numerator +=
-      BigInt(cacheRead) *
-      (rateSubunits(price.cacheReadUsdPerMillion) - rateSubunits(inputRate));
+    components.push(
+      { tokens: cacheRead, rate: price.cacheReadUsdPerMillion },
+      { tokens: cacheRead, rate: inputRate, direction: -1 },
+    );
   }
   if (cacheWrite !== null) {
-    numerator +=
-      BigInt(cacheWrite) *
-      (rateSubunits(price.cacheWriteUsdPerMillion) - rateSubunits(inputRate));
+    components.push(
+      { tokens: cacheWrite, rate: price.cacheWriteUsdPerMillion },
+      { tokens: cacheWrite, rate: inputRate, direction: -1 },
+    );
   }
+  const { numerator, denominator } = weightedRateNumerator(components);
   return {
     status: "estimated",
-    costUsd: usdFromSubunits(roundUpSubunits(numerator)),
+    costUsd: usdFromSubunits(roundUpSubunits(numerator, denominator)),
   };
 }

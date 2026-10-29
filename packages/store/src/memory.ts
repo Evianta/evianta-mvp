@@ -711,12 +711,11 @@ export class InMemoryStore {
                 entry.scope.ownerId === scope.ownerId,
             )
             .map((entry) => parse(UsageRecordSchema, entry.record));
-          const ledger = await this.usageAccounting.list({
-            ownerId: scope.ownerId,
-            caseId: scope.caseId,
+          const ledger = await this.usageAccounting.listForRun(
+            scope.ownerId,
+            scope.caseId,
             runId,
-            limit: 5_000,
-          });
+          );
           const ledgerAttempts = new Set(
             ledger.map((entry) => entry.attemptId),
           );

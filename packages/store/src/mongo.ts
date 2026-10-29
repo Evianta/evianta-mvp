@@ -220,6 +220,8 @@ export class MongoStore {
   };
   private readonly usageAccounting: MongoUsageRepository;
   private readonly runAdmissionRepository: MongoRunAdmissionRepository;
+  private usageRecoveryTimer: ReturnType<typeof setInterval> | undefined;
+  private usageRecoveryTask: Promise<void> | undefined;
 
   constructor(private readonly options: MongoStoreOptions) {
     const { db } = options;
@@ -408,10 +410,39 @@ export class MongoStore {
         { unique: true },
       ),
     ]);
+    if (!this.usageRecoveryTimer) {
+      void this.runUsageRecovery();
+      this.usageRecoveryTimer = setInterval(() => {
+        void this.runUsageRecovery();
+      }, 60_000);
+      this.usageRecoveryTimer.unref?.();
+    }
   }
 
   async close(): Promise<void> {
+    if (this.usageRecoveryTimer) clearInterval(this.usageRecoveryTimer);
+    await this.usageRecoveryTask;
     await this.options.client.close();
+  }
+
+  private runUsageRecovery(): Promise<void> {
+    if (this.usageRecoveryTask) return this.usageRecoveryTask;
+    this.usageRecoveryTask = (async () => {
+      try {
+        const recovered = await this.usageAccounting.recoverExpired(
+          new Date().toISOString(),
+        );
+        if (recovered > 0) {
+          console.info(`Recovered ${recovered} expired usage reservations`);
+        }
+      } catch (error) {
+        const errorName = error instanceof Error ? error.name : "UnknownError";
+        console.error("Usage reservation recovery failed", { errorName });
+      } finally {
+        this.usageRecoveryTask = undefined;
+      }
+    })();
+    return this.usageRecoveryTask;
   }
 
   async withTransaction<T>(
@@ -933,6 +964,24 @@ export class MongoStore {
         ),
       );
       if (!current) return null;
+      const activeAdmission = await this.runAdmissions.findOne(
+        {
+          runId: current.id,
+          ownerId: current.ownerId,
+          caseId: current.caseId,
+          state: "active",
+        },
+        { session },
+      );
+      if (!activeAdmission) return null;
+      if (
+        activeAdmission.fencingToken !== current.fencingToken ||
+        activeAdmission.leaseId !== current.leaseId ||
+        typeof activeAdmission.leaseExpiresAt !== "string" ||
+        Date.parse(activeAdmission.leaseExpiresAt) <= Date.parse(at)
+      ) {
+        return null;
+      }
       const fencingToken = current.fencingToken + 1;
       const update = await this.runs.updateOne(
         {
@@ -941,6 +990,9 @@ export class MongoStore {
           caseId: current.caseId,
           fencingToken: current.fencingToken,
           status: "running",
+          leaseId: current.leaseId,
+          leaseExpiresAt: current.leaseExpiresAt,
+          cancellationRequested: false,
         },
         {
           $set: {
@@ -953,49 +1005,29 @@ export class MongoStore {
         { session },
       );
       if (update.matchedCount !== 1) return null;
-
-      const activeAdmission = await this.runAdmissions.findOne(
+      const admissionUpdate = await this.runAdmissions.updateOne(
         {
-          runId: current.id,
-          ownerId: current.ownerId,
-          caseId: current.caseId,
+          _id: activeAdmission._id,
           state: "active",
+          fencingToken: current.fencingToken,
+          leaseId: current.leaseId,
+          leaseExpiresAt: activeAdmission.leaseExpiresAt,
+        },
+        {
+          $set: {
+            leaseId: parsedRequest.leaseId,
+            leaseExpiresAt: expiresAt,
+            fencingToken,
+            updatedAt: at,
+          },
         },
         { session },
       );
-      if (activeAdmission) {
-        if (
-          activeAdmission.fencingToken !== current.fencingToken ||
-          activeAdmission.leaseId !== current.leaseId
-        ) {
-          throw new StoreError(
-            "Run and admission fencing state is inconsistent",
-            "stale-run-admission",
-          );
-        }
-        const admissionUpdate = await this.runAdmissions.updateOne(
-          {
-            _id: activeAdmission._id,
-            state: "active",
-            fencingToken: current.fencingToken,
-            leaseId: current.leaseId,
-          },
-          {
-            $set: {
-              leaseId: parsedRequest.leaseId,
-              leaseExpiresAt: expiresAt,
-              fencingToken,
-              updatedAt: at,
-            },
-          },
-          { session },
+      if (admissionUpdate.matchedCount !== 1) {
+        throw new StoreError(
+          "Run admission changed during lease acquisition",
+          "stale-run-admission",
         );
-        if (admissionUpdate.matchedCount !== 1) {
-          throw new StoreError(
-            "Run admission changed during lease acquisition",
-            "stale-run-admission",
-          );
-        }
       }
 
       return decode(
@@ -1247,12 +1279,11 @@ export class MongoStore {
       .find({ runId, caseId: scope.caseId, ownerId: scope.ownerId })
       .sort({ recordedAt: 1, id: 1 })
       .toArray();
-    const ledger = await this.usageAccounting.list({
-      ownerId: scope.ownerId,
-      caseId: scope.caseId,
+    const ledger = await this.usageAccounting.listForRun(
+      scope.ownerId,
+      scope.caseId,
       runId,
-      limit: 5_000,
-    });
+    );
     const ledgerAttempts = new Set(ledger.map((entry) => entry.attemptId));
     return [
       ...records
@@ -1310,7 +1341,10 @@ export class MongoStore {
       const activeKey = activeCaseKey(run.ownerId, run.caseId);
       if (run.activeCaseKey === activeKey) continue;
       await this.runs.updateOne(
-        { _id: run._id },
+        {
+          _id: run._id,
+          status: { $in: ["queued", "running", "waiting-for-input"] },
+        },
         { $set: { activeCaseKey: activeKey } },
       );
     }

@@ -100,8 +100,9 @@ export interface UsageAccounting {
   mode?: "test" | "admitted";
   admit(
     attempt: Omit<UsageAttempt, "outcome" | "units" | "errorCode">,
-  ): Promise<void>;
+  ): Promise<AbortSignal | undefined>;
   record(attempt: UsageAttempt): Promise<CostEstimate | void>;
+  cancel(attemptId: string): Promise<void>;
 }
 
 export interface Citation {
@@ -299,6 +300,36 @@ function combineSignals(
     clear: () => {
       clearTimeout(timer);
       callerSignal?.removeEventListener("abort", abort);
+    },
+  };
+}
+
+function combineAbortSignals(signals: Array<AbortSignal | undefined>): {
+  signal: AbortSignal;
+  clear: () => void;
+} {
+  const controller = new AbortController();
+  const activeSignals = signals.filter(
+    (signal): signal is AbortSignal => signal !== undefined,
+  );
+  const abort = (signal: AbortSignal) => {
+    if (!controller.signal.aborted) controller.abort(signal.reason);
+  };
+  const listeners = activeSignals.map((signal) => {
+    const listener = () => abort(signal);
+    if (signal.aborted) {
+      abort(signal);
+    } else {
+      signal.addEventListener("abort", listener, { once: true });
+    }
+    return { signal, listener };
+  });
+  return {
+    signal: controller.signal,
+    clear: () => {
+      for (const { signal, listener } of listeners) {
+        signal.removeEventListener("abort", listener);
+      }
     },
   };
 }
@@ -514,83 +545,100 @@ export function createAi(options: AiClientOptions): AiClient {
             "input-limit-exceeded",
           );
         }
-        await options.accounting.admit(usageAttempt);
-
-        let result: ProviderResult;
-        try {
-          result = await options.provider.generateStructured({
-            model: dispatchedModel,
-            system,
-            input: structuredInput,
-            schema,
-            maxOutputTokens,
-            signal: timeout.signal,
-            images: request.images,
-            webSearch: request.webSearch,
-          });
-        } catch (error) {
-          const retryable = isRetryable(error);
-          await options.accounting.record({
-            ...usageAttempt,
-            outcome:
-              (error instanceof ProviderRequestError &&
-                error.statusCode === 429) ||
-              error instanceof ProviderRefusalError ||
-              error instanceof ProviderTruncationError
-                ? "failed"
-                : "unknown",
-            units:
-              error instanceof ProviderRefusalError ||
-              error instanceof ProviderTruncationError
-                ? (error.units ?? unknownUsage())
-                : unknownUsage(),
-            errorCode:
-              error instanceof AiError ? error.code : "provider-unknown",
-          });
-
-          if (!retryable || attemptNumber === 2) throw error;
-          const waitMs =
-            error.retryAfterMs ??
-            250 * 2 ** attemptNumber + Math.random() * 150;
-          await delay(waitMs, timeout.signal);
-          continue;
+        if (timeout.signal.aborted) throw timeout.signal.reason;
+        const admissionSignal = await options.accounting.admit(usageAttempt);
+        if (timeout.signal.aborted || admissionSignal?.aborted) {
+          await options.accounting.cancel(attemptId);
+          throw (
+            timeout.signal.reason ??
+            admissionSignal?.reason ??
+            new Error("Model request was cancelled before dispatch")
+          );
         }
-
-        let output: O;
+        const providerSignals = combineAbortSignals([
+          timeout.signal,
+          admissionSignal,
+        ]);
         try {
-          output = request.outputSchema.parse(JSON.parse(result.text));
-        } catch {
-          lastValidationError = new OutputValidationError();
-          await options.accounting.record({
+          let result: ProviderResult;
+          try {
+            result = await options.provider.generateStructured({
+              model: dispatchedModel,
+              system,
+              input: structuredInput,
+              schema,
+              maxOutputTokens,
+              signal: providerSignals.signal,
+              images: request.images,
+              webSearch: request.webSearch,
+            });
+          } catch (error) {
+            const retryable = isRetryable(error);
+            await options.accounting.record({
+              ...usageAttempt,
+              outcome:
+                (error instanceof ProviderRequestError &&
+                  error.statusCode === 429) ||
+                error instanceof ProviderRefusalError ||
+                error instanceof ProviderTruncationError
+                  ? "failed"
+                  : "unknown",
+              units:
+                error instanceof ProviderRefusalError ||
+                error instanceof ProviderTruncationError
+                  ? (error.units ?? unknownUsage())
+                  : unknownUsage(),
+              errorCode:
+                error instanceof AiError ? error.code : "provider-unknown",
+            });
+
+            if (!retryable || attemptNumber === 2) throw error;
+            const waitMs =
+              error.retryAfterMs ??
+              250 * 2 ** attemptNumber + Math.random() * 150;
+            await delay(waitMs, timeout.signal);
+            continue;
+          }
+
+          let output: O;
+          try {
+            output = request.outputSchema.parse(JSON.parse(result.text));
+          } catch {
+            lastValidationError = new OutputValidationError();
+            await options.accounting.record({
+              ...usageAttempt,
+              outcome: "failed",
+              units: result.units,
+              errorCode: lastValidationError.code,
+            });
+            if (correctionUsed || attemptNumber === 2)
+              throw lastValidationError;
+            correctionUsed = true;
+            correction =
+              "Your previous response was invalid. Return only valid JSON matching the requested schema.";
+            continue;
+          }
+
+          const cost = await options.accounting.record({
             ...usageAttempt,
-            outcome: "failed",
+            outcome: "success",
             units: result.units,
-            errorCode: lastValidationError.code,
           });
-          if (correctionUsed || attemptNumber === 2) throw lastValidationError;
-          correctionUsed = true;
-          correction =
-            "Your previous response was invalid. Return only valid JSON matching the requested schema.";
-          continue;
+          return {
+            output,
+            usage: result.units,
+            cost: cost ?? {
+              status: "unknown",
+              costUsd: null,
+              pricingIdentity: model.pricingIdentity,
+            },
+            citations: result.citations,
+            provider: model.provider,
+            model: model.model,
+          };
+        } finally {
+          providerSignals.clear();
         }
-
-        const cost = await options.accounting.record({
-          ...usageAttempt,
-          outcome: "success",
-          units: result.units,
-        });
-        return {
-          output,
-          usage: result.units,
-          cost: cost ?? {
-            status: "unknown",
-            costUsd: null,
-            pricingIdentity: model.pricingIdentity,
-          },
-          citations: result.citations,
-          provider: model.provider,
-          model: model.model,
-        };
       }
 
       throw lastValidationError ?? new Error("Model call did not complete");
@@ -649,11 +697,25 @@ export function createAi(options: AiClientOptions): AiClient {
       maxOutputTokens,
       searchRequested: false,
     };
-    await options.accounting.admit(usageAttempt);
+    if (request.signal?.aborted) throw request.signal.reason;
+    const admissionSignal = await options.accounting.admit(usageAttempt);
     const timeout = combineSignals(
       request.signal,
       request.timeoutMs ?? defaultTimeout,
     );
+    if (timeout.signal.aborted || admissionSignal?.aborted) {
+      await options.accounting.cancel(attemptId);
+      timeout.clear();
+      throw (
+        timeout.signal.reason ??
+        admissionSignal?.reason ??
+        new Error("Model request was cancelled before dispatch")
+      );
+    }
+    const providerSignals = combineAbortSignals([
+      timeout.signal,
+      admissionSignal,
+    ]);
     let recorded = false;
 
     try {
@@ -662,7 +724,7 @@ export function createAi(options: AiClientOptions): AiClient {
         system: request.system,
         input: request.input,
         maxOutputTokens,
-        signal: timeout.signal,
+        signal: providerSignals.signal,
       })) {
         yield chunk;
       }
@@ -676,6 +738,7 @@ export function createAi(options: AiClientOptions): AiClient {
       });
       throw error;
     } finally {
+      providerSignals.clear();
       timeout.clear();
       if (!recorded) {
         recorded = true;

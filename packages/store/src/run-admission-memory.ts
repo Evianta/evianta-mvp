@@ -153,6 +153,7 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
     if (
       !run ||
       run.status !== "running" ||
+      run.cancellationRequested ||
       run.fencingToken !== request.fencingToken ||
       !this.updateRun(
         request.runId,
@@ -182,6 +183,73 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
       updatedAt: request.at,
     });
     return fencingToken;
+  }
+
+  async renew(request: {
+    ownerId: string;
+    caseId: string;
+    runId: string;
+    leaseId: string;
+    fencingToken: number;
+    at: string;
+    expiresAt: string;
+  }): Promise<RunAdmissionLease | null> {
+    const at = Date.parse(request.at);
+    const expiresAt = Date.parse(request.expiresAt);
+    const id = lockId(request.ownerId, request.caseId);
+    const lock = this.locks.get(id);
+    if (
+      !Number.isFinite(at) ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= at ||
+      !lock ||
+      lock.runId !== request.runId ||
+      lock.state !== "active" ||
+      lock.leaseId !== request.leaseId ||
+      lock.fencingToken !== request.fencingToken ||
+      !lock.leaseExpiresAt ||
+      Date.parse(lock.leaseExpiresAt) <= at
+    ) {
+      return null;
+    }
+    const renewedExpiresAt = new Date(
+      Math.max(expiresAt, Date.parse(lock.leaseExpiresAt)),
+    ).toISOString();
+    const run = this.findOwnedRun(
+      request.runId,
+      request.caseId,
+      request.ownerId,
+    );
+    if (
+      !run ||
+      run.status !== "running" ||
+      run.cancellationRequested ||
+      run.fencingToken !== request.fencingToken ||
+      run.leaseId !== request.leaseId ||
+      run.leaseExpiresAt !== lock.leaseExpiresAt ||
+      !this.updateRun(
+        request.runId,
+        request.caseId,
+        request.ownerId,
+        run.fencingToken,
+        {
+          leaseExpiresAt: renewedExpiresAt,
+          updatedAt: request.at,
+        },
+      )
+    ) {
+      return null;
+    }
+    this.locks.set(id, {
+      ...lock,
+      leaseExpiresAt: renewedExpiresAt,
+      updatedAt: request.at,
+    });
+    return {
+      leaseId: request.leaseId,
+      fencingToken: request.fencingToken,
+      expiresAt: renewedExpiresAt,
+    };
   }
 
   async resume(
