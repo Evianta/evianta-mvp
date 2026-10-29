@@ -32,6 +32,9 @@ import {
   type Task,
   type UserRecord,
   type UsageRecord,
+  type UsageAdmissionPort,
+  type UsageLedgerRepository,
+  type UsagePriceRepository,
   type UsageReservation,
   type AgentProfileRepository,
   type AccessKeyRepository,
@@ -44,6 +47,7 @@ import {
   type FindingRepository,
   type RunEventRepository,
   type RunRepository,
+  type RunAdmissionPort,
   type SessionRepository,
   type TaskRepository,
   type UserRepository,
@@ -61,6 +65,22 @@ import {
 } from "mongodb";
 import { getMongoConfig, type MongoConfig } from "@evianta/env/server";
 import { z, type ZodType } from "zod";
+import { MongoUsageRepository } from "./usage-mongo.js";
+import { MongoRunAdmissionRepository } from "./run-admission-mongo.js";
+import { UsageAdminService } from "./usage-admin.js";
+import {
+  CaseNotOwnedError,
+  InvalidCursorError,
+  SequenceConflictError,
+  StoreError,
+} from "./errors.js";
+
+export {
+  CaseNotOwnedError,
+  InvalidCursorError,
+  SequenceConflictError,
+  StoreError,
+} from "./errors.js";
 import {
   MongoRateLimitRepository,
   type MongoRateLimitCounter,
@@ -80,41 +100,6 @@ const MongoRunLeaseSchema = z
     (request) => Date.parse(request.expiresAt) > Date.parse(request.at),
     "Lease expiry must be after acquisition time",
   );
-
-export class StoreError extends Error {
-  constructor(
-    message: string,
-    readonly code: string,
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
-    this.name = new.target.name;
-  }
-}
-
-export class CaseNotOwnedError extends StoreError {
-  constructor() {
-    super(
-      "The case does not exist in the requested owner scope",
-      "case-not-owned",
-    );
-  }
-}
-
-export class InvalidCursorError extends StoreError {
-  constructor() {
-    super("The case pagination cursor is invalid", "invalid-cursor");
-  }
-}
-
-export class SequenceConflictError extends StoreError {
-  constructor() {
-    super(
-      "Run event sequence must increase monotonically for its case",
-      "event-sequence-conflict",
-    );
-  }
-}
 
 function documentFor<T extends { id: string }>(record: T): Stored<T> {
   return { ...record, _id: record.id } as Stored<T>;
@@ -207,6 +192,7 @@ export class MongoStore {
   >;
   readonly approvals: Collection<Stored<Approval>>;
   readonly runs: Collection<Stored<RunRecord> & { activeCaseKey?: string }>;
+  private readonly runAdmissions: Collection<Document>;
   readonly events: Collection<Stored<RunEvent>>;
   readonly eventCounters: Collection<Stored<{ id: string; sequence: number }>>;
   readonly usageAttempts: Collection<Stored<UsageRecord>>;
@@ -232,8 +218,17 @@ export class MongoStore {
     approvals: ApprovalRepository;
     events: RunEventRepository;
     usage: UsageRepository;
+    usageAdmission: UsageAdmissionPort;
+    usagePrices: UsagePriceRepository;
+    usageLedger: UsageLedgerRepository;
+    runAdmission: RunAdmissionPort;
+    usageAdmin: UsageAdminService;
     rateLimits: RateLimitRepository;
   };
+  private readonly usageAccounting: MongoUsageRepository;
+  private readonly runAdmissionRepository: MongoRunAdmissionRepository;
+  private usageRecoveryTimer: ReturnType<typeof setInterval> | undefined;
+  private usageRecoveryTask: Promise<void> | undefined;
 
   constructor(private readonly options: MongoStoreOptions) {
     const { db } = options;
@@ -252,11 +247,17 @@ export class MongoStore {
     this.deliverables = db.collection("deliverables");
     this.approvals = db.collection("approvals");
     this.runs = db.collection("runs");
+    this.runAdmissions = db.collection("runAdmissions");
     this.events = db.collection("events");
     this.eventCounters = db.collection("eventCounters");
     this.usageAttempts = db.collection("usageAttempts");
     this.reservations = db.collection("usageReservations");
     this.budgets = db.collection("budgets");
+    this.usageAccounting = new MongoUsageRepository(options.client, db);
+    this.runAdmissionRepository = new MongoRunAdmissionRepository(
+      options.client,
+      db,
+    );
     this.rateLimits = new MongoRateLimitRepository(
       db.collection<MongoRateLimitCounter>("rateLimitCounters"),
       (message, code) => new StoreError(message, code),
@@ -347,6 +348,11 @@ export class MongoStore {
         insert: (record, runId, scope) =>
           this.usageInsert(record, runId, scope),
       },
+      usageAdmission: this.usageAccounting,
+      usagePrices: this.usageAccounting,
+      usageLedger: this.usageAccounting,
+      runAdmission: this.runAdmissionRepository,
+      usageAdmin: new UsageAdminService(this.usageAccounting),
       rateLimits: this.rateLimits,
     };
   }
@@ -375,6 +381,9 @@ export class MongoStore {
       { revision: { $exists: false } },
       { $set: { revision: 0 } },
     );
+    await this.usageAccounting.initialize();
+    await this.runAdmissionRepository.initialize();
+    await this.backfillActiveRunKeys();
     await Promise.all([
       this.agents.createIndex({ role: 1 }, { unique: true }),
       this.users.createIndex({ emailKey: 1 }, { unique: true }),
@@ -426,10 +435,39 @@ export class MongoStore {
         { unique: true },
       ),
     ]);
+    if (!this.usageRecoveryTimer) {
+      void this.runUsageRecovery();
+      this.usageRecoveryTimer = setInterval(() => {
+        void this.runUsageRecovery();
+      }, 60_000);
+      this.usageRecoveryTimer.unref?.();
+    }
   }
 
   async close(): Promise<void> {
+    if (this.usageRecoveryTimer) clearInterval(this.usageRecoveryTimer);
+    await this.usageRecoveryTask;
     await this.options.client.close();
+  }
+
+  private runUsageRecovery(): Promise<void> {
+    if (this.usageRecoveryTask) return this.usageRecoveryTask;
+    this.usageRecoveryTask = (async () => {
+      try {
+        const recovered = await this.usageAccounting.recoverExpired(
+          new Date().toISOString(),
+        );
+        if (recovered > 0) {
+          console.info(`Recovered ${recovered} expired usage reservations`);
+        }
+      } catch (error) {
+        const errorName = error instanceof Error ? error.name : "UnknownError";
+        console.error("Usage reservation recovery failed", { errorName });
+      } finally {
+        this.usageRecoveryTask = undefined;
+      }
+    })();
+    return this.usageRecoveryTask;
   }
 
   async withTransaction<T>(
@@ -913,10 +951,11 @@ export class MongoStore {
       status: { $ne: "deleted" },
     });
     if (!parent) throw new CaseNotOwnedError();
-    const active =
-      parsed.status === "queued" || parsed.status === "running"
-        ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
-        : {};
+    const active = ["queued", "running", "waiting-for-input"].includes(
+      parsed.status,
+    )
+      ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
+      : {};
     await insertUnique(this.runs, RunRecordSchema, {
       ...parsed,
       ...active,
@@ -926,10 +965,11 @@ export class MongoStore {
   async runUpdateOwned(run: RunRecord, ownerId: string): Promise<boolean> {
     const parsed = RunRecordSchema.parse(run);
     if (parsed.ownerId !== ownerId) return false;
-    const active =
-      parsed.status === "queued" || parsed.status === "running"
-        ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
-        : {};
+    const active = ["queued", "running", "waiting-for-input"].includes(
+      parsed.status,
+    )
+      ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
+      : {};
     try {
       const result = await this.runs.replaceOne(
         {
@@ -937,6 +977,21 @@ export class MongoStore {
           ownerId,
           caseId: parsed.caseId,
           fencingToken: parsed.fencingToken,
+          // Lease and admission transitions belong to the admission API, and
+          // a renewed lease must not be overwritten by an older snapshot.
+          leaseId: parsed.leaseId,
+          leaseExpiresAt: parsed.leaseExpiresAt,
+          ...(parsed.cancellationRequested
+            ? {}
+            : { cancellationRequested: false }),
+          ...(parsed.leaseId !== null || parsed.status === "waiting-for-input"
+            ? {
+                status: parsed.status,
+                ...(parsed.status === "waiting-for-input"
+                  ? { inputRequired: parsed.inputRequired }
+                  : {}),
+              }
+            : { status: { $ne: "waiting-for-input" as const } }),
         },
         { ...documentFor(parsed), ...active },
       );
@@ -955,39 +1010,102 @@ export class MongoStore {
 
   async acquireRunLease(request: MongoRunLease): Promise<RunRecord | null> {
     const parsedRequest = MongoRunLeaseSchema.parse(request);
-    const result = await this.runs.findOneAndUpdate(
-      {
-        _id: parsedRequest.runId,
-        ownerId: parsedRequest.ownerId,
-        status: "running",
-        $or: [
-          { leaseExpiresAt: null },
+    const at = new Date(Date.parse(parsedRequest.at)).toISOString();
+    const expiresAt = new Date(
+      Date.parse(parsedRequest.expiresAt),
+    ).toISOString();
+    return this.withTransaction(async (session) => {
+      const current = decode(
+        RunRecordSchema,
+        await this.runs.findOne(
           {
-            $expr: {
-              $lte: [
-                {
-                  $dateFromString: {
-                    dateString: "$leaseExpiresAt",
-                    onError: null,
-                  },
+            _id: parsedRequest.runId,
+            ownerId: parsedRequest.ownerId,
+            status: "running",
+            $or: [
+              { leaseExpiresAt: null },
+              {
+                $expr: {
+                  $lte: [{ $toDate: "$leaseExpiresAt" }, new Date(at)],
                 },
-                new Date(parsedRequest.at),
-              ],
-            },
+              },
+            ],
           },
-        ],
-      },
-      {
-        $set: {
-          leaseId: parsedRequest.leaseId,
-          leaseExpiresAt: parsedRequest.expiresAt,
-          updatedAt: parsedRequest.at,
+          { session },
+        ),
+      );
+      if (!current) return null;
+      const activeAdmission = await this.runAdmissions.findOne(
+        {
+          runId: current.id,
+          ownerId: current.ownerId,
+          caseId: current.caseId,
+          state: "active",
         },
-        $inc: { fencingToken: 1 },
-      },
-      { returnDocument: "after" },
-    );
-    return decode(RunRecordSchema, result);
+        { session },
+      );
+      if (!activeAdmission) return null;
+      if (
+        activeAdmission.fencingToken !== current.fencingToken ||
+        activeAdmission.leaseId !== current.leaseId ||
+        typeof activeAdmission.leaseExpiresAt !== "string" ||
+        Date.parse(activeAdmission.leaseExpiresAt) <= Date.parse(at)
+      ) {
+        return null;
+      }
+      const fencingToken = current.fencingToken + 1;
+      const update = await this.runs.updateOne(
+        {
+          _id: current.id,
+          ownerId: current.ownerId,
+          caseId: current.caseId,
+          fencingToken: current.fencingToken,
+          status: "running",
+          leaseId: current.leaseId,
+          leaseExpiresAt: current.leaseExpiresAt,
+          cancellationRequested: false,
+        },
+        {
+          $set: {
+            leaseId: parsedRequest.leaseId,
+            leaseExpiresAt: expiresAt,
+            fencingToken,
+            updatedAt: at,
+          },
+        },
+        { session },
+      );
+      if (update.matchedCount !== 1) return null;
+      const admissionUpdate = await this.runAdmissions.updateOne(
+        {
+          _id: activeAdmission._id,
+          state: "active",
+          fencingToken: current.fencingToken,
+          leaseId: current.leaseId,
+          leaseExpiresAt: activeAdmission.leaseExpiresAt,
+        },
+        {
+          $set: {
+            leaseId: parsedRequest.leaseId,
+            leaseExpiresAt: expiresAt,
+            fencingToken,
+            updatedAt: at,
+          },
+        },
+        { session },
+      );
+      if (admissionUpdate.matchedCount !== 1) {
+        throw new StoreError(
+          "Run admission changed during lease acquisition",
+          "stale-run-admission",
+        );
+      }
+
+      return decode(
+        RunRecordSchema,
+        await this.runs.findOne({ _id: current.id }, { session }),
+      );
+    });
   }
 
   async deliverableFindOwnedById(
@@ -1232,7 +1350,75 @@ export class MongoStore {
       .find({ runId, caseId: scope.caseId, ownerId: scope.ownerId })
       .sort({ recordedAt: 1, id: 1 })
       .toArray();
-    return records.map((record) => decode(UsageRecordSchema, record)!);
+    const ledger = await this.usageAccounting.listForRun(
+      scope.ownerId,
+      scope.caseId,
+      runId,
+    );
+    const ledgerAttempts = new Set(ledger.map((entry) => entry.attemptId));
+    return [
+      ...records
+        .map((record) => decode(UsageRecordSchema, record)!)
+        .filter((record) => !ledgerAttempts.has(record.attemptId)),
+      ...ledger.map((entry) =>
+        UsageRecordSchema.parse({
+          id: entry.id,
+          attemptId: entry.attemptId,
+          provider: entry.provider,
+          model: entry.model,
+          settings: entry.settings,
+          units: entry.units,
+          costUsd: entry.costUsd,
+          costStatus: entry.costStatus,
+          recordedAt: entry.settledAt ?? entry.createdAt,
+        }),
+      ),
+    ].sort(
+      (left, right) =>
+        Date.parse(left.recordedAt) - Date.parse(right.recordedAt) ||
+        left.id.localeCompare(right.id),
+    );
+  }
+
+  private async backfillActiveRunKeys(): Promise<void> {
+    const conflicts = await this.runs
+      .aggregate<{ _id: { ownerId: string; caseId: string }; count: number }>([
+        {
+          $match: {
+            status: { $in: ["queued", "running", "waiting-for-input"] },
+          },
+        },
+        {
+          $group: {
+            _id: { ownerId: "$ownerId", caseId: "$caseId" },
+            count: { $sum: 1 },
+          },
+        },
+        { $match: { count: { $gt: 1 } } },
+        { $limit: 1 },
+      ])
+      .toArray();
+    if (conflicts.length > 0) {
+      throw new StoreError(
+        "Cannot initialize active-run uniqueness: existing cases have conflicting active runs",
+        "active-run-migration-conflict",
+      );
+    }
+
+    const cursor = this.runs.find({
+      status: { $in: ["queued", "running", "waiting-for-input"] },
+    });
+    for await (const run of cursor) {
+      const activeKey = activeCaseKey(run.ownerId, run.caseId);
+      if (run.activeCaseKey === activeKey) continue;
+      await this.runs.updateOne(
+        {
+          _id: run._id,
+          status: { $in: ["queued", "running", "waiting-for-input"] },
+        },
+        { $set: { activeCaseKey: activeKey } },
+      );
+    }
   }
 
   async usageInsert(

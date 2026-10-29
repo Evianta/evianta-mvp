@@ -21,8 +21,10 @@ const models = {
 
 function createAccounting(): UsageAccounting {
   return {
+    mode: "admitted",
     admit: vi.fn(),
     record: vi.fn(),
+    cancel: vi.fn(),
   };
 }
 
@@ -50,6 +52,7 @@ describe("@evianta/ai", () => {
       system: "Answer the question",
       input: "data-analysis",
       usageContext: { userId: "user-1", caseId: "case-1" },
+      maxOutputTokens: 5,
     });
 
     expect(result.output).toBe("tax-notice");
@@ -59,12 +62,163 @@ describe("@evianta/ai", () => {
       pricingIdentity: "mock:mock-spark",
     });
     expect(accounting.admit).toHaveBeenCalledTimes(1);
+    expect(accounting.admit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        settings: expect.objectContaining({ maxOutputTokens: 5 }),
+        maxOutputTokens: 5,
+      }),
+    );
     expect(accounting.record).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: "success",
         units: expect.any(Object),
       }),
     );
+  });
+
+  it("does not reserve or dispatch requests cancelled before admission", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    const client = createAi({ provider, accounting, models });
+    const controller = new AbortController();
+    controller.abort(new Error("request cancelled"));
+    const request = {
+      tier: "cheap" as const,
+      system: "Answer the question",
+      input: "data-analysis",
+      usageContext: { userId: "user-1", caseId: "case-1" },
+      signal: controller.signal,
+    };
+
+    await expect(
+      client.runStructured({
+        ...request,
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+      }),
+    ).rejects.toThrow("request cancelled");
+    const consumeStream = async () => {
+      for await (const chunk of client.streamText(request)) void chunk;
+    };
+    await expect(consumeStream()).rejects.toThrow("request cancelled");
+
+    expect(accounting.admit).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("releases a reservation cancelled immediately before dispatch", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    const client = createAi({ provider, accounting, models });
+    const controller = new AbortController();
+    controller.abort(new Error("lease lost"));
+    vi.mocked(accounting.admit).mockResolvedValue(controller.signal);
+
+    await expect(
+      client.runStructured({
+        tier: "cheap",
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+        system: "Answer the question",
+        input: "data-analysis",
+        usageContext: { userId: "user-1", caseId: "case-1" },
+      }),
+    ).rejects.toThrow("lease lost");
+
+    expect(accounting.admit).toHaveBeenCalledOnce();
+    expect(accounting.cancel).toHaveBeenCalledOnce();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches the same JSON snapshot measured before admission", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider({ responses: ['"ok"'] });
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    let serializeCalls = 0;
+    const input = {
+      query: "safe prompt",
+      toJSON() {
+        serializeCalls += 1;
+        return {
+          query: serializeCalls === 1 ? "safe prompt" : "unbounded prompt",
+        };
+      },
+    };
+    vi.mocked(accounting.admit).mockImplementation(async () => {
+      input.query = "mutated while admitting";
+      return undefined;
+    });
+    const client = createAi({ provider, accounting, models });
+
+    await client.runStructured({
+      tier: "cheap",
+      inputSchema: z.unknown(),
+      outputSchema: z.string(),
+      system: "Answer",
+      input,
+      usageContext: { userId: "user-1" },
+    });
+
+    expect(serializeCalls).toBe(1);
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ input: { query: "safe prompt" } }),
+    );
+  });
+
+  it("dispatches the snapshotted stream input after asynchronous admission", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "streamText");
+    const input = { query: "safe prompt" };
+    vi.mocked(accounting.admit).mockImplementation(async () => {
+      input.query = "mutated while admitting";
+      return undefined;
+    });
+    const client = createAi({ provider, accounting, models });
+
+    for await (const chunk of client.streamText({
+      tier: "cheap",
+      system: "Answer",
+      input,
+      usageContext: { userId: "user-1" },
+    })) {
+      void chunk;
+    }
+
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ input: { query: "safe prompt" } }),
+    );
+  });
+
+  it("settles a cancelled stream even when the consumer stops pulling", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    vi.spyOn(provider, "streamText").mockImplementation(async function* () {
+      yield "first";
+      yield "second";
+    });
+    const client = createAi({ provider, accounting, models });
+    const controller = new AbortController();
+    const stream = client.streamText({
+      tier: "cheap",
+      system: "Answer",
+      input: "prompt",
+      usageContext: { userId: "user-1" },
+      signal: controller.signal,
+    });
+    const iterator = stream[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({ value: "first" });
+    controller.abort(new Error("caller cancelled"));
+    await vi.waitFor(() => expect(accounting.record).toHaveBeenCalledOnce());
+    expect(accounting.record).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "unknown" }),
+    );
+
+    await iterator.return?.();
+    expect(accounting.record).toHaveBeenCalledOnce();
   });
 
   it("allows one correction attempt for invalid structured output", async () => {
@@ -148,6 +302,136 @@ describe("@evianta/ai", () => {
 
     expect(dispatch).not.toHaveBeenCalled();
     expect(accounting.record).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized inputs before admitting or dispatching", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    const client = createAi({
+      provider,
+      accounting,
+      models: { ...models, maxInputTokens: 1 },
+    });
+
+    await expect(
+      client.runStructured({
+        tier: "cheap",
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+        system: "Return JSON",
+        input: "data-analysis",
+        usageContext: { userId: "user-1" },
+      }),
+    ).rejects.toMatchObject({ code: "input-limit-exceeded" });
+    expect(accounting.admit).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("requires admitted accounting and explicit caps for the paid provider", () => {
+    expect(() =>
+      createAi({
+        provider: createMockProvider(),
+        accounting: createAccounting(),
+        models: { ...models, provider: "muse" },
+      }),
+    ).toThrow(AdmissionRejectedError);
+
+    expect(() =>
+      createAi({
+        provider: createMockProvider(),
+        accounting: {
+          admit: vi.fn(),
+          record: vi.fn(),
+          cancel: vi.fn(),
+        },
+        models: {
+          ...models,
+          provider: "muse",
+          maxInputTokens: 32_000,
+          maxOutputTokens: 2_048,
+        },
+      }),
+    ).toThrow(AdmissionRejectedError);
+  });
+
+  it("binds paid model configuration to the injected provider adapter", () => {
+    expect(() =>
+      createAi({
+        provider: new MuseProvider({ apiKey: "test-key" }),
+        accounting: createAccounting(),
+        models,
+      }),
+    ).toThrow(AdmissionRejectedError);
+  });
+
+  it("rejects unbounded paid image and web-search requests before admission", async () => {
+    for (const capability of ["vision", "web-search"] as const) {
+      const accounting = createAccounting();
+      const fetchImplementation: typeof fetch = vi.fn();
+      const provider = new MuseProvider({
+        apiKey: "test-key",
+        fetchImplementation,
+      });
+      const client = createAi({
+        provider,
+        accounting,
+        models: {
+          ...models,
+          provider: "muse",
+          maxInputTokens: 32_000,
+          maxOutputTokens: 2_048,
+          capabilitiesByTier: {
+            cheap: ["structured-json", "vision", "web-search"],
+          },
+        },
+      });
+
+      await expect(
+        client.runStructured({
+          tier: "cheap",
+          inputSchema: z.unknown(),
+          outputSchema: z.string(),
+          system: "Research",
+          input: "A valid search query",
+          usageContext: { userId: "user-1" },
+          ...(capability === "vision"
+            ? {
+                images: [
+                  {
+                    mimeType: "image/png",
+                    bytes: new Uint8Array([1]),
+                  },
+                ],
+              }
+            : { webSearch: true }),
+        }),
+      ).rejects.toMatchObject({ code: "unbounded-usage-capability" });
+      expect(accounting.admit).not.toHaveBeenCalled();
+      expect(fetchImplementation).not.toHaveBeenCalled();
+    }
+  });
+
+  it("validates web-search input before usage admission", async () => {
+    const accounting = createAccounting();
+    const client = createAi({
+      provider: createMockProvider(),
+      accounting,
+      models,
+    });
+
+    await expect(
+      client.runStructured({
+        tier: "cheap",
+        inputSchema: z.unknown(),
+        outputSchema: z.string(),
+        system: "Search",
+        input: { query: "not an explicit query" },
+        usageContext: { userId: "user-1" },
+        webSearch: true,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-web-search-query" });
+    expect(accounting.admit).not.toHaveBeenCalled();
   });
 
   it("does not attach a timeout listener when output schema conversion fails", async () => {
@@ -552,7 +836,12 @@ describe("@evianta/ai", () => {
       const client = createAi({
         provider,
         accounting,
-        models: { ...models, provider: "muse" },
+        models: {
+          ...models,
+          provider: "muse",
+          maxInputTokens: 32_000,
+          maxOutputTokens: 2_048,
+        },
       });
 
       await expect(

@@ -6,7 +6,9 @@ import {
   type ExtractedDocument,
   type OwnerScope,
   type RunRecord,
+  type UsagePrice,
   type UsageRecord,
+  type UsageReservationRequest,
 } from "@evianta/core";
 import { randomUUID } from "node:crypto";
 import { MongoClient } from "mongodb";
@@ -98,6 +100,54 @@ function makeUsage(id: string, attemptId = `attempt-${id}`): UsageRecord {
     costUsd: 0,
     costStatus: "estimated",
     recordedAt: timestamp,
+  };
+}
+
+function makeUsagePrice(): UsagePrice {
+  return {
+    id: "price-v1",
+    provider: "muse",
+    model: "spark",
+    settingsKey: "settings-v1",
+    settings: { maxOutputTokens: 100 },
+    currency: "USD",
+    inputUsdPerMillion: 1,
+    outputUsdPerMillion: 2,
+    cacheReadUsdPerMillion: 1,
+    cacheWriteUsdPerMillion: 1,
+    searchUsdPerRequest: null,
+    version: 1,
+    source: "test",
+    effectiveAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function makeReservationRequest(
+  attemptId: string,
+  amountUsd: number,
+): UsageReservationRequest {
+  const price = makeUsagePrice();
+  return {
+    attemptId,
+    idempotencyKey: attemptId,
+    ownerId: "owner-1",
+    caseId: "case-1",
+    runId: "run-1",
+    leaseId: "usage-lease",
+    fencingToken: 1,
+    taskId: null,
+    provider: "muse",
+    model: "spark",
+    settings: price.settings,
+    price,
+    inputAllowanceTokens: Math.max(1, Math.floor(amountUsd * 1_000_000)),
+    outputAllowanceTokens: 1,
+    searchRequested: false,
+    userSpendLimitUsd: 1,
+    globalSpendLimitUsd: 1,
+    periodSeconds: 86_400,
+    at: timestamp,
+    expiresAt: "2027-01-15T00:15:00.000Z",
   };
 }
 
@@ -733,6 +783,762 @@ function repositoryContract(
         await repositories.usage.listForRun("run-1", ownerScope),
       ).toHaveLength(1);
     });
+
+    it("reserves spend before dispatch and preserves unknown exposure", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      });
+      const currentPrice = makeUsagePrice();
+      await repositories.usagePrices.insert(currentPrice);
+      await expect(
+        repositories.usagePrices.insert({
+          ...currentPrice,
+          model: "different-model",
+          version: 2,
+        }),
+      ).rejects.toMatchObject({ code: "duplicate-price" });
+      await repositories.usagePrices.insert({
+        ...currentPrice,
+        id: "price-v2",
+        version: 2,
+        effectiveAt: "2026-02-01T00:00:00.000Z",
+      });
+      expect(
+        await repositories.usagePrices.findActive(
+          "muse",
+          "spark",
+          "settings-v1",
+          timestamp,
+        ),
+      ).toMatchObject({ id: "price-v1", version: 1 });
+      expect(
+        await repositories.usagePrices.findActive(
+          "muse",
+          "spark",
+          "settings-v1",
+          "2026-02-02T00:00:00.000Z",
+        ),
+      ).toMatchObject({ id: "price-v2", version: 2 });
+
+      const request = makeReservationRequest("attempt-1", 0.6);
+      const reservation = await repositories.usageAdmission.reserve(request);
+      const admittedSummary = await repositories.usageAdmin.query({
+        userId: "admin-1",
+        role: "admin",
+      });
+      expect(admittedSummary.totals.unknownExposureUsd).toBeCloseTo(
+        reservation.reservedUsd,
+      );
+      await expect(
+        repositories.usageAdmission.reserve(request),
+      ).rejects.toMatchObject({ code: "usage-attempt-exists" });
+      await expect(
+        repositories.usageAdmission.reserve(
+          makeReservationRequest("attempt-2", 0.5),
+        ),
+      ).rejects.toMatchObject({ code: "spend-limit-exceeded" });
+
+      await repositories.usageAdmission.settle({
+        reservation,
+        outcome: "unknown",
+        units: {
+          input: null,
+          output: null,
+          total: null,
+          reasoning: null,
+          cacheRead: null,
+          cacheWrite: null,
+          search: null,
+        },
+        errorCode: "provider-timeout",
+        at: "2026-01-15T00:01:00.000Z",
+      });
+      await expect(
+        repositories.usageAdmission.release(reservation.id, "failed"),
+      ).rejects.toMatchObject({ code: "unknown-usage-exposure" });
+      await expect(
+        repositories.usageAdmission.reserve(
+          makeReservationRequest("attempt-3", 0.5),
+        ),
+      ).rejects.toMatchObject({ code: "spend-limit-exceeded" });
+
+      await expect(
+        repositories.usageAdmin.query({ userId: "user-1", role: "user" }),
+      ).rejects.toMatchObject({ code: "admin-required" });
+      const summary = await repositories.usageAdmin.query({
+        userId: "admin-1",
+        role: "admin",
+      });
+      expect(summary.totals).toMatchObject({
+        attempts: 1,
+        knownChargesUsd: 0,
+      });
+      expect(summary.totals.unknownExposureUsd).toBeCloseTo(0.600002);
+      expect(summary.totals.reservedUsd).toBeCloseTo(0.600002);
+      expect(summary.entries[0]).toMatchObject({
+        sourceCaseId: null,
+        useCase: "data-analysis",
+        reservationStatus: "reserved",
+        outcome: "unknown",
+      });
+      expect(
+        await repositories.usage.listForRun("run-1", ownerScope),
+      ).toMatchObject([
+        {
+          attemptId: "attempt-1",
+          costStatus: "unknown",
+          costUsd: null,
+        },
+      ]);
+    });
+
+    it("settles verified usage after an unknown-cost reservation", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      await repositories.usagePrices.insert(makeUsagePrice());
+      const reservation = await repositories.usageAdmission.reserve(
+        makeReservationRequest("attempt-late-usage", 0.6),
+      );
+      // A successful response that omitted usage keeps its reservation.
+      await repositories.usageAdmission.settle({
+        reservation,
+        outcome: "success",
+        units: {
+          input: null,
+          output: null,
+          total: null,
+          reasoning: null,
+          cacheRead: null,
+          cacheWrite: null,
+          search: null,
+        },
+        errorCode: null,
+        at: "2026-01-15T00:01:00.000Z",
+      });
+
+      await repositories.usageAdmission.settle({
+        reservation,
+        outcome: "success",
+        units: {
+          input: 100,
+          output: 100,
+          total: 200,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          search: 0,
+        },
+        errorCode: null,
+        at: "2026-01-15T00:02:00.000Z",
+      });
+
+      expect(
+        await repositories.usageAdmin.query({
+          userId: "admin-1",
+          role: "admin",
+        }),
+      ).toMatchObject({
+        totals: { knownChargesUsd: 0.0003, reservedUsd: 0 },
+      });
+    });
+
+    it("settles known charges and releases unused reservation capacity", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      });
+      await repositories.usagePrices.insert(makeUsagePrice());
+      const reservation = await repositories.usageAdmission.reserve(
+        makeReservationRequest("attempt-known", 0.8),
+      );
+      await expect(
+        repositories.usageAdmission.settle({
+          reservation,
+          outcome: "success",
+          units: {
+            input: 100,
+            output: 100,
+            total: 1,
+            reasoning: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            search: 0,
+          },
+          errorCode: null,
+          at: "2026-01-15T00:01:00.000Z",
+        }),
+      ).rejects.toThrow();
+      await repositories.usageAdmission.settle({
+        reservation,
+        outcome: "success",
+        units: {
+          input: 100,
+          output: 100,
+          total: 200,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          search: 0,
+        },
+        errorCode: null,
+        at: "2026-01-15T00:01:00.000Z",
+      });
+      const followup = await repositories.usageAdmission.reserve(
+        makeReservationRequest("attempt-followup", 0.7),
+      );
+      expect(followup.status).toBe("reserved");
+      await expect(
+        repositories.usageAdmission.reserve(
+          makeReservationRequest("attempt-over", 0.999),
+        ),
+      ).rejects.toMatchObject({ code: "spend-limit-exceeded" });
+
+      const summary = await repositories.usageAdmin.query({
+        userId: "admin-1",
+        role: "admin",
+      });
+      expect(summary.totals).toMatchObject({
+        attempts: 2,
+      });
+      expect(summary.totals.knownChargesUsd).toBeCloseTo(0.0003);
+      expect(summary.totals.reservedUsd).toBeCloseTo(0.700002);
+    });
+
+    it("keeps USD budget reservations exact across decimal settlements", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.usagePrices.insert(makeUsagePrice());
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      });
+      const tenth = await repositories.usageAdmission.reserve(
+        makeReservationRequest("attempt-tenth", 0.1),
+      );
+      const sevenTenths = await repositories.usageAdmission.reserve(
+        makeReservationRequest("attempt-seven-tenths", 0.7),
+      );
+      await repositories.usageAdmission.settle({
+        reservation: sevenTenths,
+        outcome: "success",
+        units: {
+          input: 100,
+          output: 100,
+          total: 200,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          search: 0,
+        },
+        errorCode: null,
+        at: "2026-01-15T00:01:00.000Z",
+      });
+      await repositories.usageAdmission.release(tenth.id, "failed");
+      const next = await repositories.usageAdmission.reserve(
+        makeReservationRequest("attempt-next", 0.9),
+      );
+      expect(next.status).toBe("reserved");
+    });
+
+    it("scopes run usage ledger queries to the requested case", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.cases.insert(makeCase("case-2", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-2", "case-2", "owner-1"));
+      await repositories.usagePrices.insert(makeUsagePrice());
+      const lease = await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-2",
+        runId: "run-2",
+        leaseId: "lease-2",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      });
+      await repositories.usageAdmission.reserve({
+        ...makeReservationRequest("attempt-case-2", 0.1),
+        caseId: "case-2",
+        runId: "run-2",
+        leaseId: lease.leaseId,
+        fencingToken: lease.fencingToken,
+      });
+
+      expect(await repositories.usage.listForRun("run-2", ownerScope)).toEqual(
+        [],
+      );
+    });
+
+    it("skips expiry recovery for attempts that already recorded an unknown outcome", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.usagePrices.insert(makeUsagePrice());
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2027-01-15T00:15:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      });
+      const recorded = await repositories.usageAdmission.reserve({
+        ...makeReservationRequest("attempt-a-recorded", 0.1),
+        expiresAt: "2026-01-15T00:01:00.000Z",
+      });
+      await repositories.usageAdmission.reserve({
+        ...makeReservationRequest("attempt-b-abandoned", 0.1),
+        expiresAt: "2026-01-15T00:01:00.000Z",
+      });
+      await repositories.usageAdmission.settle({
+        reservation: recorded,
+        outcome: "unknown",
+        units: {
+          input: null,
+          output: null,
+          total: null,
+          reasoning: null,
+          cacheRead: null,
+          cacheWrite: null,
+          search: null,
+        },
+        errorCode: "provider-cancelled",
+        at: "2026-01-15T00:00:30.000Z",
+      });
+
+      expect(
+        await repositories.usageLedger.recoverExpired(
+          "2026-01-15T00:02:00.000Z",
+          1,
+        ),
+      ).toBe(1);
+      const entries = await repositories.usageLedger.list();
+      expect(
+        entries.find((entry) => entry.attemptId === "attempt-b-abandoned"),
+      ).toMatchObject({ outcome: "unknown", errorCode: "admission-expired" });
+      expect(
+        entries.find((entry) => entry.attemptId === "attempt-a-recorded"),
+      ).toMatchObject({
+        outcome: "unknown",
+        errorCode: "provider-cancelled",
+        reservationStatus: "reserved",
+      });
+      expect(
+        await repositories.usageLedger.recoverExpired(
+          "2026-01-15T00:02:00.000Z",
+          1,
+        ),
+      ).toBe(0);
+    });
+
+    it("recovers expired admitted attempts as unknown exposure without releasing funds", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.usagePrices.insert(makeUsagePrice());
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2027-01-15T00:15:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      });
+      const reservation = await repositories.usageAdmission.reserve({
+        ...makeReservationRequest("attempt-expired", 0.1),
+        expiresAt: "2026-01-15T00:01:00.000Z",
+      });
+      await repositories.usageAdmission.reserve({
+        ...makeReservationRequest("attempt-expired-2", 0.1),
+        expiresAt: "2026-01-15T00:01:00.000Z",
+      });
+
+      expect(
+        await repositories.usageLedger.recoverExpired(
+          "2026-01-15T00:02:00.000Z",
+          1,
+        ),
+      ).toBe(1);
+      const firstRecovery = await repositories.usageLedger.list();
+      expect(
+        firstRecovery.filter(
+          (entry) => entry.errorCode === "admission-expired",
+        ),
+      ).toHaveLength(1);
+      expect(
+        firstRecovery.filter((entry) => entry.outcome === "admitted"),
+      ).toHaveLength(1);
+      await repositories.usageAdmin.query({
+        userId: "admin-1",
+        role: "admin",
+      });
+      expect(
+        (await repositories.usageLedger.list()).filter(
+          (entry) => entry.outcome === "admitted",
+        ),
+      ).toHaveLength(1);
+      expect(
+        await repositories.usageLedger.recoverExpired(
+          "2026-01-15T00:02:00.000Z",
+          1,
+        ),
+      ).toBe(1);
+      expect(
+        await repositories.usageLedger.recoverExpired(
+          "2026-01-15T00:02:00.000Z",
+          1,
+        ),
+      ).toBe(0);
+      expect(
+        await repositories.usageAdmin.query({
+          userId: "admin-1",
+          role: "admin",
+        }),
+      ).toMatchObject({
+        totals: {
+          unknownExposureUsd: reservation.reservedUsd * 2,
+          attempts: 2,
+        },
+      });
+      await repositories.usageAdmission.settle({
+        reservation,
+        outcome: "success",
+        units: {
+          input: 100,
+          output: 100,
+          total: 200,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          search: 0,
+        },
+        errorCode: null,
+        at: "2026-01-15T00:03:00.000Z",
+      });
+      const settledEntries = await repositories.usageLedger.list();
+      expect(
+        settledEntries.find((entry) => entry.attemptId === "attempt-expired"),
+      ).toMatchObject({
+        outcome: "success",
+        reservationStatus: "settled",
+        costStatus: "estimated",
+      });
+    });
+
+    it("fences run concurrency and retains the case lock while waiting", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.cases.insert(makeCase("case-2", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-2", "case-2", "owner-1"));
+      const request = {
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 2,
+      };
+      const firstLease = await repositories.runAdmission.acquire(request);
+      await expect(
+        repositories.runAdmission.acquire({
+          ...request,
+          caseId: "case-2",
+          runId: "run-2",
+          leaseId: "lease-2",
+        }),
+      ).rejects.toMatchObject({ code: "run-concurrency-limit" });
+
+      const waitingFence = await repositories.runAdmission.waitForInput({
+        ...request,
+        fencingToken: firstLease.fencingToken,
+      });
+      expect(waitingFence).toBe(firstLease.fencingToken + 1);
+      expect(
+        await repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({
+        status: "waiting-for-input",
+        inputRequired: true,
+        fencingToken: waitingFence,
+      });
+      await expect(
+        repositories.runs.insert(makeRun("run-3", "case-1", "owner-1")),
+      ).rejects.toMatchObject({ code: "duplicate-record" });
+
+      const secondLease = await repositories.runAdmission.acquire({
+        ...request,
+        caseId: "case-2",
+        runId: "run-2",
+        leaseId: "lease-2",
+      });
+      expect(secondLease.fencingToken).toBe(1);
+      await repositories.runAdmission.release({
+        ...request,
+        caseId: "case-2",
+        runId: "run-2",
+        leaseId: secondLease.leaseId,
+        fencingToken: secondLease.fencingToken,
+        at: "2026-01-15T00:02:00.000Z",
+      });
+
+      const resumed = await repositories.runAdmission.resume({
+        ...request,
+        leaseId: "lease-1-resumed",
+        at: "2026-01-15T00:03:00.000Z",
+        expiresAt: "2026-01-15T00:18:00.000Z",
+        fencingToken: firstLease.fencingToken + 1,
+      });
+      expect(resumed.fencingToken).toBe(firstLease.fencingToken + 2);
+      expect(
+        await repositories.runAdmission.release({
+          ...request,
+          leaseId: firstLease.leaseId,
+          fencingToken: firstLease.fencingToken,
+          at: "2026-01-15T00:04:00.000Z",
+        }),
+      ).toBe(false);
+      expect(
+        await repositories.runAdmission.release({
+          ...request,
+          leaseId: resumed.leaseId,
+          fencingToken: resumed.fencingToken,
+          at: "2026-01-15T00:04:00.000Z",
+        }),
+      ).toBe(true);
+    });
+
+    it("renews only an active lease with the current fencing token", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const lease = await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      const staleRun = await repositories.runs.findOwnedById(
+        "run-1",
+        "owner-1",
+      );
+      if (!staleRun) throw new Error("Run disappeared after admission");
+
+      expect(
+        await repositories.runAdmission.renew({
+          ownerId: "owner-1",
+          caseId: "case-1",
+          runId: "run-1",
+          leaseId: lease.leaseId,
+          fencingToken: lease.fencingToken,
+          at: "2026-01-15T00:01:00.000Z",
+          expiresAt: "2026-01-15T00:30:00.000Z",
+        }),
+      ).toMatchObject({
+        leaseId: lease.leaseId,
+        fencingToken: lease.fencingToken,
+        expiresAt: "2026-01-15T00:30:00.000Z",
+      });
+      expect(
+        await repositories.runs.updateOwned(
+          { ...staleRun, updatedAt: "2026-01-15T00:02:00.000Z" },
+          "owner-1",
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.runAdmission.renew({
+          ownerId: "owner-1",
+          caseId: "case-1",
+          runId: "run-1",
+          leaseId: lease.leaseId,
+          fencingToken: lease.fencingToken + 1,
+          at: "2026-01-15T00:02:00.000Z",
+          expiresAt: "2026-01-15T00:31:00.000Z",
+        }),
+      ).toBeNull();
+    });
+
+    it("rejects waiting transitions after cancellation is requested", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const lease = await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      const run = await repositories.runs.findOwnedById("run-1", "owner-1");
+      if (!run) throw new Error("Run disappeared after admission");
+      expect(
+        await repositories.runs.updateOwned(
+          { ...run, cancellationRequested: true },
+          "owner-1",
+        ),
+      ).toBe(true);
+
+      expect(
+        await repositories.runAdmission.waitForInput({
+          ownerId: "owner-1",
+          caseId: "case-1",
+          runId: "run-1",
+          leaseId: lease.leaseId,
+          fencingToken: lease.fencingToken,
+          at: "2026-01-15T00:01:00.000Z",
+        }),
+      ).toBeNull();
+      expect(
+        await repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({ status: "running", cancellationRequested: true });
+    });
+
+    it("preserves the input requirement of a waiting run", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const lease = await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      expect(
+        await repositories.runAdmission.waitForInput({
+          ownerId: "owner-1",
+          caseId: "case-1",
+          runId: "run-1",
+          leaseId: lease.leaseId,
+          fencingToken: lease.fencingToken,
+          at: "2026-01-15T00:01:00.000Z",
+        }),
+      ).not.toBeNull();
+      const waiting = await repositories.runs.findOwnedById("run-1", "owner-1");
+      if (!waiting) throw new Error("Run disappeared while waiting");
+
+      expect(
+        await repositories.runs.updateOwned(
+          { ...waiting, inputRequired: false },
+          "owner-1",
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.runs.updateOwned(
+          { ...waiting, updatedAt: "2026-01-15T00:02:00.000Z" },
+          "owner-1",
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({ status: "waiting-for-input", inputRequired: true });
+    });
+
+    it("keeps lease and admission transitions out of generic run updates", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      const admitted = await repositories.runs.findOwnedById(
+        "run-1",
+        "owner-1",
+      );
+      if (!admitted) throw new Error("Run disappeared after admission");
+
+      expect(
+        await repositories.runs.updateOwned(
+          {
+            ...admitted,
+            status: "waiting-for-input",
+            inputRequired: true,
+            leaseId: null,
+            leaseExpiresAt: null,
+          },
+          "owner-1",
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.runs.updateOwned(
+          { ...admitted, status: "completed" },
+          "owner-1",
+        ),
+      ).toBe(false);
+
+      expect(
+        await repositories.runs.updateOwned(
+          { ...admitted, cancellationRequested: true },
+          "owner-1",
+        ),
+      ).toBe(true);
+      const cancelled = await repositories.runs.findOwnedById(
+        "run-1",
+        "owner-1",
+      );
+      if (!cancelled) throw new Error("Run disappeared after cancellation");
+      expect(
+        await repositories.runs.updateOwned(
+          { ...cancelled, cancellationRequested: false },
+          "owner-1",
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({
+        status: "running",
+        leaseId: "lease-1",
+        cancellationRequested: true,
+      });
+    });
   });
 }
 
@@ -743,6 +1549,35 @@ describe("in-memory repositories", () => {
       repositories: store.repositories,
       close: async () => undefined,
     };
+  });
+
+  it("returns all usage ledger attempts for a run beyond the admin page cap", async () => {
+    const store = createInMemoryStore();
+    const { repositories } = store;
+    await repositories.cases.insert(makeCase("case-1", "owner-1"));
+    await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+    const lease = await repositories.runAdmission.acquire({
+      ownerId: "owner-1",
+      caseId: "case-1",
+      runId: "run-1",
+      leaseId: "history-lease",
+      at: timestamp,
+      expiresAt: "2027-01-15T00:15:00.000Z",
+      userLimit: 1,
+      globalLimit: 1,
+    });
+    await repositories.usagePrices.insert(makeUsagePrice());
+    for (let index = 0; index < 5_001; index += 1) {
+      await repositories.usageAdmission.reserve({
+        ...makeReservationRequest(`history-${index}`, 0.000001),
+        leaseId: lease.leaseId,
+        fencingToken: lease.fencingToken,
+      });
+    }
+
+    expect(
+      await repositories.usage.listForRun("run-1", ownerScope),
+    ).toHaveLength(5_001);
   });
 });
 
@@ -755,7 +1590,7 @@ describe("MongoDB repositories", () => {
 
   afterAll(async () => {
     await mongoReplSet?.stop();
-  });
+  }, 30_000);
 
   repositoryContract("repository contract", async () => {
     const harness = await createMongoHarness();
@@ -901,61 +1736,79 @@ describe("MongoDB repositories", () => {
       await harness.store.repositories.runs.insert(
         makeRun("run-1", "case-1", "owner-1"),
       );
-      const lease = {
+      const request = {
         runId: "run-1",
         ownerId: "owner-1",
         leaseId: "lease-1",
-        expiresAt: "2026-01-15T00:01:00-05:00",
+        expiresAt: "2026-01-15T00:03:00.000Z",
         at: timestamp,
       };
-      const first = await harness.store.acquireRunLease(lease);
-      expect(first?.fencingToken).toBe(1);
+      expect(await harness.store.acquireRunLease(request)).toBeNull();
+      const firstLease = await harness.store.repositories.runAdmission.acquire({
+        ...request,
+        caseId: "case-1",
+        expiresAt: "2026-01-15T00:05:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      expect(firstLease.fencingToken).toBe(1);
+      const first = await harness.store.repositories.runs.findOwnedById(
+        "run-1",
+        "owner-1",
+      );
+      if (!first) throw new Error("Run disappeared after admission");
+      expect(
+        await harness.store.runs.updateOne(
+          { _id: "run-1" },
+          { $set: { leaseExpiresAt: "2026-01-15T00:01:00.000Z" } },
+        ),
+      ).toMatchObject({ matchedCount: 1, modifiedCount: 1 });
       await expect(
-        harness.store.acquireRunLease({ ...lease, leaseId: "" }),
+        harness.store.acquireRunLease({ ...request, leaseId: "" }),
       ).rejects.toThrow();
       await expect(
         harness.store.acquireRunLease({
-          ...lease,
+          ...request,
           expiresAt: "not-a-date",
         }),
       ).rejects.toThrow();
       await expect(
-        harness.store.acquireRunLease({ ...lease, expiresAt: timestamp }),
+        harness.store.acquireRunLease({ ...request, expiresAt: timestamp }),
       ).rejects.toThrow();
       expect(
         await harness.store.repositories.runs.findOwnedById("run-1", "owner-1"),
       ).toMatchObject({ fencingToken: 1, leaseId: "lease-1" });
       expect(
         await harness.store.acquireRunLease({
-          ...lease,
+          ...request,
           leaseId: "lease-2",
           at: "2026-01-15T00:00:30.000Z",
         }),
       ).toBeNull();
-      expect(
-        await harness.store.acquireRunLease({
-          ...lease,
-          leaseId: "lease-2",
-          at: "2026-01-15T01:00:00.000Z",
-        }),
-      ).toBeNull();
       const reclaimed = await harness.store.acquireRunLease({
-        ...lease,
+        ...request,
         leaseId: "lease-2",
-        expiresAt: "2026-01-15T05:03:00.000Z",
-        at: "2026-01-15T05:02:00.000Z",
+        expiresAt: "2026-01-15T00:03:00.000Z",
+        at: "2026-01-15T00:02:00.000Z",
       });
       expect(reclaimed?.fencingToken).toBe(2);
       expect(reclaimed?.leaseId).toBe("lease-2");
-      expect(first).not.toBeNull();
+      expect(
+        await harness.store.acquireRunLease({
+          ...request,
+          leaseId: "lease-3",
+          expiresAt: "2026-01-15T01:02:00.000Z",
+          at: "2026-01-15T01:00:00.000Z",
+        }),
+      ).toBeNull();
       expect(
         await harness.store.repositories.runs.updateOwned(
           {
-            ...first!,
+            ...first,
             status: "completed",
             leaseId: null,
             leaseExpiresAt: null,
-            updatedAt: "2026-01-15T05:02:30.000Z",
+            updatedAt: "2026-01-15T00:02:30.000Z",
           },
           "owner-1",
         ),
@@ -992,4 +1845,373 @@ describe("MongoDB repositories", () => {
       await harness.store.close();
     }
   });
+
+  it("backfills active case keys for waiting runs before enforcing uniqueness", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("case-1", "owner-1"),
+      );
+      await harness.store.repositories.cases.insert(
+        makeCase("case-completed", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert({
+        ...makeRun("run-1", "case-1", "owner-1"),
+        status: "waiting-for-input",
+        inputRequired: true,
+      });
+      await harness.store.repositories.runs.insert({
+        ...makeRun("run-completed", "case-completed", "owner-1"),
+        status: "completed",
+      });
+      await harness.store.runs.updateOne(
+        { _id: "run-1" },
+        { $unset: { activeCaseKey: "" } },
+      );
+
+      await harness.store.initialize();
+
+      expect(await harness.store.runs.findOne({ _id: "run-1" })).toMatchObject({
+        activeCaseKey: JSON.stringify(["owner-1", "case-1"]),
+      });
+      expect(
+        await harness.store.repositories.runAdmission.resume({
+          ownerId: "owner-1",
+          caseId: "case-1",
+          runId: "run-1",
+          leaseId: "resumed-lease",
+          at: timestamp,
+          expiresAt: "2026-01-15T00:15:00.000Z",
+          userLimit: 1,
+          globalLimit: 1,
+          fencingToken: 0,
+        }),
+      ).toMatchObject({ fencingToken: 1 });
+      expect(
+        await harness.store.runs.findOne({ _id: "run-completed" }),
+      ).not.toHaveProperty("activeCaseKey");
+      await expect(
+        harness.store.repositories.runs.insert(
+          makeRun("run-2", "case-1", "owner-1"),
+        ),
+      ).rejects.toMatchObject({ code: "duplicate-record" });
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
+
+  it("fails initialization explicitly when active runs conflict during key migration", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("case-1", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert(
+        makeRun("run-1", "case-1", "owner-1"),
+      );
+      await harness.store.runs.updateOne(
+        { _id: "run-1" },
+        { $unset: { activeCaseKey: "" } },
+      );
+      const conflictingRun = {
+        ...makeRun("run-2", "case-1", "owner-1"),
+        _id: "run-2",
+      };
+      await harness.store.runs.insertOne(conflictingRun);
+
+      await expect(harness.store.initialize()).rejects.toMatchObject({
+        code: "active-run-migration-conflict",
+      });
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
+
+  it("backfills existing active run leases and their concurrency counters", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("case-live", "owner-1"),
+      );
+      await harness.store.repositories.cases.insert(
+        makeCase("case-next", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert(
+        makeRun("run-live", "case-live", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert(
+        makeRun("run-next", "case-next", "owner-1"),
+      );
+      await harness.store.runs.updateOne(
+        { _id: "run-live" },
+        {
+          $set: {
+            leaseId: "legacy-lease",
+            leaseExpiresAt: "2099-01-15T00:15:00.000Z",
+            fencingToken: 4,
+          },
+        },
+      );
+
+      await harness.store.initialize();
+      await harness.store.initialize();
+
+      expect(
+        await harness.client
+          .db(harness.dbName)
+          .collection("runAdmissions")
+          .findOne({
+            _id: JSON.stringify(["owner-1", "case-live"]),
+          }),
+      ).toMatchObject({
+        runId: "run-live",
+        state: "active",
+        leaseId: "legacy-lease",
+        fencingToken: 4,
+      });
+      expect(
+        await harness.client
+          .db(harness.dbName)
+          .collection("runAdmissionCounters")
+          .findOne({ _id: "global" }),
+      ).toMatchObject({ activeRuns: 1 });
+      await expect(
+        harness.store.repositories.runAdmission.acquire({
+          ownerId: "owner-1",
+          caseId: "case-next",
+          runId: "run-next",
+          leaseId: "next-lease",
+          at: timestamp,
+          expiresAt: "2026-01-15T00:15:00.000Z",
+          userLimit: 1,
+          globalLimit: 1,
+        }),
+      ).rejects.toMatchObject({ code: "run-concurrency-limit" });
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
+
+  it("compares Mongo usage timestamps as instants for prices and ledger filters", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("case-1", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert(
+        makeRun("run-1", "case-1", "owner-1"),
+      );
+      await harness.store.repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      });
+      const price = makeUsagePrice();
+      await harness.store.repositories.usagePrices.insert(price);
+      const laterPrice = {
+        ...price,
+        id: "price-later",
+        version: 2,
+        effectiveAt: "2026-01-15T00:01:00-05:00",
+      };
+      await harness.store.repositories.usagePrices.insert(laterPrice);
+      await harness.client
+        .db(harness.dbName)
+        .collection("usagePrices")
+        .updateOne(
+          { _id: laterPrice.id },
+          { $set: { effectiveAt: laterPrice.effectiveAt } },
+        );
+      expect(
+        await harness.store.repositories.usagePrices.findActive(
+          "muse",
+          "spark",
+          "settings-v1",
+          "2026-01-15T01:00:00.000Z",
+        ),
+      ).toMatchObject({ id: "price-v1" });
+      expect(
+        await harness.store.repositories.usagePrices.findActive(
+          "muse",
+          "spark",
+          "settings-v1",
+          "2026-01-15T06:00:00.000Z",
+        ),
+      ).toMatchObject({ id: "price-later" });
+
+      // Stored and requested snapshots use different offsets for one instant.
+      await harness.client
+        .db(harness.dbName)
+        .collection("usagePrices")
+        .updateOne(
+          { _id: price.id },
+          { $set: { effectiveAt: "2025-12-31T19:00:00-05:00" } },
+        );
+      const reservation =
+        await harness.store.repositories.usageAdmission.reserve({
+          ...makeReservationRequest("attempt-timestamp", 0.1),
+          price: {
+            ...price,
+            effectiveAt: "2026-01-01T05:30:00+05:30",
+          },
+        });
+      const ledgerIndexes = await harness.client
+        .db(harness.dbName)
+        .collection("usageLedger")
+        .listIndexes()
+        .toArray();
+      expect(
+        ledgerIndexes.some(
+          (index) =>
+            index.key.createdAtInstant === -1 &&
+            index.key.attemptId === -1 &&
+            Object.keys(index.key).length === 2,
+        ),
+      ).toBe(true);
+      await harness.client
+        .db(harness.dbName)
+        .collection("usageLedger")
+        .updateOne(
+          { _id: reservation.attemptId },
+          {
+            $set: {
+              createdAt: "2026-01-15T00:00:00-05:00",
+            },
+            $unset: { createdAtInstant: "" },
+          },
+        );
+      await harness.store.initialize();
+      expect(
+        await harness.store.repositories.usageLedger.list({
+          from: "2026-01-15T04:00:00.000Z",
+          to: "2026-01-15T06:00:00.000Z",
+        }),
+      ).toHaveLength(1);
+      expect(
+        await harness.store.repositories.usageLedger.list({
+          from: "2026-01-15T02:00:00.000Z",
+          to: "2026-01-15T04:00:00.000Z",
+        }),
+      ).toHaveLength(0);
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
+
+  it("returns all Mongo usage ledger attempts for a run beyond the admin page cap", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("case-1", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert(
+        makeRun("run-1", "case-1", "owner-1"),
+      );
+      const lease = await harness.store.repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "history-lease",
+        at: timestamp,
+        expiresAt: "2027-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      await harness.store.repositories.usagePrices.insert(makeUsagePrice());
+      await harness.store.repositories.usageAdmission.reserve({
+        ...makeReservationRequest("history-base", 0.000001),
+        leaseId: lease.leaseId,
+        fencingToken: lease.fencingToken,
+      });
+      const base = (
+        await harness.store.repositories.usageLedger.list({
+          limit: 1,
+        })
+      )[0];
+      if (!base) throw new Error("Usage ledger entry was not written");
+      const extra = Array.from({ length: 5_001 }, (_, index) => {
+        const attemptId = `history-${index}`;
+        return {
+          ...base,
+          _id: attemptId,
+          id: attemptId,
+          attemptId,
+          createdAtInstant: new Date(Date.parse(base.createdAt)),
+        };
+      });
+      await harness.client
+        .db(harness.dbName)
+        .collection("usageLedger")
+        .insertMany(extra);
+
+      expect(
+        await harness.store.repositories.usage.listForRun("run-1", ownerScope),
+      ).toHaveLength(5_002);
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
+
+  it("reaps expired admissions in committed batches before capacity checks", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("case-live", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert(
+        makeRun("run-live", "case-live", "owner-1"),
+      );
+      const database = harness.client.db(harness.dbName);
+      const locks = Array.from({ length: 1_001 }, (_, index) => {
+        const caseId = `expired-case-${index}`;
+        return {
+          _id: JSON.stringify(["owner-1", caseId]),
+          ownerId: "owner-1",
+          caseId,
+          runId: `expired-run-${index}`,
+          state: "active",
+          leaseId: `expired-lease-${index}`,
+          fencingToken: 1,
+          leaseExpiresAt: "2026-01-14T23:00:00.000Z",
+          updatedAt: timestamp,
+        };
+      });
+      await database.collection("runAdmissions").insertMany(locks);
+      await database.collection("runAdmissionCounters").insertMany([
+        { _id: "user:owner-1", activeRuns: locks.length },
+        { _id: "global", activeRuns: locks.length },
+      ]);
+
+      const lease = await harness.store.repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-live",
+        runId: "run-live",
+        leaseId: "live-lease",
+        at: "2026-01-15T00:01:00.000Z",
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+
+      expect(lease.fencingToken).toBe(1);
+      expect(
+        await database
+          .collection("runAdmissionCounters")
+          .findOne({ _id: "global" }),
+      ).toMatchObject({ activeRuns: 1 });
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  }, 30_000);
 });

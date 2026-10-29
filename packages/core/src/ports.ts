@@ -15,7 +15,10 @@ import type {
   Task,
   UserRecord,
   UsageRecord,
+  UsageLedgerEntry,
+  UsagePrice,
   UsageReservation,
+  UsageUnits,
 } from "./domain.js";
 
 export interface OwnerScope {
@@ -174,22 +177,118 @@ export interface SignedDocumentStore extends DocumentStore {
 }
 
 export interface UsageReservationRequest {
+  attemptId: string;
+  idempotencyKey: string;
   ownerId: string;
   caseId: string;
   runId: string;
-  amountUsd: number;
-  idempotencyKey: string;
+  leaseId: string;
+  fencingToken: number;
+  taskId: string | null;
+  provider: string;
+  model: string;
+  settings: Record<string, unknown>;
+  price: UsagePrice;
+  inputAllowanceTokens: number;
+  outputAllowanceTokens: number;
+  searchRequested: boolean;
+  userSpendLimitUsd: number;
+  globalSpendLimitUsd: number;
+  periodSeconds: number;
+  at: string;
+  expiresAt: string;
 }
 
 export interface UsageSettlement {
   reservation: UsageReservation;
-  usage: UsageRecord;
+  outcome: "success" | "failed" | "unknown" | "cancelled";
+  units: UsageUnits;
+  errorCode: string | null;
+  at: string;
 }
 
 export interface UsageAdmissionPort {
   reserve(request: UsageReservationRequest): Promise<UsageReservation>;
   settle(settlement: UsageSettlement): Promise<void>;
   release(reservationId: string, reason: "cancelled" | "failed"): Promise<void>;
+}
+
+export interface UsagePriceRepository {
+  findActive(
+    provider: string,
+    model: string,
+    settingsKey: string,
+    at: string,
+  ): Promise<UsagePrice | null>;
+  insert(price: UsagePrice): Promise<void>;
+}
+
+export interface UsageLedgerFilter {
+  ownerId?: string;
+  caseId?: string;
+  runId?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+export interface UsageLedgerRepository {
+  list(filter?: UsageLedgerFilter): Promise<UsageLedgerEntry[]>;
+  listForRun(
+    ownerId: string,
+    caseId: string,
+    runId: string,
+  ): Promise<UsageLedgerEntry[]>;
+  recoverExpired(at: string, limit?: number): Promise<number>;
+}
+
+export interface RunAdmissionRequest {
+  ownerId: string;
+  caseId: string;
+  runId: string;
+  leaseId: string;
+  at: string;
+  expiresAt: string;
+  userLimit: number;
+  globalLimit: number;
+}
+
+export interface RunAdmissionLease {
+  leaseId: string;
+  fencingToken: number;
+  expiresAt: string;
+}
+
+export interface RunAdmissionPort {
+  acquire(request: RunAdmissionRequest): Promise<RunAdmissionLease>;
+  renew(request: {
+    ownerId: string;
+    caseId: string;
+    runId: string;
+    leaseId: string;
+    fencingToken: number;
+    at: string;
+    expiresAt: string;
+  }): Promise<RunAdmissionLease | null>;
+  waitForInput(request: {
+    ownerId: string;
+    caseId: string;
+    runId: string;
+    leaseId: string;
+    fencingToken: number;
+    at: string;
+  }): Promise<number | null>;
+  resume(
+    request: RunAdmissionRequest & { fencingToken: number },
+  ): Promise<RunAdmissionLease>;
+  release(request: {
+    ownerId: string;
+    caseId: string;
+    runId: string;
+    leaseId: string | null;
+    fencingToken: number;
+    at: string;
+  }): Promise<boolean>;
 }
 
 export interface RateLimitRequest {

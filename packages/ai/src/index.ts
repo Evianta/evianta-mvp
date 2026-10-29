@@ -16,7 +16,9 @@ export interface ModelConfiguration {
   model: string;
   reasoning?: string;
   maxOutputTokens: number;
+  maxInputTokens: number;
   pricingIdentity: string;
+  pricingSettings: Record<string, string | number | boolean | null>;
   capabilities: readonly ModelCapability[];
 }
 
@@ -24,7 +26,9 @@ export interface ModelSettings {
   provider: ModelProviderName;
   sparkModel?: string;
   wonderModel?: string;
+  maxInputTokens?: number;
   maxOutputTokens?: number;
+  pricingSettings?: Record<string, string | number | boolean | null>;
   capabilitiesByTier?: Partial<Record<ModelTier, readonly ModelCapability[]>>;
 }
 
@@ -49,11 +53,18 @@ export function modelForTier(
     );
   }
 
+  const maxOutputTokens = settings.maxOutputTokens ?? 2048;
+
   return {
     provider: settings.provider,
     model,
-    maxOutputTokens: settings.maxOutputTokens ?? 2048,
+    maxOutputTokens,
+    maxInputTokens: settings.maxInputTokens ?? 32_000,
     pricingIdentity: `${settings.provider}:${model}`,
+    pricingSettings: {
+      ...settings.pricingSettings,
+      maxOutputTokens,
+    },
     capabilities:
       settings.capabilitiesByTier?.[tier] ??
       (settings.provider === "mock"
@@ -66,6 +77,8 @@ export interface UsageContext {
   userId: string;
   caseId?: string;
   runId?: string;
+  leaseId?: string;
+  fencingToken?: number;
   taskId?: string;
 }
 
@@ -74,16 +87,22 @@ export interface UsageAttempt {
   context: UsageContext;
   provider: ModelProviderName;
   model: string;
+  settings: Record<string, string | number | boolean | null>;
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  searchRequested: boolean;
   outcome: "success" | "failed" | "unknown";
   units: UsageUnits;
   errorCode?: string;
 }
 
 export interface UsageAccounting {
+  mode?: "test" | "admitted";
   admit(
     attempt: Omit<UsageAttempt, "outcome" | "units" | "errorCode">,
-  ): Promise<void>;
-  record(attempt: UsageAttempt): Promise<void>;
+  ): Promise<AbortSignal | undefined>;
+  record(attempt: UsageAttempt): Promise<CostEstimate | void>;
+  cancel(attemptId: string): Promise<void>;
 }
 
 export interface Citation {
@@ -116,6 +135,7 @@ export interface ImageInput {
 }
 
 export interface ModelProvider {
+  readonly providerName: ModelProviderName;
   generateStructured(
     request: StructuredGenerationRequest,
   ): Promise<ProviderResult>;
@@ -179,8 +199,8 @@ export class OutputValidationError extends AiError {
 }
 
 export class AdmissionRejectedError extends AiError {
-  constructor() {
-    super("Usage admission was rejected", "usage-admission-rejected");
+  constructor(message = "Usage admission was rejected") {
+    super(message, "usage-admission-rejected");
   }
 }
 
@@ -207,8 +227,8 @@ export interface RunStructuredRequest<I, O> {
 }
 
 export interface CostEstimate {
-  status: "unknown";
-  costUsd: null;
+  status: "estimated" | "unknown";
+  costUsd: number | null;
   pricingIdentity: string;
 }
 
@@ -284,6 +304,36 @@ function combineSignals(
   };
 }
 
+function combineAbortSignals(signals: Array<AbortSignal | undefined>): {
+  signal: AbortSignal;
+  clear: () => void;
+} {
+  const controller = new AbortController();
+  const activeSignals = signals.filter(
+    (signal): signal is AbortSignal => signal !== undefined,
+  );
+  const abort = (signal: AbortSignal) => {
+    if (!controller.signal.aborted) controller.abort(signal.reason);
+  };
+  const listeners = activeSignals.map((signal) => {
+    const listener = () => abort(signal);
+    if (signal.aborted) {
+      abort(signal);
+    } else {
+      signal.addEventListener("abort", listener, { once: true });
+    }
+    return { signal, listener };
+  });
+  return {
+    signal: controller.signal,
+    clear: () => {
+      for (const { signal, listener } of listeners) {
+        signal.removeEventListener("abort", listener);
+      }
+    },
+  };
+}
+
 function isRetryable(error: unknown): error is ProviderRequestError {
   return (
     error instanceof ProviderRequestError &&
@@ -335,7 +385,78 @@ function validateImages(images: readonly ImageInput[] | undefined): void {
   }
 }
 
+function inputTokenAllowance(input: {
+  system: string;
+  input: unknown;
+  schema?: Record<string, unknown>;
+  images?: readonly ImageInput[];
+}): number {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify({
+      system: input.system,
+      input: input.input,
+      schema: input.schema,
+    });
+  } catch {
+    throw new AiError(
+      "The model input cannot be serialized for usage admission",
+      "invalid-model-input",
+    );
+  }
+  const bytes =
+    Buffer.byteLength(serialized ?? "", "utf8") +
+    (input.images ?? []).reduce(
+      (total, image) => total + image.bytes.byteLength,
+      0,
+    );
+  return Math.ceil(bytes * 1.5) + 256;
+}
+
+function snapshotJsonValue(value: unknown): unknown {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new Error("Value is not JSON");
+    return JSON.parse(serialized);
+  } catch {
+    throw new AiError(
+      "The model input cannot be serialized for usage admission",
+      "invalid-model-input",
+    );
+  }
+}
+
+function validateWebSearchQuery(input: unknown): void {
+  if (
+    typeof input !== "string" ||
+    input.trim().length === 0 ||
+    input.trim().length > 500
+  ) {
+    throw new AiError(
+      "Web-search input must be an explicit query of at most 500 characters",
+      "invalid-web-search-query",
+    );
+  }
+}
+
 export function createAi(options: AiClientOptions): AiClient {
+  if (options.provider.providerName !== options.models.provider) {
+    throw new AdmissionRejectedError(
+      "The configured model provider does not match the injected provider adapter",
+    );
+  }
+  if (
+    options.models.provider === "muse" &&
+    (options.accounting.mode !== "admitted" ||
+      !Number.isInteger(options.models.maxInputTokens) ||
+      (options.models.maxInputTokens ?? 0) < 1 ||
+      !Number.isInteger(options.models.maxOutputTokens) ||
+      (options.models.maxOutputTokens ?? 0) < 1)
+  ) {
+    throw new AdmissionRejectedError(
+      "Paid models require durable accounting and explicit input/output limits",
+    );
+  }
   const defaultTimeout = options.timeoutMs ?? 60_000;
 
   async function runStructured<I, O>(
@@ -356,6 +477,27 @@ export function createAi(options: AiClientOptions): AiClient {
       );
     }
     validateImages(request.images);
+    if (request.webSearch) validateWebSearchQuery(input);
+    if (
+      options.accounting.mode === "admitted" &&
+      model.provider === "muse" &&
+      request.webSearch
+    ) {
+      throw new AiError(
+        "Paid web search is disabled until provider search usage can be bounded",
+        "unbounded-usage-capability",
+      );
+    }
+    if (
+      options.accounting.mode === "admitted" &&
+      model.provider === "muse" &&
+      request.images?.length
+    ) {
+      throw new AiError(
+        "Paid image requests are disabled until provider image usage can be bounded",
+        "unbounded-usage-capability",
+      );
+    }
 
     const requestedOutputTokens =
       request.maxOutputTokens ??
@@ -368,15 +510,23 @@ export function createAi(options: AiClientOptions): AiClient {
       requestedOutputTokens,
       model.maxOutputTokens,
     );
+    const dispatchedModel: ModelConfiguration = {
+      ...model,
+      maxOutputTokens,
+      pricingSettings: {
+        ...model.pricingSettings,
+        maxOutputTokens,
+      },
+    };
     const schema = zod.toJSONSchema(request.outputSchema) as Record<
       string,
       unknown
     >;
+    const structuredInput = snapshotJsonValue(input);
     const timeout = combineSignals(
       request.signal,
       request.timeoutMs ?? defaultTimeout,
     );
-    const structuredInput = input;
     let correction: string | undefined;
     let correctionUsed = false;
     let lastValidationError: OutputValidationError | undefined;
@@ -384,99 +534,124 @@ export function createAi(options: AiClientOptions): AiClient {
     try {
       for (let attemptNumber = 0; attemptNumber < 3; attemptNumber += 1) {
         const attemptId = randomUUID();
-        await options.accounting.admit({
+        const system = correction
+          ? `${request.system}\n\n${correction}`
+          : request.system;
+        const usageAttempt = {
           attemptId,
           context: request.usageContext,
-          provider: model.provider,
-          model: model.model,
-        });
-
-        let result: ProviderResult;
-        try {
-          result = await options.provider.generateStructured({
-            model,
-            system: correction
-              ? `${request.system}\n\n${correction}`
-              : request.system,
+          provider: dispatchedModel.provider,
+          model: dispatchedModel.model,
+          settings: dispatchedModel.pricingSettings,
+          maxInputTokens: inputTokenAllowance({
+            system,
             input: structuredInput,
             schema,
-            maxOutputTokens,
-            signal: timeout.signal,
             images: request.images,
-            webSearch: request.webSearch,
-          });
-        } catch (error) {
-          const retryable = isRetryable(error);
-          await options.accounting.record({
-            attemptId,
-            context: request.usageContext,
-            provider: model.provider,
-            model: model.model,
-            outcome:
-              (error instanceof ProviderRequestError &&
-                error.statusCode === 429) ||
-              error instanceof ProviderRefusalError ||
-              error instanceof ProviderTruncationError
-                ? "failed"
-                : "unknown",
-            units:
-              error instanceof ProviderRefusalError ||
-              error instanceof ProviderTruncationError
-                ? (error.units ?? unknownUsage())
-                : unknownUsage(),
-            errorCode:
-              error instanceof AiError ? error.code : "provider-unknown",
-          });
-
-          if (!retryable || attemptNumber === 2) throw error;
-          const waitMs =
-            error.retryAfterMs ??
-            250 * 2 ** attemptNumber + Math.random() * 150;
-          await delay(waitMs, timeout.signal);
-          continue;
-        }
-
-        let output: O;
-        try {
-          output = request.outputSchema.parse(JSON.parse(result.text));
-        } catch {
-          lastValidationError = new OutputValidationError();
-          await options.accounting.record({
-            attemptId,
-            context: request.usageContext,
-            provider: model.provider,
-            model: model.model,
-            outcome: "failed",
-            units: result.units,
-            errorCode: lastValidationError.code,
-          });
-          if (correctionUsed || attemptNumber === 2) throw lastValidationError;
-          correctionUsed = true;
-          correction =
-            "Your previous response was invalid. Return only valid JSON matching the requested schema.";
-          continue;
-        }
-
-        await options.accounting.record({
-          attemptId,
-          context: request.usageContext,
-          provider: model.provider,
-          model: model.model,
-          outcome: "success",
-          units: result.units,
-        });
-        return {
-          output,
-          usage: result.units,
-          cost: {
-            status: "unknown",
-            costUsd: null,
-            pricingIdentity: model.pricingIdentity,
-          },
-          citations: result.citations,
-          provider: model.provider,
-          model: model.model,
+          }),
+          maxOutputTokens,
+          searchRequested: Boolean(request.webSearch),
         };
+        if (usageAttempt.maxInputTokens > model.maxInputTokens) {
+          throw new AiError(
+            "The model input exceeds the configured token limit",
+            "input-limit-exceeded",
+          );
+        }
+        if (timeout.signal.aborted) throw timeout.signal.reason;
+        const admissionSignal = await options.accounting.admit(usageAttempt);
+        if (timeout.signal.aborted || admissionSignal?.aborted) {
+          await options.accounting.cancel(attemptId);
+          throw (
+            timeout.signal.reason ??
+            admissionSignal?.reason ??
+            new Error("Model request was cancelled before dispatch")
+          );
+        }
+        const providerSignals = combineAbortSignals([
+          timeout.signal,
+          admissionSignal,
+        ]);
+        try {
+          let result: ProviderResult;
+          try {
+            result = await options.provider.generateStructured({
+              model: dispatchedModel,
+              system,
+              input: structuredInput,
+              schema,
+              maxOutputTokens,
+              signal: providerSignals.signal,
+              images: request.images,
+              webSearch: request.webSearch,
+            });
+          } catch (error) {
+            const retryable = isRetryable(error);
+            await options.accounting.record({
+              ...usageAttempt,
+              outcome:
+                (error instanceof ProviderRequestError &&
+                  error.statusCode === 429) ||
+                error instanceof ProviderRefusalError ||
+                error instanceof ProviderTruncationError
+                  ? "failed"
+                  : "unknown",
+              units:
+                error instanceof ProviderRefusalError ||
+                error instanceof ProviderTruncationError
+                  ? (error.units ?? unknownUsage())
+                  : unknownUsage(),
+              errorCode:
+                error instanceof AiError ? error.code : "provider-unknown",
+            });
+
+            if (!retryable || attemptNumber === 2) throw error;
+            const waitMs =
+              error.retryAfterMs ??
+              250 * 2 ** attemptNumber + Math.random() * 150;
+            await delay(waitMs, timeout.signal);
+            continue;
+          }
+
+          let output: O;
+          try {
+            output = request.outputSchema.parse(JSON.parse(result.text));
+          } catch {
+            lastValidationError = new OutputValidationError();
+            await options.accounting.record({
+              ...usageAttempt,
+              outcome: "failed",
+              units: result.units,
+              errorCode: lastValidationError.code,
+            });
+            if (correctionUsed || attemptNumber === 2)
+              throw lastValidationError;
+            correctionUsed = true;
+            correction =
+              "Your previous response was invalid. Return only valid JSON matching the requested schema.";
+            continue;
+          }
+
+          const cost = await options.accounting.record({
+            ...usageAttempt,
+            outcome: "success",
+            units: result.units,
+          });
+          return {
+            output,
+            usage: result.units,
+            cost: cost ?? {
+              status: "unknown",
+              costUsd: null,
+              pricingIdentity: model.pricingIdentity,
+            },
+            citations: result.citations,
+            provider: model.provider,
+            model: model.model,
+          };
+        } finally {
+          providerSignals.clear();
+        }
       }
 
       throw lastValidationError ?? new Error("Model call did not complete");
@@ -502,54 +677,97 @@ export function createAi(options: AiClientOptions): AiClient {
     if (!Number.isInteger(requestedOutputTokens) || requestedOutputTokens < 1) {
       throw new Error("maxOutputTokens must be a positive integer");
     }
+    const maxOutputTokens = Math.min(
+      requestedOutputTokens,
+      model.maxOutputTokens,
+    );
+    const dispatchedModel: ModelConfiguration = {
+      ...model,
+      maxOutputTokens,
+      pricingSettings: {
+        ...model.pricingSettings,
+        maxOutputTokens,
+      },
+    };
+    const structuredInput = snapshotJsonValue(request.input);
+    const inputTokens = inputTokenAllowance({
+      system: request.system,
+      input: structuredInput,
+    });
+    if (inputTokens > model.maxInputTokens) {
+      throw new AiError(
+        "The model input exceeds the configured token limit",
+        "input-limit-exceeded",
+      );
+    }
     const attemptId = randomUUID();
-    await options.accounting.admit({
+    const usageAttempt = {
       attemptId,
       context: request.usageContext,
-      provider: model.provider,
-      model: model.model,
-    });
+      provider: dispatchedModel.provider,
+      model: dispatchedModel.model,
+      settings: dispatchedModel.pricingSettings,
+      maxInputTokens: inputTokens,
+      maxOutputTokens,
+      searchRequested: false,
+    };
+    if (request.signal?.aborted) throw request.signal.reason;
+    const admissionSignal = await options.accounting.admit(usageAttempt);
     const timeout = combineSignals(
       request.signal,
       request.timeoutMs ?? defaultTimeout,
     );
-    let recorded = false;
+    if (timeout.signal.aborted || admissionSignal?.aborted) {
+      await options.accounting.cancel(attemptId);
+      timeout.clear();
+      throw (
+        timeout.signal.reason ??
+        admissionSignal?.reason ??
+        new Error("Model request was cancelled before dispatch")
+      );
+    }
+    const providerSignals = combineAbortSignals([
+      timeout.signal,
+      admissionSignal,
+    ]);
+    let recording: Promise<unknown> | undefined;
+    const recordUnknown = (errorCode?: string): Promise<unknown> => {
+      recording ??= (async () =>
+        options.accounting.record({
+          ...usageAttempt,
+          outcome: "unknown",
+          units: unknownUsage(),
+          ...(errorCode ? { errorCode } : {}),
+        }))();
+      return recording;
+    };
+    // A consumer that stops pulling never resumes the generator, so settle
+    // the dispatched attempt (and stop its lease heartbeat) on abort directly.
+    const onAbort = (): void => {
+      void recordUnknown("provider-cancelled").catch(() => undefined);
+    };
+    providerSignals.signal.addEventListener("abort", onAbort, { once: true });
 
     try {
       for await (const chunk of options.provider.streamText({
-        model,
+        model: dispatchedModel,
         system: request.system,
-        input: request.input,
-        maxOutputTokens: Math.min(requestedOutputTokens, model.maxOutputTokens),
-        signal: timeout.signal,
+        input: structuredInput,
+        maxOutputTokens,
+        signal: providerSignals.signal,
       })) {
         yield chunk;
       }
     } catch (error) {
-      recorded = true;
-      await options.accounting.record({
-        attemptId,
-        context: request.usageContext,
-        provider: model.provider,
-        model: model.model,
-        outcome: "unknown",
-        units: unknownUsage(),
-        errorCode: error instanceof AiError ? error.code : "provider-unknown",
-      });
+      await recordUnknown(
+        error instanceof AiError ? error.code : "provider-unknown",
+      );
       throw error;
     } finally {
+      providerSignals.signal.removeEventListener("abort", onAbort);
+      providerSignals.clear();
       timeout.clear();
-      if (!recorded) {
-        recorded = true;
-        await options.accounting.record({
-          attemptId,
-          context: request.usageContext,
-          provider: model.provider,
-          model: model.model,
-          outcome: "unknown",
-          units: unknownUsage(),
-        });
-      }
+      await recordUnknown();
     }
   }
 
@@ -693,6 +911,7 @@ function normalizeCitations(body: Record<string, unknown>): Citation[] {
 }
 
 export class MuseProvider implements ModelProvider {
+  readonly providerName = "muse" as const;
   private readonly baseUrl: URL;
   private readonly fetchImplementation: typeof fetch;
 
@@ -708,6 +927,7 @@ export class MuseProvider implements ModelProvider {
     ) {
       throw new Error("Muse base URL must use HTTPS");
     }
+
     if (this.baseUrl.username || this.baseUrl.password) {
       throw new Error("Muse base URL must not include credentials");
     }
@@ -744,19 +964,14 @@ export class MuseProvider implements ModelProvider {
     }
     let webSearchQuery: string | undefined;
     if (request.webSearch) {
+      validateWebSearchQuery(request.input);
       if (typeof request.input !== "string") {
         throw new AiError(
-          "Web-search input must be an explicit query of at most 500 characters",
+          "Invalid web-search query",
           "invalid-web-search-query",
         );
       }
       webSearchQuery = request.input.trim();
-      if (webSearchQuery.length > 500) {
-        throw new AiError(
-          "Web-search input must be an explicit query of at most 500 characters",
-          "invalid-web-search-query",
-        );
-      }
     }
 
     const isGrounded = request.webSearch;
@@ -974,6 +1189,7 @@ export interface MockProviderOptions {
 }
 
 export class MockProvider implements ModelProvider {
+  readonly providerName = "mock" as const;
   private index = 0;
 
   constructor(private readonly options: MockProviderOptions = {}) {}
@@ -1021,3 +1237,9 @@ export function createMockProvider(
 ): MockProvider {
   return new MockProvider(options);
 }
+
+export {
+  createAdmittedUsageAccounting,
+  estimateUsageCost,
+  pricingSettingsKey,
+} from "./accounting.js";

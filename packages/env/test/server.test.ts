@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  getAiEnvironment,
   getApiEnvironment,
   getDocumentStoreConfig,
   getMongoConfig,
   getRequiredEnv,
+  getUsageEnvironment,
 } from "../src/server.js";
 
 describe("getRequiredEnv", () => {
@@ -139,6 +141,88 @@ describe("getMongoConfig", () => {
         }),
       ).toThrow("MONGODB_DB must be a valid MongoDB database name");
     }
+  });
+});
+
+describe("getUsageEnvironment", () => {
+  it("uses isolated limits only for mock test or replay modes", () => {
+    expect(
+      getUsageEnvironment({
+        EVIANTA_USAGE_MODE: "test",
+        EVIANTA_AI_PROVIDER: "mock",
+      }),
+    ).toMatchObject({
+      mode: "test",
+      modelMaxInputTokens: 32_000,
+      modelMaxOutputTokens: 2_048,
+    });
+    expect(() =>
+      getUsageEnvironment({
+        EVIANTA_USAGE_MODE: "replay",
+        EVIANTA_AI_PROVIDER: "muse",
+      }),
+    ).toThrow("Test and replay usage modes require the mock provider");
+  });
+
+  it("requires bounded spend and concurrency limits in enforced mode", () => {
+    expect(() =>
+      getUsageEnvironment({ EVIANTA_USAGE_MODE: "enforced" }),
+    ).toThrow(
+      'Required environment variable "MODEL_MAX_INPUT_TOKENS" is not set',
+    );
+    expect(
+      getUsageEnvironment({
+        EVIANTA_USAGE_MODE: "enforced",
+        MODEL_MAX_INPUT_TOKENS: "32000",
+        MODEL_MAX_OUTPUT_TOKENS: "2048",
+        USER_MAX_CONCURRENT_RUNS: "2",
+        GLOBAL_MAX_CONCURRENT_RUNS: "10",
+        USER_SPEND_LIMIT_USD: "5.25",
+        GLOBAL_SPEND_LIMIT_USD: "100",
+        SPEND_PERIOD_SECONDS: "86400",
+      }),
+    ).toMatchObject({
+      mode: "enforced",
+      userSpendLimitUsd: 5.25,
+      globalMaxConcurrentRuns: 10,
+    });
+    expect(() =>
+      getUsageEnvironment({
+        EVIANTA_USAGE_MODE: "enforced",
+        MODEL_MAX_INPUT_TOKENS: "32000",
+        MODEL_MAX_OUTPUT_TOKENS: "2048",
+        USER_MAX_CONCURRENT_RUNS: "2",
+        GLOBAL_MAX_CONCURRENT_RUNS: "10",
+        USER_SPEND_LIMIT_USD: "0",
+        GLOBAL_SPEND_LIMIT_USD: "100",
+        SPEND_PERIOD_SECONDS: "86400",
+      }),
+    ).toThrow("USER_SPEND_LIMIT_USD must be a positive USD amount");
+    expect(() =>
+      getUsageEnvironment({
+        EVIANTA_USAGE_MODE: "enforced",
+        MODEL_MAX_INPUT_TOKENS: "32000",
+        MODEL_MAX_OUTPUT_TOKENS: "2048",
+        USER_MAX_CONCURRENT_RUNS: "2",
+        GLOBAL_MAX_CONCURRENT_RUNS: "10",
+        USER_SPEND_LIMIT_USD: "100000000",
+        GLOBAL_SPEND_LIMIT_USD: "100",
+        SPEND_PERIOD_SECONDS: "86400",
+      }),
+    ).toThrow("USER_SPEND_LIMIT_USD must be a positive USD amount");
+  });
+
+  it("validates usage limits when the paid provider is selected", () => {
+    expect(() =>
+      getAiEnvironment({
+        EVIANTA_AI_PROVIDER: "muse",
+        MODEL_API_KEY: "test",
+        MUSE_SPARK_MODEL: "spark",
+        MUSE_WONDER_MODEL: "wonder",
+      }),
+    ).toThrow(
+      'Required environment variable "MODEL_MAX_INPUT_TOKENS" is not set',
+    );
   });
 });
 

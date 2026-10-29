@@ -46,11 +46,18 @@ import {
   type TaskRepository,
   type UserRepository,
   type UsageRepository,
+  type UsageAdmissionPort,
+  type UsageLedgerRepository,
+  type UsagePriceRepository,
+  type RunAdmissionPort,
   type RateLimitRepository,
   type RateLimitRequest,
   type RateLimitResult,
 } from "@evianta/core";
-import { CaseNotOwnedError, InvalidCursorError, StoreError } from "./mongo.js";
+import { CaseNotOwnedError, InvalidCursorError, StoreError } from "./errors.js";
+import { InMemoryUsageRepository } from "./usage-memory.js";
+import { InMemoryRunAdmissionRepository } from "./run-admission-memory.js";
+import { UsageAdminService } from "./usage-admin.js";
 import { z, type ZodType } from "zod";
 
 type Identified = { id: string };
@@ -112,11 +119,55 @@ export class InMemoryStore {
     approvals: ApprovalRepository;
     events: RunEventRepository;
     usage: UsageRepository;
+    usageAdmission: UsageAdmissionPort;
+    usagePrices: UsagePriceRepository;
+    usageLedger: UsageLedgerRepository;
+    runAdmission: RunAdmissionPort;
+    usageAdmin: UsageAdminService;
     rateLimits: RateLimitRepository;
   };
+  private readonly usageAccounting: InMemoryUsageRepository;
+  private readonly runAdmissionRepository: InMemoryRunAdmissionRepository;
 
   constructor(options: { pageSize?: number } = {}) {
     this.pageSize = options.pageSize ?? 50;
+    const findOwnedCase = (caseId: string, ownerId: string) => {
+      const record = this.cases.get(caseId);
+      return record &&
+        record.ownerId === ownerId &&
+        !record.isSample &&
+        record.status !== "deleted"
+        ? parse(CaseSchema, record)
+        : null;
+    };
+    const findOwnedRun = (runId: string, caseId: string, ownerId: string) => {
+      const run = this.runs.get(runId);
+      return run && run.caseId === caseId && run.ownerId === ownerId
+        ? parse(RunRecordSchema, run)
+        : null;
+    };
+    this.runAdmissionRepository = new InMemoryRunAdmissionRepository(
+      findOwnedCase,
+      findOwnedRun,
+      (runId, caseId, ownerId, fencingToken, updates) => {
+        const run = this.runs.get(runId);
+        if (
+          !run ||
+          run.caseId !== caseId ||
+          run.ownerId !== ownerId ||
+          run.fencingToken !== fencingToken
+        ) {
+          return false;
+        }
+        this.runs.set(runId, RunRecordSchema.parse({ ...run, ...updates }));
+        return true;
+      },
+    );
+    this.usageAccounting = new InMemoryUsageRepository(
+      findOwnedCase,
+      findOwnedRun,
+      (request) => this.runAdmissionRepository.hasActiveLease(request),
+    );
     this.repositories = {
       agentProfiles: {
         listEnabled: async () =>
@@ -459,12 +510,16 @@ export class InMemoryStore {
             throw new CaseNotOwnedError();
           }
           if (
-            ["queued", "running"].includes(record.status) &&
+            ["queued", "running", "waiting-for-input"].includes(
+              record.status,
+            ) &&
             [...this.runs.values()].some(
               (other) =>
                 other.ownerId === record.ownerId &&
                 other.caseId === record.caseId &&
-                ["queued", "running"].includes(other.status),
+                ["queued", "running", "waiting-for-input"].includes(
+                  other.status,
+                ),
             )
           ) {
             duplicate("An active run already exists for this case");
@@ -479,18 +534,34 @@ export class InMemoryStore {
             current.ownerId !== ownerId ||
             record.ownerId !== ownerId ||
             current.caseId !== record.caseId ||
-            current.fencingToken !== record.fencingToken
+            current.fencingToken !== record.fencingToken ||
+            // Lease and admission transitions belong to the admission API, and
+            // a renewed lease must not be overwritten by an older snapshot.
+            current.leaseId !== record.leaseId ||
+            current.leaseExpiresAt !== record.leaseExpiresAt ||
+            ((current.leaseId !== null ||
+              current.status === "waiting-for-input") &&
+              record.status !== current.status) ||
+            (record.status === "waiting-for-input" &&
+              current.status !== "waiting-for-input") ||
+            (current.status === "waiting-for-input" &&
+              record.inputRequired !== current.inputRequired) ||
+            (current.cancellationRequested && !record.cancellationRequested)
           ) {
             return false;
           }
           if (
-            ["queued", "running"].includes(record.status) &&
+            ["queued", "running", "waiting-for-input"].includes(
+              record.status,
+            ) &&
             [...this.runs.values()].some(
               (other) =>
                 other.id !== record.id &&
                 other.ownerId === ownerId &&
                 other.caseId === record.caseId &&
-                ["queued", "running"].includes(other.status),
+                ["queued", "running", "waiting-for-input"].includes(
+                  other.status,
+                ),
             )
           ) {
             duplicate("An active run already exists for this case");
@@ -667,7 +738,7 @@ export class InMemoryStore {
       usage: {
         listForRun: async (runId, scope) => {
           if (!this.ownsCase(scope)) return [];
-          return [...this.usage.values()]
+          const legacyRecords = [...this.usage.values()]
             .filter(
               (entry) =>
                 entry.runId === runId &&
@@ -675,6 +746,36 @@ export class InMemoryStore {
                 entry.scope.ownerId === scope.ownerId,
             )
             .map((entry) => parse(UsageRecordSchema, entry.record));
+          const ledger = await this.usageAccounting.listForRun(
+            scope.ownerId,
+            scope.caseId,
+            runId,
+          );
+          const ledgerAttempts = new Set(
+            ledger.map((entry) => entry.attemptId),
+          );
+          return [
+            ...legacyRecords.filter(
+              (record) => !ledgerAttempts.has(record.attemptId),
+            ),
+            ...ledger.map((entry) =>
+              UsageRecordSchema.parse({
+                id: entry.id,
+                attemptId: entry.attemptId,
+                provider: entry.provider,
+                model: entry.model,
+                settings: entry.settings,
+                units: entry.units,
+                costUsd: entry.costUsd,
+                costStatus: entry.costStatus,
+                recordedAt: entry.settledAt ?? entry.createdAt,
+              }),
+            ),
+          ].sort(
+            (left, right) =>
+              Date.parse(left.recordedAt) - Date.parse(right.recordedAt) ||
+              left.id.localeCompare(right.id),
+          );
         },
         insert: async (usage, runId, scope) => {
           const record = parse(UsageRecordSchema, usage);
@@ -705,6 +806,11 @@ export class InMemoryStore {
           });
         },
       },
+      usageAdmission: this.usageAccounting,
+      usagePrices: this.usageAccounting,
+      usageLedger: this.usageAccounting,
+      runAdmission: this.runAdmissionRepository,
+      usageAdmin: new UsageAdminService(this.usageAccounting),
       rateLimits: {
         consume: async (request) => this.rateLimitConsume(request),
       },
