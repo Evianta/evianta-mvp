@@ -159,6 +159,14 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
   await mockAuth(page);
   let createCount = 0;
   let uploadCount = 0;
+  let releaseFirstUpload!: () => void;
+  const firstUploadStarted = new Promise<void>((resolve) => {
+    releaseFirstUpload = resolve;
+  });
+  let finishFirstUpload!: () => void;
+  const firstUploadCanFinish = new Promise<void>((resolve) => {
+    finishFirstUpload = resolve;
+  });
   await page.route("**/cases", async (route) => {
     if (route.request().method() !== "POST") {
       await route.continue();
@@ -169,6 +177,16 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
   });
   await page.route("**/cases/private-case/documents", async (route) => {
     uploadCount += 1;
+    if (uploadCount === 1) {
+      releaseFirstUpload();
+      await firstUploadCanFinish;
+      await route.fulfill({
+        json: {
+          document: syntheticWorkflowFixtures.dataAnalysis.documents[0],
+        },
+      });
+      return;
+    }
     if (uploadCount === 2) {
       await route.fulfill({
         status: 500,
@@ -202,11 +220,31 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
     },
   ]);
   await page.getByRole("button", { name: "Create private case" }).click();
+  await firstUploadStarted;
+  const firstDocument = page
+    .getByRole("listitem")
+    .filter({ hasText: "first.csv" });
+  const secondDocument = page
+    .getByRole("listitem")
+    .filter({ hasText: "second.csv" });
+  await expect(
+    firstDocument.getByRole("button", { name: "Remove first.csv" }),
+  ).toBeDisabled();
+  await expect(
+    secondDocument.getByRole("button", { name: "Remove second.csv" }),
+  ).toBeDisabled();
+  finishFirstUpload();
   await expect(
     page.getByRole("alert").filter({
       hasText: "Case created, but an upload did not finish",
     }),
   ).toBeVisible();
+  await expect(
+    firstDocument.getByRole("button", { name: "Remove first.csv" }),
+  ).toBeDisabled();
+  await expect(
+    secondDocument.getByRole("button", { name: "Remove second.csv" }),
+  ).toBeEnabled();
   await page.getByRole("button", { name: "Retry remaining uploads" }).click();
   await expect.poll(() => uploadCount).toBe(3);
   await expect(page).toHaveURL(/\/cases\/private-case$/);

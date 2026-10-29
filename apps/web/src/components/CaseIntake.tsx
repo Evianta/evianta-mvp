@@ -451,7 +451,7 @@ function SessionCaseIntake({
               className="mt-3 divide-y divide-border"
               aria-label="Selected documents"
             >
-              {files.map(({ file, state }, index) => (
+              {files.map(({ file, state, uploadFailed }, index) => (
                 <li
                   className="flex items-center gap-3 py-2"
                   key={`${file.name}-${index}`}
@@ -484,6 +484,12 @@ function SessionCaseIntake({
                     className="icon-button h-8 w-8"
                     type="button"
                     aria-label={`Remove ${file.name}`}
+                    disabled={
+                      pending ||
+                      (Boolean(createdCaseId) &&
+                        state !== "selected" &&
+                        !uploadFailed)
+                    }
                     onClick={() =>
                       setFiles((current) =>
                         current.filter((_, itemIndex) => itemIndex !== index),
