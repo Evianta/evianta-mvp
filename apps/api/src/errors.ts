@@ -9,13 +9,18 @@ export function sendApiError(
   message: string,
   details: ApiError["error"]["details"] = [],
 ): void {
+  const requestId =
+    typeof response.locals.requestId === "string"
+      ? response.locals.requestId
+      : randomUUID();
   const body: ApiError = {
     error: {
       code,
       message,
-      requestId: randomUUID(),
+      requestId,
       details,
     },
   };
+  response.setHeader("x-request-id", requestId);
   response.status(status).json(body);
 }

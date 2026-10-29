@@ -1,4 +1,5 @@
 import type { CaseRepository } from "@evianta/core";
+import { randomUUID } from "node:crypto";
 import express, {
   type ErrorRequestHandler,
   type Express,
@@ -126,6 +127,9 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
   app.disable("x-powered-by");
   app.set("trust proxy", configuration.trustProxyHops);
   app.use((request, response, next) => {
+    const requestId = randomUUID();
+    response.locals.requestId = requestId;
+    response.setHeader("x-request-id", requestId);
     response.setHeader("Cache-Control", "no-store");
     response.vary("Origin");
     const origin = request.get("origin");
@@ -261,7 +265,9 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
       "status" in error &&
       (error.status === 400 || error.status === 413 || error.status === 415)
         ? error.status
-        : 500;
+        : error instanceof AuthenticationError
+          ? 401
+          : 500;
     if (status === 500) {
       const errorName = error instanceof Error ? error.name : "UnknownError";
       console.error("API request failed", {
@@ -270,22 +276,22 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
       });
     }
     const code =
-      status === 413
-        ? "limit-reached"
-        : status === 400 || status === 415
-          ? "validation-failed"
-          : error instanceof AuthenticationError
-            ? "unauthenticated"
-            : "internal-error";
+      status === 401
+        ? "unauthenticated"
+        : status === 413
+          ? "limit-reached"
+          : status === 500
+            ? "internal-error"
+            : "validation-failed";
     const message =
-      status === 413
-        ? "Request body is too large"
-        : status === 415
-          ? "Request content encoding is not supported"
-          : status === 400
-            ? "Request body is invalid"
-            : error instanceof AuthenticationError
-              ? "Authentication required"
+      status === 401
+        ? "Authentication required"
+        : status === 413
+          ? "Request body is too large"
+          : status === 415
+            ? "Request content type or encoding is not supported"
+            : status === 400
+              ? "Request body is invalid"
               : "An unexpected error occurred";
     sendApiError(response, status, code, message);
   };

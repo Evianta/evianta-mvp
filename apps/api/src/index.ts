@@ -4,7 +4,15 @@ import { pathToFileURL } from "node:url";
 import { createApiApp } from "./app.js";
 
 export async function startApi(): Promise<void> {
-  const environment = getApiEnvironment();
+  let environment: ReturnType<typeof getApiEnvironment>;
+  try {
+    environment = getApiEnvironment();
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Invalid API configuration";
+    console.error("API configuration invalid", { message });
+    throw error;
+  }
   const store = await connectMongoStore();
   const { app } = createApiApp({
     repositories: store.repositories,

@@ -15,6 +15,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=../../.env dist/index.js",
     "admin": "node --env-file-if-exists=../../.env dist/admin.js",
+    "pretypecheck": "pnpm --filter @evianta/core build && pnpm --filter @evianta/env build && pnpm --filter @evianta/store build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "build": "tsc -p tsconfig.build.json"

@@ -70,6 +70,8 @@ async function readApiError(
   const error = ApiErrorSchema.parse(await response.json());
   expect(error.error.code).toBe(expectedCode);
   expect(error.error.requestId).not.toBeNull();
+  expect(error.error.requestId).toBe(response.headers.get("x-request-id"));
+  expect(error.error.details).toEqual([]);
   return error;
 }
 
@@ -218,7 +220,7 @@ describe("API access-key authentication", () => {
     expect(response.status).toBe(415);
     expect(
       (await readApiError(response, "validation-failed")).error.message,
-    ).toBe("Request content encoding is not supported");
+    ).toBe("Request content type or encoding is not supported");
   });
 
   it("rejects malformed signatures, logs out sessions, and rechecks key revocation", async () => {
