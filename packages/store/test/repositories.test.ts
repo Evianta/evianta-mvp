@@ -838,6 +838,65 @@ function repositoryContract(
       ]);
     });
 
+    it("settles verified usage after an unknown-cost reservation", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      await repositories.usagePrices.insert(makeUsagePrice());
+      const reservation = await repositories.usageAdmission.reserve(
+        makeReservationRequest("attempt-late-usage", 0.6),
+      );
+      await repositories.usageAdmission.settle({
+        reservation,
+        outcome: "unknown",
+        units: {
+          input: null,
+          output: null,
+          total: null,
+          reasoning: null,
+          cacheRead: null,
+          cacheWrite: null,
+          search: null,
+        },
+        errorCode: "provider-timeout",
+        at: "2026-01-15T00:01:00.000Z",
+      });
+
+      await repositories.usageAdmission.settle({
+        reservation,
+        outcome: "success",
+        units: {
+          input: 100,
+          output: 100,
+          total: 200,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          search: 0,
+        },
+        errorCode: null,
+        at: "2026-01-15T00:02:00.000Z",
+      });
+
+      expect(
+        await repositories.usageAdmin.query({
+          userId: "admin-1",
+          role: "admin",
+        }),
+      ).toMatchObject({
+        totals: { knownChargesUsd: 0.0003, reservedUsd: 0 },
+      });
+    });
+
     it("settles known charges and releases unused reservation capacity", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
@@ -1170,6 +1229,11 @@ function repositoryContract(
         userLimit: 1,
         globalLimit: 1,
       });
+      const staleRun = await repositories.runs.findOwnedById(
+        "run-1",
+        "owner-1",
+      );
+      if (!staleRun) throw new Error("Run disappeared after admission");
 
       expect(
         await repositories.runAdmission.renew({
@@ -1186,6 +1250,12 @@ function repositoryContract(
         fencingToken: lease.fencingToken,
         expiresAt: "2026-01-15T00:30:00.000Z",
       });
+      expect(
+        await repositories.runs.updateOwned(
+          { ...staleRun, updatedAt: "2026-01-15T00:02:00.000Z" },
+          "owner-1",
+        ),
+      ).toBe(false);
       expect(
         await repositories.runAdmission.renew({
           ownerId: "owner-1",
@@ -1454,11 +1524,11 @@ describe("MongoDB repositories", () => {
       );
       if (!first) throw new Error("Run disappeared after admission");
       expect(
-        await harness.store.repositories.runs.updateOwned(
-          { ...first, leaseExpiresAt: "2026-01-15T00:01:00.000Z" },
-          "owner-1",
+        await harness.store.runs.updateOne(
+          { _id: "run-1" },
+          { $set: { leaseExpiresAt: "2026-01-15T00:01:00.000Z" } },
         ),
-      ).toBe(true);
+      ).toMatchObject({ matchedCount: 1, modifiedCount: 1 });
       await expect(
         harness.store.acquireRunLease({ ...request, leaseId: "" }),
       ).rejects.toThrow();
@@ -1625,6 +1695,72 @@ describe("MongoDB repositories", () => {
     }
   });
 
+  it("backfills existing active run leases and their concurrency counters", async () => {
+    const harness = await createMongoHarness();
+    try {
+      await harness.store.repositories.cases.insert(
+        makeCase("case-live", "owner-1"),
+      );
+      await harness.store.repositories.cases.insert(
+        makeCase("case-next", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert(
+        makeRun("run-live", "case-live", "owner-1"),
+      );
+      await harness.store.repositories.runs.insert(
+        makeRun("run-next", "case-next", "owner-1"),
+      );
+      await harness.store.runs.updateOne(
+        { _id: "run-live" },
+        {
+          $set: {
+            leaseId: "legacy-lease",
+            leaseExpiresAt: "2099-01-15T00:15:00.000Z",
+            fencingToken: 4,
+          },
+        },
+      );
+
+      await harness.store.initialize();
+      await harness.store.initialize();
+
+      expect(
+        await harness.client
+          .db(harness.dbName)
+          .collection("runAdmissions")
+          .findOne({
+            _id: JSON.stringify(["owner-1", "case-live"]),
+          }),
+      ).toMatchObject({
+        runId: "run-live",
+        state: "active",
+        leaseId: "legacy-lease",
+        fencingToken: 4,
+      });
+      expect(
+        await harness.client
+          .db(harness.dbName)
+          .collection("runAdmissionCounters")
+          .findOne({ _id: "global" }),
+      ).toMatchObject({ activeRuns: 1 });
+      await expect(
+        harness.store.repositories.runAdmission.acquire({
+          ownerId: "owner-1",
+          caseId: "case-next",
+          runId: "run-next",
+          leaseId: "next-lease",
+          at: timestamp,
+          expiresAt: "2026-01-15T00:15:00.000Z",
+          userLimit: 1,
+          globalLimit: 1,
+        }),
+      ).rejects.toMatchObject({ code: "run-concurrency-limit" });
+    } finally {
+      await harness.client.db(harness.dbName).dropDatabase();
+      await harness.store.close();
+    }
+  });
+
   it("compares Mongo usage timestamps as instants for prices and ledger filters", async () => {
     const harness = await createMongoHarness();
     try {
@@ -1678,9 +1814,26 @@ describe("MongoDB repositories", () => {
       ).toMatchObject({ id: "price-later" });
 
       const reservation =
-        await harness.store.repositories.usageAdmission.reserve(
-          makeReservationRequest("attempt-timestamp", 0.1),
-        );
+        await harness.store.repositories.usageAdmission.reserve({
+          ...makeReservationRequest("attempt-timestamp", 0.1),
+          price: {
+            ...price,
+            effectiveAt: "2026-01-01T05:30:00+05:30",
+          },
+        });
+      const ledgerIndexes = await harness.client
+        .db(harness.dbName)
+        .collection("usageLedger")
+        .listIndexes()
+        .toArray();
+      expect(
+        ledgerIndexes.some(
+          (index) =>
+            index.key.createdAtInstant === -1 &&
+            index.key.attemptId === -1 &&
+            Object.keys(index.key).length === 2,
+        ),
+      ).toBe(true);
       await harness.client
         .db(harness.dbName)
         .collection("usageLedger")

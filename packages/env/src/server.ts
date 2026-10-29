@@ -119,7 +119,11 @@ function positiveUsdEnv(name: string, env: NodeJS.ProcessEnv): number {
     throw new Error(`${name} must be a positive USD amount`);
   }
   const value = Number(raw);
-  if (!Number.isFinite(value) || value <= 0) {
+  if (
+    !Number.isFinite(value) ||
+    value <= 0 ||
+    !Number.isSafeInteger(Math.round(value * 100_000_000))
+  ) {
     throw new Error(`${name} must be a positive USD amount`);
   }
   return value;

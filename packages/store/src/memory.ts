@@ -511,7 +511,12 @@ export class InMemoryStore {
             current.ownerId !== ownerId ||
             record.ownerId !== ownerId ||
             current.caseId !== record.caseId ||
-            current.fencingToken !== record.fencingToken
+            current.fencingToken !== record.fencingToken ||
+            (current.status === "running" &&
+              record.status === "running" &&
+              current.leaseId === record.leaseId &&
+              current.leaseId !== null &&
+              current.leaseExpiresAt !== record.leaseExpiresAt)
           ) {
             return false;
           }

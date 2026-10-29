@@ -132,6 +132,66 @@ describe("@evianta/ai", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it("dispatches the same JSON snapshot measured before admission", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider({ responses: ['"ok"'] });
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    let serializeCalls = 0;
+    const input = {
+      query: "safe prompt",
+      toJSON() {
+        serializeCalls += 1;
+        return {
+          query: serializeCalls === 1 ? "safe prompt" : "unbounded prompt",
+        };
+      },
+    };
+    vi.mocked(accounting.admit).mockImplementation(async () => {
+      input.query = "mutated while admitting";
+      return undefined;
+    });
+    const client = createAi({ provider, accounting, models });
+
+    await client.runStructured({
+      tier: "cheap",
+      inputSchema: z.unknown(),
+      outputSchema: z.string(),
+      system: "Answer",
+      input,
+      usageContext: { userId: "user-1" },
+    });
+
+    expect(serializeCalls).toBe(1);
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ input: { query: "safe prompt" } }),
+    );
+  });
+
+  it("dispatches the snapshotted stream input after asynchronous admission", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "streamText");
+    const input = { query: "safe prompt" };
+    vi.mocked(accounting.admit).mockImplementation(async () => {
+      input.query = "mutated while admitting";
+      return undefined;
+    });
+    const client = createAi({ provider, accounting, models });
+
+    for await (const chunk of client.streamText({
+      tier: "cheap",
+      system: "Answer",
+      input,
+      usageContext: { userId: "user-1" },
+    })) {
+      void chunk;
+    }
+
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ input: { query: "safe prompt" } }),
+    );
+  });
+
   it("allows one correction attempt for invalid structured output", async () => {
     const accounting = createAccounting();
     const client = createAi({

@@ -393,7 +393,6 @@ export class InMemoryUsageRepository
     );
     const expiredAdmission =
       entry.outcome === "unknown" &&
-      entry.errorCode === "admission-expired" &&
       entry.reservationStatus === "reserved" &&
       reservation.status === "reserved";
     if (entry.outcome !== "admitted" && !expiredAdmission) {

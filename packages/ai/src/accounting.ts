@@ -5,6 +5,7 @@ import {
 } from "@evianta/core";
 import type {
   RunAdmissionPort,
+  RunAdmissionLease,
   UsageAdmissionPort,
   UsagePrice,
   UsagePriceRepository,
@@ -39,6 +40,8 @@ interface ActiveUsageAttempt {
   searchRequested: boolean;
   heartbeat: AbortController;
   timer?: ReturnType<typeof setTimeout>;
+  expiryTimer?: ReturnType<typeof setTimeout>;
+  leaseExpiresAt: string;
   renewal?: Promise<void>;
   stopped: boolean;
 }
@@ -103,7 +106,16 @@ export function createAdmittedUsageAccounting(
   async function stopHeartbeat(attempt: ActiveUsageAttempt): Promise<void> {
     attempt.stopped = true;
     if (attempt.timer) clearTimeout(attempt.timer);
-    await attempt.renewal;
+    if (attempt.expiryTimer) clearTimeout(attempt.expiryTimer);
+    if (!attempt.renewal) return;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      attempt.renewal,
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, 5_000);
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
   }
 
   return {
@@ -199,7 +211,7 @@ export function createAdmittedUsageAccounting(
         leaseId,
         fencingToken,
       };
-      const renewLease = async (): Promise<boolean> => {
+      const renewLease = async (): Promise<RunAdmissionLease | null> => {
         const renewedAt = now();
         if (!Number.isFinite(renewedAt.getTime())) {
           throw new AdmissionRejectedError(
@@ -213,16 +225,16 @@ export function createAdmittedUsageAccounting(
             renewedAt.getTime() + runLeaseTtlSeconds * 1000,
           ).toISOString(),
         });
-        return lease !== null;
+        return lease;
       };
-      let leaseActive: boolean;
+      let lease: RunAdmissionLease | null;
       try {
-        leaseActive = await renewLease();
+        lease = await renewLease();
       } catch (error) {
         await options.admission.release(reservation.id, "cancelled");
         throw error;
       }
-      if (!leaseActive) {
+      if (!lease) {
         await options.admission.release(reservation.id, "cancelled");
         throw new AdmissionRejectedError(
           "The run lease expired before provider dispatch",
@@ -233,18 +245,38 @@ export function createAdmittedUsageAccounting(
         price,
         searchRequested: attempt.searchRequested,
         heartbeat: new AbortController(),
+        leaseExpiresAt: lease.expiresAt,
         stopped: false,
+      };
+      const scheduleExpiryGuard = (): void => {
+        if (active.expiryTimer) clearTimeout(active.expiryTimer);
+        const remainingMs =
+          Date.parse(active.leaseExpiresAt) - now().getTime() - 1_000;
+        active.expiryTimer = setTimeout(
+          () => {
+            active.heartbeat.abort(
+              new AdmissionRejectedError(
+                "The run lease expired during provider execution",
+              ),
+            );
+          },
+          Math.max(0, remainingMs),
+        );
       };
       const scheduleHeartbeat = (): void => {
         active.timer = setTimeout(() => {
           active.renewal = (async () => {
             try {
-              if (!(await renewLease())) {
+              const renewedLease = await renewLease();
+              if (!renewedLease) {
                 active.heartbeat.abort(
                   new AdmissionRejectedError(
                     "The run lease was lost during provider execution",
                   ),
                 );
+              } else {
+                active.leaseExpiresAt = renewedLease.expiresAt;
+                scheduleExpiryGuard();
               }
             } catch (error) {
               active.heartbeat.abort(error);
@@ -258,6 +290,7 @@ export function createAdmittedUsageAccounting(
         }, heartbeatIntervalMs);
       };
       attempts.set(attempt.attemptId, active);
+      scheduleExpiryGuard();
       scheduleHeartbeat();
       return active.heartbeat.signal;
     },

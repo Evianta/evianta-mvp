@@ -413,6 +413,19 @@ function inputTokenAllowance(input: {
   return Math.ceil(bytes * 1.5) + 256;
 }
 
+function snapshotJsonValue(value: unknown): unknown {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new Error("Value is not JSON");
+    return JSON.parse(serialized);
+  } catch {
+    throw new AiError(
+      "The model input cannot be serialized for usage admission",
+      "invalid-model-input",
+    );
+  }
+}
+
 function validateWebSearchQuery(input: unknown): void {
   if (
     typeof input !== "string" ||
@@ -513,7 +526,7 @@ export function createAi(options: AiClientOptions): AiClient {
       request.signal,
       request.timeoutMs ?? defaultTimeout,
     );
-    const structuredInput = input;
+    const structuredInput = snapshotJsonValue(input);
     let correction: string | undefined;
     let correctionUsed = false;
     let lastValidationError: OutputValidationError | undefined;
@@ -676,9 +689,10 @@ export function createAi(options: AiClientOptions): AiClient {
         maxOutputTokens,
       },
     };
+    const structuredInput = snapshotJsonValue(request.input);
     const inputTokens = inputTokenAllowance({
       system: request.system,
-      input: request.input,
+      input: structuredInput,
     });
     if (inputTokens > model.maxInputTokens) {
       throw new AiError(
@@ -722,7 +736,7 @@ export function createAi(options: AiClientOptions): AiClient {
       for await (const chunk of options.provider.streamText({
         model: dispatchedModel,
         system: request.system,
-        input: request.input,
+        input: structuredInput,
         maxOutputTokens,
         signal: providerSignals.signal,
       })) {

@@ -42,4 +42,22 @@ describe("usage price precision", () => {
       ),
     ).toEqual({ status: "estimated", costUsd: 0.000004 });
   });
+
+  it("does not settle token totals that exceed priced input and output units", () => {
+    expect(
+      estimateUsageCost(
+        {
+          input: 0,
+          output: 0,
+          total: 1,
+          reasoning: null,
+          cacheRead: 0,
+          cacheWrite: 0,
+          search: 0,
+        },
+        price,
+        false,
+      ),
+    ).toEqual({ status: "unknown", costUsd: null });
+  });
 });

@@ -11,7 +11,6 @@ import {
   type Db,
   type Document,
   type MongoClient,
-  MongoServerError,
 } from "mongodb";
 import { z } from "zod";
 import { StoreError } from "./errors.js";
@@ -93,6 +92,7 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
 
   async initialize(): Promise<void> {
     await this.locks.createIndex({ state: 1, leaseExpiresAt: 1 });
+    await this.backfillActiveRuns();
     await this.backfillWaitingRuns();
   }
 
@@ -739,6 +739,102 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
     );
   }
 
+  private async backfillActiveRuns(): Promise<void> {
+    const at = new Date();
+    const cursor = this.runs.find({
+      status: "running",
+      cancellationRequested: false,
+      leaseId: { $type: "string", $ne: "" },
+      leaseExpiresAt: { $type: "string" },
+      $expr: { $gt: [{ $toDate: "$leaseExpiresAt" }, at] },
+    });
+    for await (const document of cursor) {
+      const snapshot = RunRecordSchema.parse(withoutId(document));
+      const id = lockId(snapshot.ownerId, snapshot.caseId);
+      await this.withTransaction(async (session) => {
+        const runDocument = await this.runs.findOne(
+          {
+            _id: snapshot.id,
+            ownerId: snapshot.ownerId,
+            caseId: snapshot.caseId,
+            status: "running",
+            cancellationRequested: false,
+            leaseId: snapshot.leaseId,
+            leaseExpiresAt: snapshot.leaseExpiresAt,
+            fencingToken: snapshot.fencingToken,
+            $expr: {
+              $gt: [{ $toDate: "$leaseExpiresAt" }, at],
+            },
+          },
+          { session },
+        );
+        if (!runDocument) return;
+        const run = RunRecordSchema.parse(withoutId(runDocument));
+        const existing = parseLock(
+          await this.locks.findOne({ _id: id }, { session }),
+        );
+        if (
+          existing?.state === "active" &&
+          existing.runId === run.id &&
+          existing.leaseId === run.leaseId &&
+          existing.fencingToken === run.fencingToken &&
+          existing.leaseExpiresAt === run.leaseExpiresAt
+        ) {
+          return;
+        }
+        if (existing) {
+          throw new StoreError(
+            "Cannot migrate running leases with conflicting case admissions",
+            "run-admission-migration-conflict",
+          );
+        }
+
+        const guard = await this.runs.updateOne(
+          {
+            _id: run.id,
+            ownerId: run.ownerId,
+            caseId: run.caseId,
+            status: "running",
+            cancellationRequested: false,
+            leaseId: run.leaseId,
+            leaseExpiresAt: run.leaseExpiresAt,
+            fencingToken: run.fencingToken,
+          },
+          { $inc: { admissionMigrationRevision: 1 } },
+          { session },
+        );
+        if (guard.matchedCount !== 1) return;
+
+        await this.ensureCounter(counterId("user", run.ownerId), session);
+        await this.ensureCounter(counterId("global"), session);
+        await this.counters.updateOne(
+          { _id: counterId("user", run.ownerId) },
+          { $inc: { activeRuns: 1 } },
+          { session },
+        );
+        await this.counters.updateOne(
+          { _id: counterId("global") },
+          { $inc: { activeRuns: 1 } },
+          { session },
+        );
+        await this.locks.insertOne(
+          {
+            _id: id,
+            ownerId: run.ownerId,
+            caseId: run.caseId,
+            runId: run.id,
+            state: "active",
+            leaseId: run.leaseId,
+            fencingToken: run.fencingToken,
+            leaseExpiresAt: run.leaseExpiresAt,
+            updatedAt: run.updatedAt,
+          },
+          { session },
+        );
+      });
+    }
+  }
+
   private async backfillWaitingRuns(): Promise<void> {
     const cursor = this.runs.find({
       status: "waiting-for-input",
@@ -746,117 +842,89 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
       cancellationRequested: false,
     });
     for await (const document of cursor) {
-      const run = RunRecordSchema.parse(withoutId(document));
-      const id = lockId(run.ownerId, run.caseId);
-      const waitingLock: RunLock = {
-        _id: id,
-        ownerId: run.ownerId,
-        caseId: run.caseId,
-        runId: run.id,
-        state: "waiting-for-input",
-        leaseId: null,
-        fencingToken: run.fencingToken,
-        leaseExpiresAt: null,
-        updatedAt: run.updatedAt,
-      };
-      let existing = parseLock(await this.locks.findOne({ _id: id }));
-      if (existing?.state === "waiting-for-input") {
-        if (existing.runId !== run.id) {
+      const snapshot = RunRecordSchema.parse(withoutId(document));
+      const id = lockId(snapshot.ownerId, snapshot.caseId);
+      await this.withTransaction(async (session) => {
+        const runDocument = await this.runs.findOne(
+          {
+            _id: snapshot.id,
+            ownerId: snapshot.ownerId,
+            caseId: snapshot.caseId,
+            status: "waiting-for-input",
+            inputRequired: true,
+            cancellationRequested: false,
+          },
+          { session },
+        );
+        if (!runDocument) return;
+        const run = RunRecordSchema.parse(withoutId(runDocument));
+        const existing = parseLock(
+          await this.locks.findOne({ _id: id }, { session }),
+        );
+        if (
+          existing?.state === "waiting-for-input" &&
+          existing.runId === run.id &&
+          existing.fencingToken === run.fencingToken
+        ) {
+          return;
+        }
+        if (
+          existing &&
+          (existing.state !== "released" ||
+            existing.fencingToken > run.fencingToken)
+        ) {
           throw new StoreError(
             "Cannot migrate waiting runs with conflicting case admissions",
             "run-admission-migration-conflict",
           );
         }
-        await this.locks.updateOne(
-          {
-            _id: id,
-            state: "waiting-for-input",
-            runId: run.id,
-          },
-          {
-            $set: {
-              leaseId: null,
-              fencingToken: run.fencingToken,
-              leaseExpiresAt: null,
-              updatedAt: run.updatedAt,
-            },
-          },
-        );
-      } else if (existing?.state === "released") {
-        await this.locks.updateOne(
-          { _id: id, state: "released" },
-          {
-            $set: {
-              ownerId: run.ownerId,
-              caseId: run.caseId,
-              runId: run.id,
-              state: "waiting-for-input",
-              leaseId: null,
-              fencingToken: run.fencingToken,
-              leaseExpiresAt: null,
-              updatedAt: run.updatedAt,
-            },
-          },
-        );
-      } else if (!existing) {
-        try {
-          await this.locks.insertOne(waitingLock);
-        } catch (error) {
-          if (!(error instanceof MongoServerError) || error.code !== 11000) {
-            throw error;
-          }
-          existing = parseLock(await this.locks.findOne({ _id: id }));
-        }
-      } else if (existing.state !== "active" || existing.runId !== run.id) {
-        throw new StoreError(
-          "Cannot migrate waiting runs with conflicting case admissions",
-          "run-admission-migration-conflict",
-        );
-      }
 
-      const liveRun = await this.runs.findOne({
-        _id: run.id,
-        ownerId: run.ownerId,
-        caseId: run.caseId,
-      });
-      const liveLock = parseLock(await this.locks.findOne({ _id: id }));
-      if (
-        liveRun?.status === "waiting-for-input" &&
-        liveRun.inputRequired === true &&
-        liveRun.cancellationRequested !== true
-      ) {
-        if (
-          !liveLock ||
-          liveLock.state !== "waiting-for-input" ||
-          liveLock.runId !== run.id ||
-          liveLock.fencingToken !== liveRun.fencingToken
-        ) {
-          throw new StoreError(
-            "Waiting run admission changed during migration",
-            "run-admission-migration-conflict",
-          );
-        }
-      } else if (
-        liveLock?.state === "waiting-for-input" &&
-        liveLock.runId === run.id
-      ) {
-        await this.locks.updateOne(
+        const guard = await this.runs.updateOne(
           {
-            _id: id,
-            state: "waiting-for-input",
-            runId: run.id,
-            fencingToken: liveLock.fencingToken,
+            _id: run.id,
+            ownerId: run.ownerId,
+            caseId: run.caseId,
+            status: "waiting-for-input",
+            inputRequired: true,
+            cancellationRequested: false,
+            fencingToken: run.fencingToken,
           },
-          {
-            $set: {
-              state: "released",
-              leaseId: null,
-              leaseExpiresAt: null,
-              updatedAt: new Date().toISOString(),
-            },
-          },
+          { $inc: { admissionMigrationRevision: 1 } },
+          { session },
         );
-      }
+        if (guard.matchedCount !== 1) return;
+
+        const waitingLock: RunLock = {
+          _id: id,
+          ownerId: run.ownerId,
+          caseId: run.caseId,
+          runId: run.id,
+          state: "waiting-for-input",
+          leaseId: null,
+          fencingToken: run.fencingToken,
+          leaseExpiresAt: null,
+          updatedAt: run.updatedAt,
+        };
+        if (existing?.state === "released") {
+          const result = await this.locks.replaceOne(
+            {
+              _id: id,
+              state: "released",
+              fencingToken: existing.fencingToken,
+            },
+            waitingLock,
+            { session },
+          );
+          if (result.matchedCount !== 1) {
+            throw new StoreError(
+              "Waiting run admission changed during migration",
+              "run-admission-migration-conflict",
+            );
+          }
+        } else {
+          await this.locks.insertOne(waitingLock, { session });
+        }
+      });
     }
   }
 

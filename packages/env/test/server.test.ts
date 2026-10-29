@@ -197,6 +197,18 @@ describe("getUsageEnvironment", () => {
         SPEND_PERIOD_SECONDS: "86400",
       }),
     ).toThrow("USER_SPEND_LIMIT_USD must be a positive USD amount");
+    expect(() =>
+      getUsageEnvironment({
+        EVIANTA_USAGE_MODE: "enforced",
+        MODEL_MAX_INPUT_TOKENS: "32000",
+        MODEL_MAX_OUTPUT_TOKENS: "2048",
+        USER_MAX_CONCURRENT_RUNS: "2",
+        GLOBAL_MAX_CONCURRENT_RUNS: "10",
+        USER_SPEND_LIMIT_USD: "100000000",
+        GLOBAL_SPEND_LIMIT_USD: "100",
+        SPEND_PERIOD_SECONDS: "86400",
+      }),
+    ).toThrow("USER_SPEND_LIMIT_USD must be a positive USD amount");
   });
 
   it("validates usage limits when the paid provider is selected", () => {

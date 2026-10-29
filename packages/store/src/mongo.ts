@@ -921,6 +921,12 @@ export class MongoStore {
           ownerId,
           caseId: parsed.caseId,
           fencingToken: parsed.fencingToken,
+          ...(parsed.status === "running" && parsed.leaseId
+            ? {
+                leaseId: parsed.leaseId,
+                leaseExpiresAt: parsed.leaseExpiresAt,
+              }
+            : {}),
         },
         { ...documentFor(parsed), ...active },
       );

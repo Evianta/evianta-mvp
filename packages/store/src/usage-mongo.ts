@@ -216,6 +216,7 @@ export class MongoUsageRepository
         createdAtInstant: -1,
         attemptId: -1,
       }),
+      this.ledger.createIndex({ createdAtInstant: -1, attemptId: -1 }),
       this.ledger.createIndex({
         ownerId: 1,
         caseId: 1,
@@ -277,6 +278,10 @@ export class MongoUsageRepository
       ...parsedRequest,
       at: canonicalTimestamp(parsedRequest.at),
       expiresAt: canonicalTimestamp(parsedRequest.expiresAt),
+      price: {
+        ...parsedRequest.price,
+        effectiveAt: canonicalTimestamp(parsedRequest.price.effectiveAt),
+      },
     };
     if (
       request.price.provider !== request.provider ||
@@ -599,7 +604,6 @@ export class MongoUsageRepository
 
       const expiredAdmission =
         entry.outcome === "unknown" &&
-        entry.errorCode === "admission-expired" &&
         entry.reservationStatus === "reserved" &&
         reservation.status === "reserved";
       if (entry.outcome !== "admitted" && !expiredAdmission) {

@@ -182,7 +182,7 @@ describe("admitted usage accounting", () => {
         .mockResolvedValueOnce({
           leaseId: "lease-1",
           fencingToken: 1,
-          expiresAt: "2026-06-01T12:15:00.000Z",
+          expiresAt: "2026-06-01T12:00:03.000Z",
         })
         .mockResolvedValueOnce(null);
 
@@ -192,6 +192,34 @@ describe("admitted usage accounting", () => {
       expect(signal?.aborted).toBe(true);
 
       await accounting.cancel("attempt-1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts at the last confirmed expiry and bounds cancellation while renewal hangs", async () => {
+    vi.useFakeTimers();
+    try {
+      const { accounting, runAdmission } = setup(price, undefined, 3);
+      vi.mocked(runAdmission.renew)
+        .mockResolvedValueOnce({
+          leaseId: "lease-1",
+          fencingToken: 1,
+          expiresAt: "2026-06-01T12:00:03.000Z",
+        })
+        .mockImplementationOnce(() => new Promise(() => {}));
+
+      const signal = await accounting.admit(admittedAttempt());
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(signal?.aborted).toBe(true);
+
+      let cancelled = false;
+      const cancel = accounting.cancel("attempt-1").then(() => {
+        cancelled = true;
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await cancel;
+      expect(cancelled).toBe(true);
     } finally {
       vi.useRealTimers();
     }

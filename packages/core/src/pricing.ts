@@ -108,6 +108,9 @@ export function estimateUsageCost(
   if (units.input === null || units.output === null) {
     return { status: "unknown", costUsd: null };
   }
+  if (units.total !== null && units.total !== units.input + units.output) {
+    return { status: "unknown", costUsd: null };
+  }
 
   const cacheRead = units.cacheRead ?? null;
   const cacheWrite = units.cacheWrite ?? null;
