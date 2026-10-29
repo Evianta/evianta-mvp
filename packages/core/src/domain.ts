@@ -948,6 +948,11 @@ export type CreateRunRequest = z.infer<typeof CreateRunRequestSchema>;
 export const RunResponseSchema = z.object({ run: RunDtoSchema });
 export type RunResponse = z.infer<typeof RunResponseSchema>;
 
+export const LatestRunResponseSchema = z.object({
+  run: RunDtoSchema.nullable(),
+});
+export type LatestRunResponse = z.infer<typeof LatestRunResponseSchema>;
+
 export const CreateDocumentUploadRequestSchema = z.object({
   caseId: IdSchema,
   name: z.string().min(1).max(255),

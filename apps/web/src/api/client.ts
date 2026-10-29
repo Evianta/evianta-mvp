@@ -1,0 +1,355 @@
+import {
+  CaseResponseSchema,
+  CreateCaseRequestSchema,
+  DocumentResponseSchema,
+  type ExtractionMethod,
+  ListCasesResponseSchema,
+  LatestRunResponseSchema,
+  RunResponseSchema,
+  type Case,
+  type CaseResponse,
+  type CreateCaseRequest,
+  type DocumentResponse,
+  type ListCasesResponse,
+  type LatestRunResponse,
+  type RunResponse,
+  type RunDto,
+} from "@evianta/core";
+import { z } from "zod";
+import { ApiError } from "./errors";
+import { streamRunEvents } from "../events/sse";
+import type { RunEvent } from "@evianta/core";
+
+const TokenResponseSchema = z.object({
+  accessToken: z.string().min(1),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+
+const AdminUsageResponseSchema = z.object({
+  rows: z.array(
+    z.object({
+      id: z.string().min(1),
+      ownerId: z.string().min(1),
+      caseId: z.string().min(1),
+      runId: z.string().min(1),
+      provider: z.string().min(1),
+      model: z.string().min(1),
+      costUsd: z.number().finite().nonnegative().nullable(),
+      costStatus: z.enum(["estimated", "unknown"]),
+      recordedAt: z.string().datetime({ offset: true }),
+    }),
+  ),
+  totals: z.object({
+    knownCostUsd: z.number().finite().nonnegative(),
+    unknownCostCount: z.number().int().nonnegative(),
+  }),
+});
+
+export type AdminUsageResponse = z.infer<typeof AdminUsageResponseSchema>;
+export type AuthToken = z.infer<typeof TokenResponseSchema>;
+
+type ResponseSchema<T> = {
+  safeParse(
+    value: unknown,
+  ): { success: true; data: T } | { success: false; error: unknown };
+};
+
+export interface WebApiClient {
+  listCases(): Promise<Case[]>;
+  getCase(caseId: string): Promise<Case>;
+  getLatestRun(caseId: string): Promise<RunDto | null>;
+  createCase(request: CreateCaseRequest): Promise<Case>;
+  uploadDocument(
+    caseId: string,
+    file: File,
+    extractionMethod: ExtractionMethod,
+  ): Promise<DocumentResponse["document"]>;
+  startRun(caseId: string, input?: Record<string, unknown>): Promise<RunDto>;
+  retryRun(runId: string): Promise<RunDto>;
+  cancelRun(runId: string): Promise<RunDto>;
+  getAdminUsage(): Promise<AdminUsageResponse>;
+  streamRunEvents(
+    runId: string,
+    options: {
+      afterSequence?: number;
+      signal: AbortSignal;
+      onEvent: (event: RunEvent) => void;
+      onResync?: (lastSequence: number, nextSequence: number) => void;
+      replayOnly?: boolean;
+    },
+  ): Promise<void>;
+  clearPrivateState(): void;
+}
+
+export interface WebApiClientOptions {
+  getToken: () => string | null;
+  onUnauthorized: () => void;
+  baseUrl?: string;
+  fetcher?: typeof fetch;
+}
+
+export class FetchWebApiClient implements WebApiClient {
+  private readonly activeStreams = new Set<AbortController>();
+  private readonly baseUrl: string;
+  private readonly fetcher: typeof fetch;
+
+  constructor(private readonly options: WebApiClientOptions) {
+    this.baseUrl = (options.baseUrl ?? "").replace(/\/$/, "");
+    this.fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
+  }
+
+  async listCases(): Promise<Case[]> {
+    const collected: Case[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      const params = new URLSearchParams();
+      if (cursor) params.set("cursor", cursor);
+      const response = await this.request<ListCasesResponse>(
+        params.size > 0 ? `/cases?${params.toString()}` : "/cases",
+        ListCasesResponseSchema,
+      );
+      collected.push(...response.cases);
+      if (!response.nextCursor) break;
+      cursor = response.nextCursor;
+    }
+    return collected;
+  }
+
+  async getCase(caseId: string): Promise<Case> {
+    const response = await this.request<CaseResponse>(
+      `/cases/${encodeURIComponent(caseId)}`,
+      CaseResponseSchema,
+    );
+    return response.case;
+  }
+
+  async createCase(request: CreateCaseRequest): Promise<Case> {
+    const input = CreateCaseRequestSchema.parse(request);
+    const response = await this.request<CaseResponse>(
+      "/cases",
+      CaseResponseSchema,
+      this.jsonInit("POST", input),
+    );
+    return response.case;
+  }
+
+  async getLatestRun(caseId: string): Promise<RunDto | null> {
+    const response = await this.request<LatestRunResponse>(
+      `/cases/${encodeURIComponent(caseId)}/runs/latest`,
+      LatestRunResponseSchema,
+    );
+    return response.run;
+  }
+
+  async uploadDocument(
+    caseId: string,
+    file: File,
+    extractionMethod: ExtractionMethod,
+  ): Promise<DocumentResponse["document"]> {
+    const formData = new FormData();
+    formData.set("file", file);
+    formData.set("extractionMethod", extractionMethod);
+    const response = await this.request<DocumentResponse>(
+      `/cases/${encodeURIComponent(caseId)}/documents`,
+      DocumentResponseSchema,
+      { method: "POST", body: formData },
+    );
+    return response.document;
+  }
+
+  async startRun(
+    caseId: string,
+    input: Record<string, unknown> = {},
+  ): Promise<RunDto> {
+    const response = await this.request<RunResponse>(
+      "/runs",
+      RunResponseSchema,
+      this.jsonInit("POST", { caseId, input }),
+    );
+    return response.run;
+  }
+
+  async retryRun(runId: string): Promise<RunDto> {
+    const response = await this.request<RunResponse>(
+      `/runs/${encodeURIComponent(runId)}/retry`,
+      RunResponseSchema,
+      this.jsonInit("POST", {}),
+    );
+    return response.run;
+  }
+
+  async cancelRun(runId: string): Promise<RunDto> {
+    const response = await this.request<RunResponse>(
+      `/runs/${encodeURIComponent(runId)}/cancel`,
+      RunResponseSchema,
+      this.jsonInit("POST", {}),
+    );
+    return response.run;
+  }
+
+  async getAdminUsage(): Promise<AdminUsageResponse> {
+    return this.request<AdminUsageResponse>(
+      "/admin/usage",
+      AdminUsageResponseSchema,
+    );
+  }
+
+  async streamRunEvents(
+    runId: string,
+    options: {
+      afterSequence?: number;
+      signal: AbortSignal;
+      onEvent: (event: RunEvent) => void;
+      onResync?: (lastSequence: number, nextSequence: number) => void;
+      replayOnly?: boolean;
+    },
+  ): Promise<void> {
+    const token = this.options.getToken();
+    if (!token) throw new ApiError(401, "Sign in to continue.");
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (options.signal.aborted) abort();
+    options.signal.addEventListener("abort", abort, { once: true });
+    this.activeStreams.add(controller);
+    try {
+      await streamRunEvents({
+        url: `${this.baseUrl}/runs/${encodeURIComponent(runId)}/events`,
+        token,
+        afterSequence: options.afterSequence,
+        signal: controller.signal,
+        onEvent: options.onEvent,
+        onResync: options.onResync,
+        replayOnly: options.replayOnly,
+        onUnauthorized: () => {
+          if (this.options.getToken() === token) {
+            this.clearPrivateState();
+            this.options.onUnauthorized();
+          }
+        },
+        fetcher: this.fetcher,
+      });
+    } finally {
+      options.signal.removeEventListener("abort", abort);
+      this.activeStreams.delete(controller);
+    }
+  }
+
+  clearPrivateState(): void {
+    for (const stream of this.activeStreams) stream.abort();
+    this.activeStreams.clear();
+  }
+
+  async exchangeAccessKey(accessKey: string): Promise<AuthToken> {
+    const response = await this.fetcher(`${this.baseUrl}/auth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessKey }),
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new ApiError(
+        response.status,
+        response.status === 401
+          ? "The access key was not accepted."
+          : "Sign-in failed. Try again.",
+      );
+    }
+    return this.parseResponse<AuthToken>(response, TokenResponseSchema);
+  }
+
+  async revokeSession(token: string): Promise<void> {
+    const response = await this.fetcher(`${this.baseUrl}/auth/logout`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    });
+    if (!response.ok) throw await this.errorFromResponse(response);
+  }
+
+  private jsonInit(method: string, body: unknown): RequestInit {
+    return {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    };
+  }
+
+  private async request<T>(
+    path: string,
+    schema: ResponseSchema<T>,
+    init: RequestInit = {},
+  ): Promise<T> {
+    const token = this.options.getToken();
+    if (!token) throw new ApiError(401, "Sign in to continue.");
+
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${token}`);
+    headers.set("Accept", "application/json");
+    const response = await this.fetcher(`${this.baseUrl}${path}`, {
+      ...init,
+      headers,
+      cache: "no-store",
+    });
+    if (response.status === 401 && this.options.getToken() === token) {
+      this.clearPrivateState();
+      this.options.onUnauthorized();
+    }
+    if (!response.ok) throw await this.errorFromResponse(response);
+    return this.parseResponse(response, schema);
+  }
+
+  private async parseResponse<T>(
+    response: Response,
+    schema: ResponseSchema<T>,
+  ): Promise<T> {
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (error) {
+      throw new ApiError(502, "The server returned an invalid response.", {
+        cause: error,
+      });
+    }
+    const parsed = schema.safeParse(body);
+    if (!parsed.success) {
+      throw new ApiError(502, "The server returned an invalid response.", {
+        cause: parsed.error,
+      });
+    }
+    return parsed.data;
+  }
+
+  private async errorFromResponse(response: Response): Promise<ApiError> {
+    const detail = await response.text();
+    let message = `Request failed (${response.status}).`;
+    if (detail) {
+      try {
+        const body: unknown = JSON.parse(detail);
+        const errorMessage =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof body.error === "object" &&
+          body.error !== null &&
+          "message" in body.error &&
+          typeof body.error.message === "string"
+            ? body.error.message
+            : typeof body === "object" &&
+                body !== null &&
+                "message" in body &&
+                typeof body.message === "string"
+              ? body.message
+              : undefined;
+
+        if (errorMessage) {
+          message = errorMessage.slice(0, 500);
+        } else {
+          message = detail.slice(0, 500);
+        }
+      } catch {
+        message = detail.slice(0, 500);
+      }
+    }
+    return new ApiError(response.status, message);
+  }
+}
