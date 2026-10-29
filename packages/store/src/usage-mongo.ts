@@ -28,6 +28,8 @@ import {
 import { z } from "zod";
 import { CaseNotOwnedError, StoreError } from "./errors.js";
 
+type StoredDocument = Document & { _id: string };
+
 const unknownUnits = UsageUnitsSchema.parse({
   input: null,
   output: null,
@@ -140,25 +142,25 @@ function moneySubunits(value: number): number {
 export class MongoUsageRepository
   implements UsageAdmissionPort, UsagePriceRepository, UsageLedgerRepository
 {
-  private readonly cases: Collection<Document>;
-  private readonly runs: Collection<Document>;
-  private readonly runAdmissions: Collection<Document>;
-  private readonly prices: Collection<Document>;
-  private readonly ledger: Collection<Document>;
-  private readonly reservations: Collection<Document>;
-  private readonly budgets: Collection<Document>;
+  private readonly cases: Collection<StoredDocument>;
+  private readonly runs: Collection<StoredDocument>;
+  private readonly runAdmissions: Collection<StoredDocument>;
+  private readonly prices: Collection<StoredDocument>;
+  private readonly ledger: Collection<StoredDocument>;
+  private readonly reservations: Collection<StoredDocument>;
+  private readonly budgets: Collection<StoredDocument>;
 
   constructor(
     private readonly client: MongoClient,
     db: Db,
   ) {
-    this.cases = db.collection("cases");
-    this.runs = db.collection("runs");
-    this.runAdmissions = db.collection("runAdmissions");
-    this.prices = db.collection("usagePrices");
-    this.ledger = db.collection("usageLedger");
-    this.reservations = db.collection("usageReservations");
-    this.budgets = db.collection("budgets");
+    this.cases = db.collection<StoredDocument>("cases");
+    this.runs = db.collection<StoredDocument>("runs");
+    this.runAdmissions = db.collection<StoredDocument>("runAdmissions");
+    this.prices = db.collection<StoredDocument>("usagePrices");
+    this.ledger = db.collection<StoredDocument>("usageLedger");
+    this.reservations = db.collection<StoredDocument>("usageReservations");
+    this.budgets = db.collection<StoredDocument>("budgets");
   }
 
   async initialize(): Promise<void> {
