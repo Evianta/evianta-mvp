@@ -538,6 +538,139 @@ function repositoryContract(
       ).toMatchObject({ method: "ocr" });
     });
 
+    it("finds extractions by cache identity, claims them exclusively and deletes them with the case", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document-claim",
+        caseId: "case-1",
+        name: "scan.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        state: "uploaded" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "object-key",
+        contentHash: "hash-a",
+      };
+      await repositories.documents.insert(document, ownerScope);
+      const cacheIdentity = {
+        contentHash: "hash-a",
+        extractorVersion: "ingestion-1",
+        modelVersion: "mock-spark",
+      };
+      const extraction: ExtractedDocument = {
+        documentId: document.id,
+        kind: "text",
+        method: "ocr",
+        confidence: 0.9,
+        pages: [],
+        tables: [],
+        warnings: [],
+        cacheIdentity,
+      };
+      await repositories.extractions.saveForDocument(extraction, ownerScope);
+
+      expect(
+        await repositories.extractions.findCached(
+          document.id,
+          cacheIdentity,
+          ownerScope,
+        ),
+      ).toEqual(extraction);
+      expect(
+        await repositories.extractions.findCached(
+          document.id,
+          { ...cacheIdentity, contentHash: "hash-b" },
+          ownerScope,
+        ),
+      ).toBeNull();
+      expect(
+        await repositories.extractions.findCached(document.id, cacheIdentity, {
+          ownerId: "owner-2",
+          caseId: "case-1",
+        }),
+      ).toBeNull();
+
+      const claim = {
+        documentId: document.id,
+        cacheIdentity,
+        holderId: "holder-1",
+        at: "2026-01-15T00:00:00.000Z",
+        expiresAt: "2026-01-15T00:05:00.000Z",
+      };
+      expect(await repositories.extractions.claim(claim, ownerScope)).toBe(
+        true,
+      );
+      expect(
+        await repositories.extractions.claim(
+          { ...claim, holderId: "holder-2" },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.claim(
+          {
+            ...claim,
+            holderId: "holder-2",
+            at: "2026-01-15T00:06:00.000Z",
+            expiresAt: "2026-01-15T00:10:00.000Z",
+          },
+          ownerScope,
+        ),
+      ).toBe(true);
+      await repositories.extractions.releaseClaim(
+        { documentId: document.id, cacheIdentity, holderId: "holder-1" },
+        ownerScope,
+      );
+      expect(
+        await repositories.extractions.claim(
+          {
+            ...claim,
+            at: "2026-01-15T00:07:00.000Z",
+            expiresAt: "2026-01-15T00:12:00.000Z",
+          },
+          ownerScope,
+        ),
+      ).toBe(false);
+      await repositories.extractions.releaseClaim(
+        { documentId: document.id, cacheIdentity, holderId: "holder-2" },
+        ownerScope,
+      );
+      expect(
+        await repositories.extractions.claim(
+          {
+            ...claim,
+            at: "2026-01-15T00:07:00.000Z",
+            expiresAt: "2026-01-15T00:12:00.000Z",
+          },
+          ownerScope,
+        ),
+      ).toBe(true);
+      await expect(
+        repositories.extractions.claim(claim, {
+          ownerId: "owner-2",
+          caseId: "case-1",
+        }),
+      ).rejects.toMatchObject({ code: "case-not-owned" });
+
+      await expect(
+        repositories.extractions.deleteForCase({
+          ownerId: "owner-2",
+          caseId: "case-1",
+        }),
+      ).rejects.toMatchObject({ code: "case-not-owned" });
+      expect(await repositories.extractions.deleteForCase(ownerScope)).toBe(1);
+      expect(
+        await repositories.extractions.findForDocument(document.id, ownerScope),
+      ).toBeNull();
+      expect(
+        await repositories.extractions.claim(
+          { ...claim, holderId: "holder-3" },
+          ownerScope,
+        ),
+      ).toBe(true);
+    });
+
     it("enforces case ownership for runs, tasks, findings and usage", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.cases.insert(makeCase("case-2", "owner-2"));

@@ -24,6 +24,8 @@ import {
   type DocumentMetadataRecord,
   type Evidence,
   type ExtractedDocument,
+  type ExtractionCacheIdentity,
+  type ExtractionClaimRequest,
   type Finding,
   type OwnerScope,
   type RunEvent,
@@ -128,6 +130,20 @@ function isDuplicateKey(error: unknown): boolean {
   return error instanceof MongoServerError && error.code === 11000;
 }
 
+function extractionCacheId(record: {
+  documentId: string;
+  cacheIdentity: ExtractionCacheIdentity;
+}): string {
+  return [
+    record.documentId,
+    record.cacheIdentity.contentHash,
+    record.cacheIdentity.extractorVersion,
+    record.cacheIdentity.modelVersion ?? "",
+  ]
+    .map(encodeURIComponent)
+    .join(":");
+}
+
 async function insertUnique<T extends { id: string }>(
   collection: Collection<Stored<T>>,
   schema: ZodType<T>,
@@ -184,6 +200,15 @@ export class MongoStore {
   readonly extractionCounters: Collection<
     Stored<{ id: string; revision: number }>
   >;
+  readonly extractionClaims: Collection<{
+    _id: string;
+    documentId: string;
+    caseId: string;
+    ownerId: string;
+    holderId: string;
+    claimedAt: Date;
+    expiresAt: Date;
+  }>;
   readonly tasks: Collection<Stored<Task>>;
   readonly findings: Collection<Stored<Finding>>;
   readonly evidence: Collection<Stored<Evidence>>;
@@ -241,6 +266,7 @@ export class MongoStore {
     this.documents = db.collection("documents");
     this.extractions = db.collection("extractions");
     this.extractionCounters = db.collection("extractionCounters");
+    this.extractionClaims = db.collection("extractionClaims");
     this.tasks = db.collection("tasks");
     this.findings = db.collection("findings");
     this.evidence = db.collection("evidence");
@@ -305,6 +331,12 @@ export class MongoStore {
           this.extractionFindForDocument(id, scope),
         saveForDocument: (record, scope) =>
           this.extractionSaveForDocument(record, scope),
+        findCached: (id, identity, scope) =>
+          this.extractionFindCached(id, identity, scope),
+        claim: (request, scope) => this.extractionClaim(request, scope),
+        releaseClaim: (request, scope) =>
+          this.extractionReleaseClaim(request, scope),
+        deleteForCase: (scope) => this.extractionDeleteForCase(scope),
       },
       evidence: {
         listForCase: (scope) => this.evidenceListForCase(scope),
@@ -407,6 +439,7 @@ export class MongoStore {
         { unique: true },
       ),
       this.extractions.createIndex({ caseId: 1, documentId: 1, revision: -1 }),
+      this.extractionClaims.createIndex({ caseId: 1 }),
       this.tasks.createIndex({ caseId: 1, runId: 1, id: 1 }, { unique: true }),
       this.tasks.createIndex({ caseId: 1, runId: 1 }),
       this.findings.createIndex({ caseId: 1, id: 1 }, { unique: true }),
@@ -823,14 +856,7 @@ export class MongoStore {
         "document-not-owned",
       );
     }
-    const cacheId = [
-      parsed.documentId,
-      parsed.cacheIdentity.contentHash,
-      parsed.cacheIdentity.extractorVersion,
-      parsed.cacheIdentity.modelVersion ?? "",
-    ]
-      .map(encodeURIComponent)
-      .join(":");
+    const cacheId = extractionCacheId(parsed);
     const counterId = JSON.stringify([scope.caseId, parsed.documentId]);
     // The counter update and replacement share one transaction so a delayed
     // save cannot overwrite a newer revision with an older one.
@@ -861,6 +887,110 @@ export class MongoStore {
         { upsert: true, session },
       );
     });
+  }
+
+  async extractionFindCached(
+    documentId: string,
+    cacheIdentity: ExtractionCacheIdentity,
+    scope: OwnerScope,
+  ): Promise<ExtractedDocument | null> {
+    if (!(await this.ownsCase(scope))) return null;
+    const record = await this.extractions.findOne({
+      _id: extractionCacheId({ documentId, cacheIdentity }),
+      caseId: scope.caseId,
+    });
+    if (!record) return null;
+    return decode(ExtractedDocumentSchema, record);
+  }
+
+  async extractionClaim(
+    request: ExtractionClaimRequest,
+    scope: OwnerScope,
+  ): Promise<boolean> {
+    const at = new Date(TimestampSchema.parse(request.at));
+    const expiresAt = new Date(TimestampSchema.parse(request.expiresAt));
+    if (expiresAt.getTime() <= at.getTime()) {
+      throw new StoreError(
+        "Extraction claim expiry must be after the claim time",
+        "invalid-extraction-claim",
+      );
+    }
+    await this.requireOwnedCase(scope);
+    const document = await this.documents.findOne({
+      _id: request.documentId,
+      caseId: scope.caseId,
+      ownerId: scope.ownerId,
+    });
+    if (!document) {
+      throw new StoreError(
+        "Document does not belong to this case",
+        "document-not-owned",
+      );
+    }
+    const claimId = extractionCacheId(request);
+    try {
+      // Matching only our own or expired claims makes a live foreign claim
+      // fall through to the upsert, which then fails on the unique _id.
+      await this.extractionClaims.updateOne(
+        {
+          _id: claimId,
+          $or: [{ holderId: request.holderId }, { expiresAt: { $lte: at } }],
+        },
+        {
+          $set: {
+            documentId: request.documentId,
+            caseId: scope.caseId,
+            ownerId: scope.ownerId,
+            holderId: request.holderId,
+            claimedAt: at,
+            expiresAt,
+          },
+        },
+        { upsert: true },
+      );
+      return true;
+    } catch (error) {
+      if (isDuplicateKey(error)) return false;
+      throw error;
+    }
+  }
+
+  async extractionReleaseClaim(
+    request: Omit<ExtractionClaimRequest, "at" | "expiresAt">,
+    scope: OwnerScope,
+  ): Promise<void> {
+    await this.extractionClaims.deleteOne({
+      _id: extractionCacheId(request),
+      caseId: scope.caseId,
+      ownerId: scope.ownerId,
+      holderId: request.holderId,
+    });
+  }
+
+  async extractionDeleteForCase(scope: OwnerScope): Promise<number> {
+    const owned = await this.cases.countDocuments({
+      _id: scope.caseId,
+      ownerId: scope.ownerId,
+      isSample: false,
+    });
+    if (owned !== 1) throw new CaseNotOwnedError();
+    const documentIds = await this.extractions.distinct("documentId", {
+      caseId: scope.caseId,
+    });
+    const result = await this.extractions.deleteMany({
+      caseId: scope.caseId,
+    });
+    await Promise.all([
+      this.extractionClaims.deleteMany({ caseId: scope.caseId }),
+      this.extractionCounters.deleteMany({
+        _id: {
+          $in: documentIds.map((documentId) =>
+            JSON.stringify([scope.caseId, documentId]),
+          ),
+        },
+      }),
+    ]);
+    return result.deletedCount;
   }
 
   async evidenceListForCase(scope: OwnerScope): Promise<Evidence[]> {

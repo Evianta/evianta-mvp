@@ -7,6 +7,7 @@ import type {
   DocumentMetadataDto,
   Deliverable,
   ExtractedDocument,
+  ExtractionCacheIdentity,
   Evidence,
   Finding,
   RunEvent,
@@ -78,15 +79,39 @@ export interface DocumentRepository {
   ): Promise<boolean>;
 }
 
+export interface ExtractionClaimRequest {
+  documentId: string;
+  cacheIdentity: ExtractionCacheIdentity;
+  holderId: string;
+  at: string;
+  expiresAt: string;
+}
+
 export interface ExtractionRepository {
   findForDocument(
     documentId: string,
+    scope: OwnerScope,
+  ): Promise<ExtractedDocument | null>;
+  findCached(
+    documentId: string,
+    cacheIdentity: ExtractionCacheIdentity,
     scope: OwnerScope,
   ): Promise<ExtractedDocument | null>;
   saveForDocument(
     extraction: ExtractedDocument,
     scope: OwnerScope,
   ): Promise<void>;
+  /**
+   * Claims one extraction cache identity so concurrent ingestions do not
+   * repeat paid OCR. Returns false while another unexpired holder owns it.
+   */
+  claim(request: ExtractionClaimRequest, scope: OwnerScope): Promise<boolean>;
+  releaseClaim(
+    request: Omit<ExtractionClaimRequest, "at" | "expiresAt">,
+    scope: OwnerScope,
+  ): Promise<void>;
+  /** Removes cached extracts and claims as part of case deletion/retention. */
+  deleteForCase(scope: OwnerScope): Promise<number>;
 }
 
 export interface FindingRepository {
