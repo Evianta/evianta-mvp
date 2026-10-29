@@ -13,6 +13,7 @@
     "@evianta/ai": "workspace:*",
     "@evianta/core": "workspace:*",
     "@napi-rs/canvas": "1.0.13",
+    "bson": "7.3.3",
     "papaparse": "5.7.0",
     "pdfjs-dist": "6.4.299",
     "utif2": "4.1.0",

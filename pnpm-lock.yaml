@@ -168,6 +168,9 @@ importers:
       '@napi-rs/canvas':
         specifier: 1.0.13
         version: 1.0.13
+      bson:
+        specifier: 7.3.3
+        version: 7.3.3
       papaparse:
         specifier: 5.7.0
         version: 5.7.0

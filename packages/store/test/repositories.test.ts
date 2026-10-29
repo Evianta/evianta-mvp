@@ -601,6 +601,53 @@ function repositoryContract(
       expect(await repositories.extractions.claim(claim, ownerScope)).toBe(
         true,
       );
+      expect(await repositories.extractions.renewClaim(claim, ownerScope)).toBe(
+        true,
+      );
+      expect(
+        await repositories.extractions.renewClaim(
+          {
+            ...claim,
+            at: claim.expiresAt,
+            expiresAt: "2026-01-15T00:06:00.000Z",
+          },
+          ownerScope,
+        ),
+      ).toBe(false);
+      await repositories.extractions.releaseClaim(claim, {
+        ...ownerScope,
+        ownerId: "owner-2",
+      });
+      expect(
+        await repositories.extractions.claim(
+          { ...claim, holderId: "holder-2" },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.saveClaimed(
+          extraction,
+          { ...document, state: "ready" },
+          { holderId: "holder-2", at: claim.at },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.saveClaimed(
+          extraction,
+          { ...document, state: "ready" },
+          { holderId: claim.holderId, at: claim.expiresAt },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.saveClaimed(
+          extraction,
+          { ...document, state: "ready" },
+          { holderId: claim.holderId, at: claim.at },
+          ownerScope,
+        ),
+      ).toBe(true);
       expect(
         await repositories.extractions.claim(
           { ...claim, holderId: "holder-2" },
@@ -618,6 +665,25 @@ function repositoryContract(
           ownerScope,
         ),
       ).toBe(true);
+      expect(
+        await repositories.extractions.saveClaimed(
+          { ...extraction, confidence: 0.1 },
+          { ...document, state: "partial" },
+          { holderId: "holder-1", at: "2026-01-15T00:07:00.000Z" },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.findCached(
+          document.id,
+          cacheIdentity,
+          ownerScope,
+        ),
+      ).toEqual(extraction);
+      expect(
+        (await repositories.documents.findOwned(document.id, ownerScope))
+          ?.state,
+      ).toBe("ready");
       await repositories.extractions.releaseClaim(
         { documentId: document.id, cacheIdentity, holderId: "holder-1" },
         ownerScope,

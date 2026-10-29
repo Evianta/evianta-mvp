@@ -45,17 +45,26 @@ function spanFor(
   page: PDFPageProxy,
 ): PositionedSpan | null {
   const viewport = page.getViewport({ scale: 1 });
-  const [, , , scaleY, x, y] = item.transform;
-  const height = item.height || Math.abs(scaleY);
-  const [x1, y1] = viewport.convertToViewportPoint(x, y) as number[];
-  const [x2, y2] = viewport.convertToViewportPoint(
-    x + item.width,
-    y + height,
-  ) as number[];
-  const left = clamp(Math.min(x1, x2) / viewport.width);
-  const top = clamp(Math.min(y1, y2) / viewport.height);
-  const right = clamp(Math.max(x1, x2) / viewport.width);
-  const bottom = clamp(Math.max(y1, y2) / viewport.height);
+  const [a, b, c, d, x, y] = item.transform;
+  const scaleX = Math.hypot(a, b);
+  const scaleY = Math.hypot(c, d);
+  if (!scaleX || !scaleY) return null;
+  const width = item.width / scaleX;
+  const height = (item.height || scaleY) / scaleY;
+  const corners = [
+    [0, 0],
+    [width, 0],
+    [0, height],
+    [width, height],
+  ].map(([u, v]) =>
+    viewport.convertToViewportPoint(a * u + c * v + x, b * u + d * v + y),
+  );
+  const xs = corners.map((point) => point[0]);
+  const ys = corners.map((point) => point[1]);
+  const left = clamp(Math.min(...xs) / viewport.width);
+  const top = clamp(Math.min(...ys) / viewport.height);
+  const right = clamp(Math.max(...xs) / viewport.width);
+  const bottom = clamp(Math.max(...ys) / viewport.height);
   if (right <= left || bottom <= top) return null;
   return {
     text: item.str,

@@ -15,6 +15,8 @@ import {
 } from "@evianta/core";
 import { createInMemoryStore, InMemoryDocumentStore } from "@evianta/store";
 import { describe, expect, it, vi } from "vitest";
+import { degrees, PDFDocument, StandardFonts } from "pdf-lib";
+import * as XLSX from "xlsx";
 import {
   createDocumentIngestion,
   createMuseOcrBackend,
@@ -387,6 +389,86 @@ describe("OCR extraction", () => {
 });
 
 describe("caching and claims", () => {
+  it("refreshes the cache after acquiring a claim", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(plainImage(), mimeTypes.png, "scan.png");
+    const first = await h.ingestion.ingest(ingestRequest(doc.id));
+    vi.spyOn(
+      h.store.repositories.extractions,
+      "findCached",
+    ).mockResolvedValueOnce(null);
+    const second = await h.ingestion.ingest(ingestRequest(doc.id));
+    expect(second).toMatchObject({
+      cached: true,
+      extraction: first.extraction,
+    });
+    expect(h.generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("heartbeats while an OCR call outlives the original lease", async () => {
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const extractPage = vi.fn(async () => {
+      started();
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return {
+        text: "Invoice",
+        method: "ocr" as const,
+        confidence: 0.9,
+        spans: [],
+      };
+    });
+    const h = await setup({
+      ingestion: { claimTtlSeconds: 1 },
+      ocr: { version: "slow-ocr", extractPage },
+    });
+    const doc = await h.addDocument(plainImage(), mimeTypes.png, "scan.png");
+    const first = h.ingestion.ingest(ingestRequest(doc.id));
+    await entered;
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const second = await h.ingestion.ingest(ingestRequest(doc.id));
+    expect(second.status).toBe("in-progress");
+    expect((await first).status).toBe("ready");
+    expect(extractPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts OCR and never commits after losing a claim", async () => {
+    let signal: AbortSignal | undefined;
+    const h = await setup({
+      ingestion: { claimTtlSeconds: 1 },
+      ocr: {
+        version: "waiting-ocr",
+        extractPage: async (request) => {
+          signal = request.signal;
+          return new Promise((_, reject) => {
+            request.signal!.addEventListener(
+              "abort",
+              () => reject(request.signal!.reason),
+              { once: true },
+            );
+          });
+        },
+      },
+    });
+    const repository = h.store.repositories.extractions;
+    const claim = repository.renewClaim.bind(repository);
+    vi.spyOn(repository, "renewClaim").mockImplementation((request, scope) =>
+      signal ? Promise.resolve(false) : claim(request, scope),
+    );
+    const save = vi.spyOn(repository, "saveClaimed");
+    const doc = await h.addDocument(plainImage(), mimeTypes.png, "scan.png");
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+    expect(result).toMatchObject({
+      status: "in-progress",
+      stopReason: "claim-lost",
+    });
+    expect(signal?.aborted).toBe(true);
+    expect(save).not.toHaveBeenCalled();
+    expect(await repository.findForDocument(doc.id, ownerScope)).toBeNull();
+  });
+
   it("reuses the cached extraction without another model call", async () => {
     const h = await setup();
     const doc = await h.addDocument(
@@ -518,6 +600,122 @@ describe("caching and claims", () => {
 });
 
 describe("security and limits", () => {
+  it("does not mistake PDF header text in CSV data for a PDF", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(
+      Buffer.from("name,note\nscan,%PDF-1.7\n"),
+      mimeTypes.csv,
+      "notes.csv",
+    );
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+    expect(result.extraction!.tables[0].rows).toEqual([["scan", "%PDF-1.7"]]);
+  });
+
+  it("rejects a worksheet whose absolute range exceeds the read cutoff", async () => {
+    const book = XLSX.utils.book_new();
+    const sheet = XLSX.utils.aoa_to_sheet([]);
+    XLSX.utils.sheet_add_aoa(
+      sheet,
+      [
+        ["Name", "Value"],
+        ["A", 1],
+        ["B", 2],
+      ],
+      { origin: "A3" },
+    );
+    sheet["!ref"] = "A3:B5";
+    XLSX.utils.book_append_sheet(book, sheet, "Offset");
+    const bytes = XLSX.write(book, {
+      type: "buffer",
+      bookType: "xlsx",
+    }) as Buffer;
+    const h = await setup({ ingestion: { limits: { maxRows: 2 } } });
+    const doc = await h.addDocument(bytes, mimeTypes.xlsx, "offset.xlsx");
+    await expect(
+      h.ingestion.ingest(ingestRequest(doc.id)),
+    ).rejects.toMatchObject({ code: "row-limit-exceeded" });
+    expect(await h.stateOf(doc.id)).toBe("failed");
+  });
+
+  it("bounds actual ZIP inflation even when both headers understate sizes", async () => {
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      book,
+      XLSX.utils.aoa_to_sheet([["Name"], ["x".repeat(30000)]]),
+      "Data",
+    );
+    const bytes = XLSX.write(book, {
+      type: "buffer",
+      bookType: "xlsx",
+      compression: true,
+    }) as Buffer;
+    const end = bytes.length - 22;
+    let directory = bytes.readUInt32LE(end + 16);
+    for (let entry = 0; entry < bytes.readUInt16LE(end + 10); entry++) {
+      const local = bytes.readUInt32LE(directory + 42);
+      bytes.writeUInt32LE(1, directory + 24);
+      bytes.writeUInt32LE(1, local + 22);
+      directory +=
+        46 +
+        bytes.readUInt16LE(directory + 28) +
+        bytes.readUInt16LE(directory + 30) +
+        bytes.readUInt16LE(directory + 32);
+    }
+    const h = await setup({
+      ingestion: { limits: { maxDecompressedBytes: 1000 } },
+    });
+    const doc = await h.addDocument(bytes, mimeTypes.xlsx, "forged.xlsx");
+    await expect(
+      h.ingestion.ingest(ingestRequest(doc.id)),
+    ).rejects.toMatchObject({ code: "decompression-limit-exceeded" });
+    expect(await h.stateOf(doc.id)).toBe("failed");
+  });
+
+  it("fails explicitly before persisting oversized encoded output", async () => {
+    const h = await setup();
+    const header = Array.from({ length: 20 }, (_, i) => `column${i}`).join(",");
+    const bytes = Buffer.from(
+      `${header}\n${`${Array(20).fill("x").join(",")}\n`.repeat(100000)}`,
+    );
+    expect(bytes.byteLength).toBeLessThan(5 * 1024 * 1024);
+    const doc = await h.addDocument(bytes, mimeTypes.csv, "large.csv");
+    await expect(
+      h.ingestion.ingest(ingestRequest(doc.id)),
+    ).rejects.toMatchObject({ code: "extraction-limit-exceeded" });
+    expect(await h.stateOf(doc.id)).toBe("failed");
+    expect(
+      await h.store.repositories.extractions.findForDocument(
+        doc.id,
+        ownerScope,
+      ),
+    ).toBeNull();
+  });
+
+  it("positions text using its own rotation, independently of page rotation", async () => {
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    const page = pdf.addPage([612, 792]);
+    page.drawText("Vertical invoice text", {
+      x: 300,
+      y: 200,
+      size: 12,
+      font,
+      rotate: degrees(90),
+    });
+    const h = await setup();
+    const doc = await h.addDocument(
+      await pdf.save(),
+      mimeTypes.pdf,
+      "rotated.pdf",
+    );
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+    const span = result.extraction!.pages[0].spans[0];
+    expect(span.bbox.height).toBeGreaterThan(span.bbox.width * 4);
+    expect(span.bbox.x).toBeCloseTo((300 - 12) / 612, 2);
+    expect(span.bbox.width).toBeCloseTo(12 / 612, 2);
+    expect(h.generate).not.toHaveBeenCalled();
+  });
+
   it("denies documents outside the owner scope before any provider call", async () => {
     const h = await setup();
     await h.addCase("case-2", "owner-2");

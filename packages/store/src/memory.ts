@@ -450,6 +450,33 @@ export class InMemoryStore {
             revision: ++this.extractionRevision,
           });
         },
+        saveClaimed: async (extraction, document, claim, scope) => {
+          this.requireScope(scope.caseId, scope);
+          const record = parse(ExtractedDocumentSchema, extraction);
+          const next = parse(DocumentMetadataRecordSchema, document);
+          const stored = this.documents.get(record.documentId);
+          const key = this.extractionKey(record);
+          const current = this.extractionClaims.get(key);
+          const at = TimestampSchema.parse(claim.at);
+          if (
+            !stored ||
+            stored.caseId !== scope.caseId ||
+            next.id !== stored.id ||
+            next.caseId !== stored.caseId ||
+            !current ||
+            current.caseId !== scope.caseId ||
+            current.holderId !== claim.holderId ||
+            Date.parse(current.expiresAt) <= Date.parse(at)
+          )
+            return false;
+          this.extractions.set(key, {
+            record,
+            caseId: scope.caseId,
+            revision: ++this.extractionRevision,
+          });
+          this.documents.set(next.id, next);
+          return true;
+        },
         findCached: async (documentId, cacheIdentity, scope) => {
           if (!this.ownsCase(scope)) return null;
           const item = this.extractions.get(
@@ -492,7 +519,31 @@ export class InMemoryStore {
           });
           return true;
         },
+        renewClaim: async (request, scope) => {
+          this.requireScope(scope.caseId, scope);
+          const at = TimestampSchema.parse(request.at);
+          const expiresAt = TimestampSchema.parse(request.expiresAt);
+          if (Date.parse(expiresAt) <= Date.parse(at)) {
+            throw new StoreError(
+              "Extraction claim expiry must be after the claim time",
+              "invalid-extraction-claim",
+            );
+          }
+          const current = this.extractionClaims.get(
+            this.extractionKey(request),
+          );
+          if (
+            !current ||
+            current.caseId !== scope.caseId ||
+            current.holderId !== request.holderId ||
+            Date.parse(current.expiresAt) <= Date.parse(at)
+          )
+            return false;
+          current.expiresAt = expiresAt;
+          return true;
+        },
         releaseClaim: async (request, scope) => {
+          if (!this.ownsCase(scope)) return;
           const key = this.extractionKey(request);
           const current = this.extractionClaims.get(key);
           if (

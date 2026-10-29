@@ -62,6 +62,20 @@ USD per million tokens, with an optional per-request web-search rate.
 `runAdmission` provides fenced user/global concurrency admission and retains a
 case lock while a run waits for input.
 
+Document ingestion renews its extraction claim during parsing and OCR. Saving
+the extraction and final document state is conditional on a live claim in one
+transaction. ZIP spreadsheets are checked against actual bounded inflation;
+row limits reject truncated sheets. Extracted output is limited to 12 MiB of
+BSON by default (`maxExtractedBytes`, configurable up to 15 MiB), below MongoDB's
+16 MiB record limit. Larger output fails explicitly rather than remaining in
+`processing`.
+
+Live Muse image requests remain disabled with `unbounded-usage-capability`
+until the provider's image usage can be bounded for spending admission. Scanned
+documents therefore remain `partial` with `ocr-unsupported` under Muse; mock
+OCR and deterministic parsing are available. Do not remove the spending guard
+to enable OCR.
+
 ## Environment and generated files
 
 `.env.example` contains only non-secret local defaults. Copy it to `.env` when

@@ -1,7 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@evianta/core": ["../core/src/index.ts"],
+      "@evianta/ai": ["../ai/src/index.ts"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

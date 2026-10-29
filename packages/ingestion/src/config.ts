@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const EXTRACTOR_VERSION = "ingestion-1";
+export const EXTRACTOR_VERSION = "ingestion-2";
 
 export interface IngestionLimits {
   /** Largest stored object the pipeline will read. */
@@ -19,6 +19,8 @@ export interface IngestionLimits {
   /** Uncompressed byte bound for zip-based spreadsheets. */
   maxDecompressedBytes: number;
   maxZipEntries: number;
+  /** BSON output bound, leaving room for persistence metadata below 16 MiB. */
+  maxExtractedBytes: number;
   parserTimeoutMs: number;
 }
 
@@ -52,6 +54,7 @@ export const defaultIngestionLimits: IngestionLimits = {
   maxSheets: 25,
   maxDecompressedBytes: 200 * 1024 * 1024,
   maxZipEntries: 2_000,
+  maxExtractedBytes: 12 * 1024 * 1024,
   parserTimeoutMs: 20_000,
 };
 
@@ -75,6 +78,9 @@ export function resolveIngestionSettings(
   const limits = { ...defaultIngestionLimits, ...options.limits };
   for (const [name, value] of Object.entries(limits)) {
     positiveInteger(name, value);
+  }
+  if (limits.maxExtractedBytes > 15 * 1024 * 1024) {
+    throw new Error("maxExtractedBytes must not exceed 15 MiB");
   }
   return {
     limits,

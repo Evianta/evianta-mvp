@@ -10,6 +10,7 @@ export type IngestionErrorCode =
   | "decompression-limit-exceeded"
   | "image-limit-exceeded"
   | "row-limit-exceeded"
+  | "extraction-limit-exceeded"
   | "parser-timeout"
   | "parse-failed";
 

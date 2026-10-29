@@ -101,11 +101,23 @@ export interface ExtractionRepository {
     extraction: ExtractedDocument,
     scope: OwnerScope,
   ): Promise<void>;
+  /** Atomically saves output and document state only for a live claim holder. */
+  saveClaimed(
+    extraction: ExtractedDocument,
+    document: DocumentMetadataRecord,
+    claim: { holderId: string; at: string },
+    scope: OwnerScope,
+  ): Promise<boolean>;
   /**
    * Claims one extraction cache identity so concurrent ingestions do not
    * repeat paid OCR. Returns false while another unexpired holder owns it.
    */
   claim(request: ExtractionClaimRequest, scope: OwnerScope): Promise<boolean>;
+  /** Renews only an existing, unexpired claim; never reacquires a lost lease. */
+  renewClaim(
+    request: ExtractionClaimRequest,
+    scope: OwnerScope,
+  ): Promise<boolean>;
   releaseClaim(
     request: Omit<ExtractionClaimRequest, "at" | "expiresAt">,
     scope: OwnerScope,

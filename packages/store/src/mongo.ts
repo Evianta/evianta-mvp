@@ -208,6 +208,7 @@ export class MongoStore {
     holderId: string;
     claimedAt: Date;
     expiresAt: Date;
+    committedAt?: Date;
   }>;
   readonly tasks: Collection<Stored<Task>>;
   readonly findings: Collection<Stored<Finding>>;
@@ -329,11 +330,16 @@ export class MongoStore {
       extractions: {
         findForDocument: (id, scope) =>
           this.extractionFindForDocument(id, scope),
-        saveForDocument: (record, scope) =>
-          this.extractionSaveForDocument(record, scope),
+        saveForDocument: async (record, scope) => {
+          await this.extractionSaveForDocument(record, scope);
+        },
+        saveClaimed: (record, document, claim, scope) =>
+          this.extractionSaveForDocument(record, scope, { document, ...claim }),
         findCached: (id, identity, scope) =>
           this.extractionFindCached(id, identity, scope),
         claim: (request, scope) => this.extractionClaim(request, scope),
+        renewClaim: (request, scope) =>
+          this.extractionRenewClaim(request, scope),
         releaseClaim: (request, scope) =>
           this.extractionReleaseClaim(request, scope),
         deleteForCase: (scope) => this.extractionDeleteForCase(scope),
@@ -842,7 +848,8 @@ export class MongoStore {
   async extractionSaveForDocument(
     extraction: ExtractedDocument,
     scope: OwnerScope,
-  ): Promise<void> {
+    claim?: { document: DocumentMetadataRecord; holderId: string; at: string },
+  ): Promise<boolean> {
     const parsed = ExtractedDocumentSchema.parse(extraction);
     await this.requireOwnedCase(scope);
     const document = await this.documents.findOne({
@@ -860,7 +867,36 @@ export class MongoStore {
     const counterId = JSON.stringify([scope.caseId, parsed.documentId]);
     // The counter update and replacement share one transaction so a delayed
     // save cannot overwrite a newer revision with an older one.
-    await this.withTransaction(async (session) => {
+    return this.withTransaction(async (session) => {
+      if (claim) {
+        const next = DocumentMetadataRecordSchema.parse(claim.document);
+        const at = new Date(TimestampSchema.parse(claim.at));
+        if (next.id !== parsed.documentId || next.caseId !== scope.caseId) {
+          throw new StoreError(
+            "Document does not belong to this case",
+            "document-not-owned",
+          );
+        }
+        // Writing the claim fences this transaction against renewal/takeover.
+        const owned = await this.extractionClaims.updateOne(
+          {
+            _id: cacheId,
+            caseId: scope.caseId,
+            ownerId: scope.ownerId,
+            holderId: claim.holderId,
+            expiresAt: { $gt: at },
+          },
+          { $set: { committedAt: at } },
+          { session },
+        );
+        if (owned.matchedCount === 0) return false;
+        const updated = await this.documents.replaceOne(
+          { _id: next.id, caseId: scope.caseId, ownerId: scope.ownerId },
+          { ...documentFor(next), ownerId: scope.ownerId },
+          { session },
+        );
+        if (updated.matchedCount === 0) return false;
+      }
       const counter = await this.extractionCounters.findOneAndUpdate(
         { _id: counterId },
         {
@@ -886,6 +922,7 @@ export class MongoStore {
         },
         { upsert: true, session },
       );
+      return true;
     });
   }
 
@@ -953,6 +990,32 @@ export class MongoStore {
       if (isDuplicateKey(error)) return false;
       throw error;
     }
+  }
+
+  async extractionRenewClaim(
+    request: ExtractionClaimRequest,
+    scope: OwnerScope,
+  ): Promise<boolean> {
+    await this.requireOwnedCase(scope);
+    const at = new Date(TimestampSchema.parse(request.at));
+    const expiresAt = new Date(TimestampSchema.parse(request.expiresAt));
+    if (expiresAt.getTime() <= at.getTime()) {
+      throw new StoreError(
+        "Extraction claim expiry must be after the claim time",
+        "invalid-extraction-claim",
+      );
+    }
+    const result = await this.extractionClaims.updateOne(
+      {
+        _id: extractionCacheId(request),
+        caseId: scope.caseId,
+        ownerId: scope.ownerId,
+        holderId: request.holderId,
+        expiresAt: { $gt: at },
+      },
+      { $set: { expiresAt } },
+    );
+    return result.matchedCount === 1;
   }
 
   async extractionReleaseClaim(

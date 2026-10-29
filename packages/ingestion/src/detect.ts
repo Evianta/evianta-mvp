@@ -96,9 +96,6 @@ type BinarySignature =
   | "cfb";
 
 function sniffBinary(bytes: Uint8Array): BinarySignature | null {
-  // PDF readers accept a header within the first kilobyte.
-  const head = ascii(bytes, 0, Math.min(bytes.length, 1024));
-  if (head.includes("%PDF-")) return "pdf";
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
     return "png";
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "jpeg";
@@ -115,6 +112,7 @@ function sniffBinary(bytes: Uint8Array): BinarySignature | null {
   if (startsWith(bytes, [0x50, 0x4b, 0x03, 0x04])) return "zip";
   if (startsWith(bytes, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]))
     return "cfb";
+  if (/^%PDF-\d\.\d(?:\r|\n)/.test(ascii(bytes, 0, 10))) return "pdf";
   return null;
 }
 
@@ -124,18 +122,27 @@ export interface ZipInventory {
 }
 
 /**
- * Reads the zip central directory without inflating anything so archive
- * bombs are rejected before a spreadsheet parser touches them.
+ * Validates both ZIP directories and bounds actual inflation before handing
+ * the archive to a parser with its own decompressor.
  */
 export function inspectZip(
   bytes: Uint8Array,
   limits: IngestionLimits,
 ): ZipInventory {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const malformed = (): never => {
+    throw new IngestionError(
+      "Spreadsheet archive is malformed",
+      "parse-failed",
+    );
+  };
   const minimumEnd = Math.max(0, bytes.length - 65_557);
   let end = -1;
   for (let offset = bytes.length - 22; offset >= minimumEnd; offset -= 1) {
-    if (view.getUint32(offset, true) === 0x06054b50) {
+    if (
+      view.getUint32(offset, true) === 0x06054b50 &&
+      offset + 22 + view.getUint16(offset + 20, true) === bytes.length
+    ) {
       end = offset;
       break;
     }
@@ -147,7 +154,15 @@ export function inspectZip(
     );
   }
   const entries = view.getUint16(end + 10, true);
+  const directorySize = view.getUint32(end + 12, true);
   const directoryOffset = view.getUint32(end + 16, true);
+  if (
+    view.getUint16(end + 4, true) !== 0 ||
+    view.getUint16(end + 6, true) !== 0 ||
+    view.getUint16(end + 8, true) !== entries ||
+    directoryOffset + directorySize !== end
+  )
+    malformed();
   if (entries === 0xffff || directoryOffset === 0xffffffff) {
     throw new IngestionError(
       "ZIP64 spreadsheet archives are not supported",
@@ -161,23 +176,30 @@ export function inspectZip(
     );
   }
   const names: string[] = [];
+  const localRanges: { start: number; end: number }[] = [];
   let uncompressedBytes = 0;
   let offset = directoryOffset;
   for (let index = 0; index < entries; index += 1) {
-    if (
-      offset + 46 > bytes.length ||
-      view.getUint32(offset, true) !== 0x02014b50
-    ) {
+    if (offset + 46 > end || view.getUint32(offset, true) !== 0x02014b50) {
       throw new IngestionError(
         "Spreadsheet archive is malformed",
         "parse-failed",
       );
     }
     const size = view.getUint32(offset + 24, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const checksum = view.getUint32(offset + 16, true);
+    const flags = view.getUint16(offset + 8, true);
+    const method = view.getUint16(offset + 10, true);
+    const localOffset = view.getUint32(offset + 42, true);
     const nameLength = view.getUint16(offset + 28, true);
     const extraLength = view.getUint16(offset + 30, true);
     const commentLength = view.getUint16(offset + 32, true);
-    if (size === 0xffffffff) {
+    if (
+      size === 0xffffffff ||
+      compressedSize === 0xffffffff ||
+      localOffset === 0xffffffff
+    ) {
       throw new IngestionError(
         "ZIP64 spreadsheet archives are not supported",
         "decompression-limit-exceeded",
@@ -190,13 +212,86 @@ export function inspectZip(
         "decompression-limit-exceeded",
       );
     }
-    names.push(
-      new TextDecoder().decode(
-        bytes.subarray(offset + 46, offset + 46 + nameLength),
-      ),
-    );
+    if (
+      offset + 46 + nameLength + extraLength + commentLength > end ||
+      localOffset + 30 > directoryOffset ||
+      view.getUint32(localOffset, true) !== 0x04034b50 ||
+      flags & ~0x080e ||
+      (method !== 0 && method !== 8) ||
+      view.getUint16(localOffset + 6, true) !== flags ||
+      view.getUint16(localOffset + 8, true) !== method
+    )
+      malformed();
+    const localNameLength = view.getUint16(localOffset + 26, true);
+    const localExtraLength = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    let dataEnd = dataStart + compressedSize;
+    const nameBytes = bytes.subarray(offset + 46, offset + 46 + nameLength);
+    const name = new TextDecoder().decode(nameBytes);
+    if (
+      localNameLength !== nameLength ||
+      dataEnd > directoryOffset ||
+      !Buffer.from(nameBytes).equals(
+        bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength),
+      ) ||
+      names.includes(name)
+    )
+      malformed();
+    const descriptor = Boolean(flags & 8);
+    for (const [field, expected] of [
+      [14, checksum],
+      [18, compressedSize],
+      [22, size],
+    ]) {
+      const actual = view.getUint32(localOffset + field, true);
+      if (actual !== expected && !(descriptor && actual === 0)) malformed();
+    }
+    if (descriptor) {
+      if (dataEnd + 12 > directoryOffset) malformed();
+      if (view.getUint32(dataEnd, true) === 0x08074b50) dataEnd += 4;
+      if (
+        dataEnd + 12 > directoryOffset ||
+        view.getUint32(dataEnd, true) !== checksum ||
+        view.getUint32(dataEnd + 4, true) !== compressedSize ||
+        view.getUint32(dataEnd + 8, true) !== size
+      )
+        malformed();
+      dataEnd += 12;
+    }
+    const compressed = bytes.subarray(dataStart, dataStart + compressedSize);
+    let inflated: Uint8Array;
+    try {
+      inflated =
+        method === 0
+          ? compressed
+          : inflateRawSync(compressed, {
+              maxOutputLength: Math.min(size, limits.maxDecompressedBytes) + 1,
+            });
+    } catch (error) {
+      throw new IngestionError(
+        "Spreadsheet archive could not be inflated within its size bound",
+        "decompression-limit-exceeded",
+        { cause: error },
+      );
+    }
+    if (inflated.length !== size) {
+      throw new IngestionError(
+        "Spreadsheet archive size does not match its contents",
+        "decompression-limit-exceeded",
+      );
+    }
+    if (crc32(inflated) !== checksum) malformed();
+    localRanges.push({ start: localOffset, end: dataEnd });
+    names.push(name);
     offset += 46 + nameLength + extraLength + commentLength;
   }
+  if (offset !== end) malformed();
+  let localEnd = 0;
+  for (const range of localRanges.sort((a, b) => a.start - b.start)) {
+    if (range.start !== localEnd) malformed();
+    localEnd = range.end;
+  }
+  if (localEnd !== directoryOffset) malformed();
   return { names, uncompressedBytes };
 }
 
@@ -292,3 +387,4 @@ export function detectFormat(
   if (declared.startsWith("text/")) return "text";
   return mismatch(declared);
 }
+import { crc32, inflateRawSync } from "node:zlib";

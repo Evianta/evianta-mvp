@@ -187,6 +187,7 @@ export function parseWorkbook(
     const full = XLSX.utils.decode_range(fullRange);
     if (
       full.e.r - full.s.r > limits.maxRows ||
+      full.e.r >= limits.maxRows + 2 ||
       full.e.c - full.s.c + 1 > limits.maxColumns
     ) {
       throw new IngestionError(

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { calculateObjectSize } from "bson";
 import type { UsageContext } from "@evianta/ai";
 import {
   ExtractedDocumentSchema,
@@ -351,8 +352,10 @@ export function createDocumentIngestion(
         if (await dependencies.documents.replaceOwned(next, scope))
           record = next;
       };
+      const ownership: { verify?: () => Promise<boolean> } = {};
       const fail = async (error: unknown): Promise<never> => {
-        await setState("failed");
+        if (!ownership.verify || (await ownership.verify()))
+          await setState("failed");
         throw error;
       };
 
@@ -372,22 +375,11 @@ export function createDocumentIngestion(
           ? (dependencies.ocr?.version ?? "none")
           : null,
       };
-      const cached = await dependencies.extractions.findCached(
+      let cached = await dependencies.extractions.findCached(
         record.id,
         cacheIdentity,
         scope,
       );
-      if (cached && !isIncomplete(cached)) {
-        await setState("ready");
-        return {
-          status: "ready",
-          extraction: cached,
-          cached: true,
-          ocrPages: [],
-          stopReason: null,
-        };
-      }
-
       const holderId = request.holderId ?? randomUUID();
       const claimRequest = () => {
         const at = now();
@@ -411,8 +403,98 @@ export function createDocumentIngestion(
         };
       }
 
+      const controller = new AbortController();
+      const signal = request.signal
+        ? AbortSignal.any([request.signal, controller.signal])
+        : controller.signal;
+      let claimLost = false;
+      let heartbeatError: unknown;
+      let renewal: Promise<boolean> | undefined;
+      const renewClaim = (): Promise<boolean> => {
+        if (claimLost) return Promise.resolve(false);
+        if (heartbeatError) return Promise.reject(heartbeatError);
+        if (renewal) return renewal;
+        renewal = dependencies.extractions
+          .renewClaim(claimRequest(), scope)
+          .then((owned) => {
+            if (!owned) {
+              claimLost = true;
+              controller.abort(new Error("Extraction claim lost"));
+            }
+            return owned;
+          })
+          .finally(() => {
+            renewal = undefined;
+          });
+        return renewal;
+      };
+      ownership.verify = renewClaim;
+      const heartbeat = setInterval(
+        () => {
+          void renewClaim().catch((error: unknown) => {
+            heartbeatError = error;
+            controller.abort(error);
+          });
+        },
+        (settings.claimTtlSeconds * 1000) / 3,
+      );
+      heartbeat.unref();
+      const stopHeartbeat = async () => {
+        clearInterval(heartbeat);
+        await renewal;
+        if (heartbeatError) throw heartbeatError;
+      };
+      const lostResult = async (
+        ocrPages: number[],
+      ): Promise<IngestionResult> => ({
+        status: "in-progress",
+        extraction: await dependencies.extractions.findCached(
+          record!.id,
+          cacheIdentity,
+          scope,
+        ),
+        cached: false,
+        ocrPages,
+        stopReason: "claim-lost",
+      });
+      const commit = async (
+        extraction: ExtractedDocument,
+        state: "ready" | "partial",
+      ): Promise<boolean> => {
+        if (calculateObjectSize(extraction) > limits.maxExtractedBytes) {
+          return fail(
+            new IngestionError(
+              "Extracted document exceeds the encoded output size limit",
+              "extraction-limit-exceeded",
+            ),
+          );
+        }
+        if (!(await renewClaim())) return false;
+        const at = now().toISOString();
+        return dependencies.extractions.saveClaimed(
+          extraction,
+          { ...record!, state, processedAt: at },
+          { holderId, at },
+          scope,
+        );
+      };
       let pdf: OpenedPdf | null = null;
       try {
+        cached = await dependencies.extractions.findCached(
+          record.id,
+          cacheIdentity,
+          scope,
+        );
+        if (cached && !isIncomplete(cached)) {
+          if (!(await commit(cached, "ready"))) return lostResult([]);
+          return {
+            status: "ready",
+            extraction: cached,
+            cached: true,
+            ocrPages: [],
+            stopReason: null,
+          };
+        }
         await setState("processing");
         const parsed = (() => {
           try {
@@ -439,8 +521,7 @@ export function createDocumentIngestion(
             warnings: parsed.warnings,
             cacheIdentity,
           });
-          await dependencies.extractions.saveForDocument(extraction, scope);
-          await setState("ready");
+          if (!(await commit(extraction, "ready"))) return lostResult([]);
           return {
             status: "ready",
             extraction,
@@ -505,6 +586,8 @@ export function createDocumentIngestion(
         };
 
         for (const page of pages) {
+          if (claimLost) return lostResult(ocrPages);
+          if (heartbeatError) throw heartbeatError;
           if (page.text !== null) {
             extracted.push({
               index: page.index,
@@ -527,13 +610,11 @@ export function createDocumentIngestion(
             if (!dependencies.ocr) stopReason = "ocr-unavailable";
             else if (!request.usageContext)
               stopReason = "usage-context-required";
-            else if (request.signal?.aborted) stopReason = "interrupted";
+            else if (signal.aborted) stopReason = "interrupted";
             else if (ocrBudget < 1) stopReason = "ocr-page-limit";
-            else if (
-              !(await dependencies.extractions.claim(claimRequest(), scope))
-            )
-              stopReason = "claim-lost";
+            else if (!(await renewClaim())) stopReason = "claim-lost";
           }
+          if (claimLost) return lostResult(ocrPages);
           if (stopReason) {
             placeholder(page, stopReason, stopMessages[stopReason]);
             continue;
@@ -551,6 +632,7 @@ export function createDocumentIngestion(
             );
             continue;
           }
+          if (!(await renewClaim())) return lostResult(ocrPages);
           ocrBudget -= 1;
           ocrPages.push(page.index);
           try {
@@ -559,7 +641,7 @@ export function createDocumentIngestion(
               pageCount: pages.length,
               image,
               usageContext: request.usageContext!,
-              signal: request.signal,
+              signal,
             });
             const confidence =
               result.method === "handwriting"
@@ -577,7 +659,9 @@ export function createDocumentIngestion(
             extracted.push(output);
             warnings.push(...ocrWarnings(output));
           } catch (error) {
-            stopReason = classifyOcrError(error, request.signal);
+            if (claimLost) return lostResult(ocrPages);
+            if (heartbeatError) throw heartbeatError;
+            stopReason = classifyOcrError(error, signal);
             placeholder(
               page,
               stopReason,
@@ -610,8 +694,8 @@ export function createDocumentIngestion(
           warnings,
           cacheIdentity,
         });
-        await dependencies.extractions.saveForDocument(extraction, scope);
-        await setState(incomplete ? "partial" : "ready");
+        if (!(await commit(extraction, incomplete ? "partial" : "ready")))
+          return lostResult(ocrPages);
         return {
           status: incomplete ? "partial" : "ready",
           extraction,
@@ -620,11 +704,18 @@ export function createDocumentIngestion(
           stopReason,
         };
       } finally {
-        await pdf?.close();
-        await dependencies.extractions.releaseClaim(
-          { documentId: record.id, cacheIdentity, holderId },
-          scope,
-        );
+        try {
+          await stopHeartbeat();
+        } finally {
+          try {
+            await pdf?.close();
+          } finally {
+            await dependencies.extractions.releaseClaim(
+              { documentId: record.id, cacheIdentity, holderId },
+              scope,
+            );
+          }
+        }
       }
     },
   };
