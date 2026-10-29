@@ -199,6 +199,7 @@ export class AuthenticationService {
     accessToken: string;
     tokenType: "Bearer";
     expiresIn: 1800;
+    expiresAt: string;
   } | null> {
     const parsedInput = AccessKeyInputSchema.safeParse(plaintext);
     if (!parsedInput.success) return null;
@@ -249,7 +250,7 @@ export class AuthenticationService {
       },
       this.configuration.jwtSigningKey,
     );
-    return { accessToken, tokenType: "Bearer", expiresIn: 1800 };
+    return { accessToken, tokenType: "Bearer", expiresIn: 1800, expiresAt };
   }
 
   async authenticate(token: string): Promise<AuthContext> {

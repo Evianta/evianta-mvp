@@ -136,10 +136,12 @@ describe("API access-key authentication", () => {
       accessToken: string;
       tokenType: string;
       expiresIn: number;
+      expiresAt: string;
     };
     expect(tokenResult).toMatchObject({
       tokenType: "Bearer",
       expiresIn: 1800,
+      expiresAt: "2026-10-28T00:30:00.000Z",
     });
     expect(tokenResult.accessToken).not.toContain(accessKey.plaintext);
 
@@ -204,6 +206,19 @@ describe("API access-key authentication", () => {
     );
     expect(second.status).toBe(429);
     await readApiError(second, "limit-reached");
+  });
+
+  it("returns an API error for unsupported JSON charsets", async () => {
+    const response = await fetch(`${baseUrl}/auth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=iso-8859-1" },
+      body: JSON.stringify({ accessKey: accessKey.plaintext }),
+    });
+
+    expect(response.status).toBe(415);
+    expect(
+      (await readApiError(response, "validation-failed")).error.message,
+    ).toBe("Request content encoding is not supported");
   });
 
   it("rejects malformed signatures, logs out sessions, and rechecks key revocation", async () => {
@@ -453,5 +468,12 @@ describe("API access-key authentication", () => {
     const limitedResponse = await me(result.accessToken);
     expect(limitedResponse.status).toBe(429);
     await readApiError(limitedResponse, "limit-reached");
+
+    const logoutResponse = await fetch(`${baseUrl}/auth/logout`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${result.accessToken}` },
+    });
+    expect(logoutResponse.status).toBe(204);
+    expect((await me(result.accessToken)).status).toBe(401);
   });
 });

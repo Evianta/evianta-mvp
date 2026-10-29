@@ -67,6 +67,7 @@ function sendRateLimitError(response: Response, resetAt: string): void {
 export function createAuthenticationMiddleware(
   service: AuthenticationService,
   configuration: ApiAppConfiguration,
+  options: { enforceRateLimit?: boolean } = {},
 ): RequestHandler {
   return (request, response, next) => {
     const token = bearerToken(request);
@@ -80,6 +81,10 @@ export function createAuthenticationMiddleware(
       .then(async (context) => {
         const requestWithAuth = request as RequestWithAuth;
         requestWithAuth.authContext = context;
+        if (options.enforceRateLimit === false) {
+          next();
+          return;
+        }
         const key = createRateLimitKey(
           configuration.jwtSigningKey,
           "api-user",
@@ -194,7 +199,9 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
   const authenticated = createAuthenticationMiddleware(service, configuration);
   app.post(
     "/auth/logout",
-    authenticated,
+    createAuthenticationMiddleware(service, configuration, {
+      enforceRateLimit: false,
+    }),
     requirePrincipal,
     (request, response, next) => {
       const context = (request as RequestWithAuth).authContext;
@@ -252,7 +259,7 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
       typeof error === "object" &&
       error !== null &&
       "status" in error &&
-      (error.status === 400 || error.status === 413)
+      (error.status === 400 || error.status === 413 || error.status === 415)
         ? error.status
         : 500;
     if (status === 500) {
@@ -265,7 +272,7 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
     const code =
       status === 413
         ? "limit-reached"
-        : status === 400
+        : status === 400 || status === 415
           ? "validation-failed"
           : error instanceof AuthenticationError
             ? "unauthenticated"
@@ -273,11 +280,13 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
     const message =
       status === 413
         ? "Request body is too large"
-        : status === 400
-          ? "Request body is invalid"
-          : error instanceof AuthenticationError
-            ? "Authentication required"
-            : "An unexpected error occurred";
+        : status === 415
+          ? "Request content encoding is not supported"
+          : status === 400
+            ? "Request body is invalid"
+            : error instanceof AuthenticationError
+              ? "Authentication required"
+              : "An unexpected error occurred";
     sendApiError(response, status, code, message);
   };
   app.use(errorHandler);
