@@ -27,6 +27,8 @@ type RunLock = {
   updatedAt: string;
 };
 
+type StoredDocument = Document & { _id: string };
+
 const RunLockSchema = z.object({
   _id: z.string().min(1),
   ownerId: z.string().min(1),
@@ -73,19 +75,19 @@ function canonicalTimestamp(value: string): string {
 }
 
 export class MongoRunAdmissionRepository implements RunAdmissionPort {
-  private readonly cases: Collection<Document>;
-  private readonly runs: Collection<Document>;
+  private readonly cases: Collection<StoredDocument>;
+  private readonly runs: Collection<StoredDocument>;
   private readonly locks: Collection<RunLock>;
-  private readonly counters: Collection<Document>;
+  private readonly counters: Collection<StoredDocument>;
 
   constructor(
     private readonly client: MongoClient,
     db: Db,
   ) {
-    this.cases = db.collection("cases");
-    this.runs = db.collection("runs");
-    this.locks = db.collection("runAdmissions");
-    this.counters = db.collection("runAdmissionCounters");
+    this.cases = db.collection<StoredDocument>("cases");
+    this.runs = db.collection<StoredDocument>("runs");
+    this.locks = db.collection<RunLock>("runAdmissions");
+    this.counters = db.collection<StoredDocument>("runAdmissionCounters");
   }
 
   async initialize(): Promise<void> {
@@ -207,7 +209,6 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
       await this.locks.replaceOne(
         { _id: id },
         {
-          _id: id,
           ownerId: request.ownerId,
           caseId: request.caseId,
           runId: request.runId,
