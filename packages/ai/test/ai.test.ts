@@ -21,6 +21,7 @@ const models = {
 
 function createAccounting(): UsageAccounting {
   return {
+    mode: "admitted",
     admit: vi.fn(),
     record: vi.fn(),
   };
@@ -148,6 +149,56 @@ describe("@evianta/ai", () => {
 
     expect(dispatch).not.toHaveBeenCalled();
     expect(accounting.record).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized inputs before admitting or dispatching", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const dispatch = vi.spyOn(provider, "generateStructured");
+    const client = createAi({
+      provider,
+      accounting,
+      models: { ...models, maxInputTokens: 1 },
+    });
+
+    await expect(
+      client.runStructured({
+        tier: "cheap",
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+        system: "Return JSON",
+        input: "data-analysis",
+        usageContext: { userId: "user-1" },
+      }),
+    ).rejects.toMatchObject({ code: "input-limit-exceeded" });
+    expect(accounting.admit).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("requires admitted accounting and explicit caps for the paid provider", () => {
+    expect(() =>
+      createAi({
+        provider: createMockProvider(),
+        accounting: createAccounting(),
+        models: { ...models, provider: "muse" },
+      }),
+    ).toThrow(AdmissionRejectedError);
+
+    expect(() =>
+      createAi({
+        provider: createMockProvider(),
+        accounting: {
+          admit: vi.fn(),
+          record: vi.fn(),
+        },
+        models: {
+          ...models,
+          provider: "muse",
+          maxInputTokens: 32_000,
+          maxOutputTokens: 2_048,
+        },
+      }),
+    ).toThrow(AdmissionRejectedError);
   });
 
   it("does not attach a timeout listener when output schema conversion fails", async () => {
@@ -552,7 +603,12 @@ describe("@evianta/ai", () => {
       const client = createAi({
         provider,
         accounting,
-        models: { ...models, provider: "muse" },
+        models: {
+          ...models,
+          provider: "muse",
+          maxInputTokens: 32_000,
+          maxOutputTokens: 2_048,
+        },
       });
 
       await expect(

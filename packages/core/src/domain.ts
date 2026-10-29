@@ -111,6 +111,112 @@ export const UsageRecordSchema = z
   });
 export type UsageRecord = z.infer<typeof UsageRecordSchema>;
 
+export const UsagePriceSchema = z.object({
+  id: IdSchema,
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  settingsKey: z.string().min(1),
+  settings: z.record(z.string(), z.unknown()),
+  currency: z.literal("USD"),
+  inputUsdPerMillion: UsdSchema,
+  outputUsdPerMillion: UsdSchema,
+  cacheReadUsdPerMillion: UsdSchema,
+  cacheWriteUsdPerMillion: UsdSchema,
+  searchUsdPerRequest: UsdSchema.nullable(),
+  version: z.number().int().positive(),
+  source: z.string().min(1),
+  effectiveAt: TimestampSchema,
+});
+export type UsagePrice = z.infer<typeof UsagePriceSchema>;
+
+export const UsageLedgerEntrySchema = z
+  .object({
+    id: IdSchema,
+    attemptId: IdSchema,
+    ownerId: IdSchema,
+    caseId: IdSchema,
+    runId: IdSchema,
+    taskId: IdSchema.nullable(),
+    sourceCaseId: IdSchema.nullable(),
+    useCase: UseCaseSchema,
+    provider: z.string().min(1),
+    model: z.string().min(1),
+    settings: z.record(z.string(), z.unknown()),
+    inputAllowanceTokens: NonNegativeIntegerSchema,
+    outputAllowanceTokens: NonNegativeIntegerSchema,
+    searchRequested: z.boolean(),
+    price: UsagePriceSchema,
+    priceId: IdSchema,
+    priceVersion: z.number().int().positive(),
+    units: UsageUnitsSchema,
+    outcome: z.enum(["admitted", "success", "failed", "unknown", "cancelled"]),
+    costUsd: UsdSchema.nullable(),
+    costStatus: UsageCostStatusSchema,
+    reservedUsd: UsdSchema,
+    reservationStatus: z.enum(["reserved", "settled", "released"]),
+    errorCode: z.string().min(1).nullable(),
+    createdAt: TimestampSchema,
+    updatedAt: TimestampSchema,
+    settledAt: TimestampSchema.nullable(),
+  })
+  .superRefine((entry, context) => {
+    if (
+      entry.price.id !== entry.priceId ||
+      entry.price.version !== entry.priceVersion
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Usage price snapshot must match its recorded identity",
+        path: ["price"],
+      });
+    }
+    if (entry.costStatus === "unknown" && entry.costUsd !== null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Unknown cost must not be represented as a numeric amount",
+        path: ["costUsd"],
+      });
+    }
+    if (entry.costStatus === "estimated" && entry.costUsd === null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Estimated cost requires a known estimate",
+        path: ["costUsd"],
+      });
+    }
+    if (
+      (entry.outcome === "admitted") !==
+      (entry.reservationStatus === "reserved" && entry.settledAt === null)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Admission state must match reservation and settlement state",
+        path: ["outcome"],
+      });
+    }
+    if (
+      entry.reservationStatus === "settled" &&
+      entry.costStatus !== "estimated"
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Settled reservations require an estimated cost",
+        path: ["reservationStatus"],
+      });
+    }
+    if (
+      entry.reservationStatus === "released" &&
+      !["failed", "cancelled"].includes(entry.outcome)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Released reservations must be cancelled or failed",
+        path: ["reservationStatus"],
+      });
+    }
+  });
+export type UsageLedgerEntry = z.infer<typeof UsageLedgerEntrySchema>;
+
 export const UsageSummarySchema = z
   .object({
     inputUnits: NonNegativeIntegerSchema.nullable(),
@@ -784,15 +890,35 @@ export const RunEventSchema = z.object({
 });
 export type RunEvent = z.infer<typeof RunEventSchema>;
 
-export const UsageReservationSchema = z.object({
-  id: IdSchema,
-  ownerId: IdSchema,
-  caseId: IdSchema,
-  runId: IdSchema,
-  reservedUsd: UsdSchema,
-  status: z.enum(["reserved", "settled", "released", "expired"]),
-  expiresAt: TimestampSchema,
-});
+export const UsageReservationSchema = z
+  .object({
+    id: IdSchema,
+    attemptId: IdSchema,
+    idempotencyKey: z.string().min(1),
+    ownerId: IdSchema,
+    caseId: IdSchema,
+    runId: IdSchema,
+    periodStart: TimestampSchema,
+    periodSeconds: z.number().int().positive(),
+    reservedUsd: UsdSchema,
+    actualCostUsd: UsdSchema.nullable(),
+    status: z.enum(["reserved", "settled", "released", "expired"]),
+    createdAt: TimestampSchema,
+    updatedAt: TimestampSchema,
+    expiresAt: TimestampSchema,
+  })
+  .superRefine((reservation, context) => {
+    if (
+      (reservation.status === "settled") !==
+      (reservation.actualCostUsd !== null)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Settled reservations must have a known actual cost",
+        path: ["actualCostUsd"],
+      });
+    }
+  });
 export type UsageReservation = z.infer<typeof UsageReservationSchema>;
 
 export const CreateCaseRequestSchema = z.object({

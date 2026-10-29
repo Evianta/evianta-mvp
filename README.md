@@ -43,8 +43,23 @@ cloud resources and model traffic. Add each feature with its own focused tests;
 do not add placeholder product behavior to a package boundary.
 
 The AI package defaults to the deterministic mock provider. Live Muse requests
-require server-side configuration and an injected usage-admission/recording
-port; tests do not call a model provider.
+require server-side model credentials, enforced usage limits, an active
+versioned price record, and `createAdmittedUsageAccounting` backed by the store
+repositories. The accounting adapter reserves a conservative allowance before
+dispatch, records each attempt, and settles only when cost can be estimated.
+Attempts with unknown provider usage keep their reservation as explicit
+exposure; they are not silently treated as free. Streaming calls remain
+reserved when the provider does not return usage details.
+
+Set `EVIANTA_USAGE_MODE=enforced` for live use and configure every
+`MODEL_MAX_*`, concurrency, spend, and period value in `.env`. The example uses
+`test` mode with the mock provider only. `test` and `replay` modes cannot be
+combined with Muse. Price records are immutable versions keyed by provider,
+model, and the canonical settings hash from `pricingSettingsKey`; rates are in
+USD per million tokens, with an optional per-request web-search rate.
+`UsageAdminService` exposes bounded, administrator-only attempt summaries.
+`runAdmission` provides fenced user/global concurrency admission and retains a
+case lock while a run waits for input.
 
 ## Environment and generated files
 

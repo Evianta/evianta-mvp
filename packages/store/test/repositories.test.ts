@@ -6,7 +6,9 @@ import {
   type ExtractedDocument,
   type OwnerScope,
   type RunRecord,
+  type UsagePrice,
   type UsageRecord,
+  type UsageReservationRequest,
 } from "@evianta/core";
 import { randomUUID } from "node:crypto";
 import { MongoClient } from "mongodb";
@@ -98,6 +100,52 @@ function makeUsage(id: string, attemptId = `attempt-${id}`): UsageRecord {
     costUsd: 0,
     costStatus: "estimated",
     recordedAt: timestamp,
+  };
+}
+
+function makeUsagePrice(): UsagePrice {
+  return {
+    id: "price-v1",
+    provider: "muse",
+    model: "spark",
+    settingsKey: "settings-v1",
+    settings: { maxOutputTokens: 100 },
+    currency: "USD",
+    inputUsdPerMillion: 1,
+    outputUsdPerMillion: 2,
+    cacheReadUsdPerMillion: 1,
+    cacheWriteUsdPerMillion: 1,
+    searchUsdPerRequest: null,
+    version: 1,
+    source: "test",
+    effectiveAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function makeReservationRequest(
+  attemptId: string,
+  amountUsd: number,
+): UsageReservationRequest {
+  const price = makeUsagePrice();
+  return {
+    attemptId,
+    idempotencyKey: attemptId,
+    ownerId: "owner-1",
+    caseId: "case-1",
+    runId: "run-1",
+    taskId: null,
+    provider: "muse",
+    model: "spark",
+    settings: price.settings,
+    price,
+    inputAllowanceTokens: Math.max(1, Math.floor(amountUsd * 1_000_000)),
+    outputAllowanceTokens: 1,
+    searchRequested: false,
+    userSpendLimitUsd: 1,
+    globalSpendLimitUsd: 1,
+    periodSeconds: 86_400,
+    at: timestamp,
+    expiresAt: "2026-01-15T00:15:00.000Z",
   };
 }
 
@@ -669,6 +717,227 @@ function repositoryContract(
       expect(
         await repositories.usage.listForRun("run-1", ownerScope),
       ).toHaveLength(1);
+    });
+
+    it("reserves spend before dispatch and preserves unknown exposure", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const currentPrice = makeUsagePrice();
+      await repositories.usagePrices.insert(currentPrice);
+      await repositories.usagePrices.insert({
+        ...currentPrice,
+        id: "price-v2",
+        version: 2,
+        effectiveAt: "2026-02-01T00:00:00.000Z",
+      });
+      expect(
+        await repositories.usagePrices.findActive(
+          "muse",
+          "spark",
+          "settings-v1",
+          timestamp,
+        ),
+      ).toMatchObject({ id: "price-v1", version: 1 });
+      expect(
+        await repositories.usagePrices.findActive(
+          "muse",
+          "spark",
+          "settings-v1",
+          "2026-02-02T00:00:00.000Z",
+        ),
+      ).toMatchObject({ id: "price-v2", version: 2 });
+
+      const request = makeReservationRequest("attempt-1", 0.6);
+      const reservation = await repositories.usageAdmission.reserve(request);
+      await expect(
+        repositories.usageAdmission.reserve(request),
+      ).rejects.toMatchObject({ code: "usage-attempt-exists" });
+      await expect(
+        repositories.usageAdmission.reserve(
+          makeReservationRequest("attempt-2", 0.5),
+        ),
+      ).rejects.toMatchObject({ code: "spend-limit-exceeded" });
+
+      await repositories.usageAdmission.settle({
+        reservation,
+        outcome: "unknown",
+        units: {
+          input: null,
+          output: null,
+          total: null,
+          reasoning: null,
+          cacheRead: null,
+          cacheWrite: null,
+          search: null,
+        },
+        errorCode: "provider-timeout",
+        at: "2026-01-15T00:01:00.000Z",
+      });
+      await expect(
+        repositories.usageAdmission.release(reservation.id, "failed"),
+      ).rejects.toMatchObject({ code: "unknown-usage-exposure" });
+      await expect(
+        repositories.usageAdmission.reserve(
+          makeReservationRequest("attempt-3", 0.5),
+        ),
+      ).rejects.toMatchObject({ code: "spend-limit-exceeded" });
+
+      await expect(
+        repositories.usageAdmin.query({ userId: "user-1", role: "user" }),
+      ).rejects.toMatchObject({ code: "admin-required" });
+      const summary = await repositories.usageAdmin.query({
+        userId: "admin-1",
+        role: "admin",
+      });
+      expect(summary.totals).toMatchObject({
+        attempts: 1,
+        knownChargesUsd: 0,
+      });
+      expect(summary.totals.unknownExposureUsd).toBeCloseTo(0.600002);
+      expect(summary.totals.reservedUsd).toBeCloseTo(0.600002);
+      expect(summary.entries[0]).toMatchObject({
+        sourceCaseId: null,
+        useCase: "data-analysis",
+        reservationStatus: "reserved",
+        outcome: "unknown",
+      });
+      expect(
+        await repositories.usage.listForRun("run-1", ownerScope),
+      ).toMatchObject([
+        {
+          attemptId: "attempt-1",
+          costStatus: "unknown",
+          costUsd: null,
+        },
+      ]);
+    });
+
+    it("settles known charges and releases unused reservation capacity", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.usagePrices.insert(makeUsagePrice());
+      const reservation = await repositories.usageAdmission.reserve(
+        makeReservationRequest("attempt-known", 0.8),
+      );
+      await repositories.usageAdmission.settle({
+        reservation,
+        outcome: "success",
+        units: {
+          input: 100,
+          output: 100,
+          total: 200,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          search: 0,
+        },
+        errorCode: null,
+        at: "2026-01-15T00:01:00.000Z",
+      });
+      const followup = await repositories.usageAdmission.reserve(
+        makeReservationRequest("attempt-followup", 0.7),
+      );
+      expect(followup.status).toBe("reserved");
+      await expect(
+        repositories.usageAdmission.reserve(
+          makeReservationRequest("attempt-over", 0.999),
+        ),
+      ).rejects.toMatchObject({ code: "spend-limit-exceeded" });
+
+      const summary = await repositories.usageAdmin.query({
+        userId: "admin-1",
+        role: "admin",
+      });
+      expect(summary.totals).toMatchObject({
+        attempts: 2,
+      });
+      expect(summary.totals.knownChargesUsd).toBeCloseTo(0.0003);
+      expect(summary.totals.reservedUsd).toBeCloseTo(0.700002);
+    });
+
+    it("fences run concurrency and retains the case lock while waiting", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.cases.insert(makeCase("case-2", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-2", "case-2", "owner-1"));
+      const request = {
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 2,
+      };
+      const firstLease = await repositories.runAdmission.acquire(request);
+      await expect(
+        repositories.runAdmission.acquire({
+          ...request,
+          caseId: "case-2",
+          runId: "run-2",
+          leaseId: "lease-2",
+        }),
+      ).rejects.toMatchObject({ code: "run-concurrency-limit" });
+
+      expect(
+        await repositories.runAdmission.waitForInput({
+          ...request,
+          fencingToken: firstLease.fencingToken,
+        }),
+      ).toBe(true);
+      await repositories.runs.updateOwned(
+        {
+          ...makeRun("run-1", "case-1", "owner-1"),
+          status: "waiting-for-input",
+          inputRequired: true,
+        },
+        "owner-1",
+      );
+      await expect(
+        repositories.runs.insert(makeRun("run-3", "case-1", "owner-1")),
+      ).rejects.toMatchObject({ code: "duplicate-record" });
+
+      const secondLease = await repositories.runAdmission.acquire({
+        ...request,
+        caseId: "case-2",
+        runId: "run-2",
+        leaseId: "lease-2",
+      });
+      expect(secondLease.fencingToken).toBe(1);
+      await repositories.runAdmission.release({
+        ...request,
+        caseId: "case-2",
+        runId: "run-2",
+        leaseId: secondLease.leaseId,
+        fencingToken: secondLease.fencingToken,
+        at: "2026-01-15T00:02:00.000Z",
+      });
+
+      const resumed = await repositories.runAdmission.resume({
+        ...request,
+        leaseId: "lease-1-resumed",
+        at: "2026-01-15T00:03:00.000Z",
+        expiresAt: "2026-01-15T00:18:00.000Z",
+        fencingToken: firstLease.fencingToken,
+      });
+      expect(resumed.fencingToken).toBe(2);
+      expect(
+        await repositories.runAdmission.release({
+          ...request,
+          leaseId: firstLease.leaseId,
+          fencingToken: firstLease.fencingToken,
+          at: "2026-01-15T00:04:00.000Z",
+        }),
+      ).toBe(false);
+      expect(
+        await repositories.runAdmission.release({
+          ...request,
+          leaseId: resumed.leaseId,
+          fencingToken: resumed.fencingToken,
+          at: "2026-01-15T00:04:00.000Z",
+        }),
+      ).toBe(true);
     });
   });
 }

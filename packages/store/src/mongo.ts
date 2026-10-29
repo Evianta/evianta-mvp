@@ -32,6 +32,9 @@ import {
   type Task,
   type UserRecord,
   type UsageRecord,
+  type UsageAdmissionPort,
+  type UsageLedgerRepository,
+  type UsagePriceRepository,
   type UsageReservation,
   type AgentProfileRepository,
   type AccessKeyRepository,
@@ -44,6 +47,7 @@ import {
   type FindingRepository,
   type RunEventRepository,
   type RunRepository,
+  type RunAdmissionPort,
   type SessionRepository,
   type TaskRepository,
   type UserRepository,
@@ -60,6 +64,22 @@ import {
 } from "mongodb";
 import { getMongoConfig, type MongoConfig } from "@evianta/env/server";
 import { z, type ZodType } from "zod";
+import { MongoUsageRepository } from "./usage-mongo.js";
+import { MongoRunAdmissionRepository } from "./run-admission-mongo.js";
+import { UsageAdminService } from "./usage-admin.js";
+import {
+  CaseNotOwnedError,
+  InvalidCursorError,
+  SequenceConflictError,
+  StoreError,
+} from "./errors.js";
+
+export {
+  CaseNotOwnedError,
+  InvalidCursorError,
+  SequenceConflictError,
+  StoreError,
+} from "./errors.js";
 
 type Stored<T> = T & Document & { _id: string };
 const TimestampSchema = z.string().datetime({ offset: true });
@@ -75,41 +95,6 @@ const MongoRunLeaseSchema = z
     (request) => Date.parse(request.expiresAt) > Date.parse(request.at),
     "Lease expiry must be after acquisition time",
   );
-
-export class StoreError extends Error {
-  constructor(
-    message: string,
-    readonly code: string,
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
-    this.name = new.target.name;
-  }
-}
-
-export class CaseNotOwnedError extends StoreError {
-  constructor() {
-    super(
-      "The case does not exist in the requested owner scope",
-      "case-not-owned",
-    );
-  }
-}
-
-export class InvalidCursorError extends StoreError {
-  constructor() {
-    super("The case pagination cursor is invalid", "invalid-cursor");
-  }
-}
-
-export class SequenceConflictError extends StoreError {
-  constructor() {
-    super(
-      "Run event sequence must increase monotonically for its case",
-      "event-sequence-conflict",
-    );
-  }
-}
 
 function documentFor<T extends { id: string }>(record: T): Stored<T> {
   return { ...record, _id: record.id } as Stored<T>;
@@ -226,7 +211,14 @@ export class MongoStore {
     approvals: ApprovalRepository;
     events: RunEventRepository;
     usage: UsageRepository;
+    usageAdmission: UsageAdmissionPort;
+    usagePrices: UsagePriceRepository;
+    usageLedger: UsageLedgerRepository;
+    runAdmission: RunAdmissionPort;
+    usageAdmin: UsageAdminService;
   };
+  private readonly usageAccounting: MongoUsageRepository;
+  private readonly runAdmissionRepository: MongoRunAdmissionRepository;
 
   constructor(private readonly options: MongoStoreOptions) {
     const { db } = options;
@@ -250,6 +242,11 @@ export class MongoStore {
     this.usageAttempts = db.collection("usageAttempts");
     this.reservations = db.collection("usageReservations");
     this.budgets = db.collection("budgets");
+    this.usageAccounting = new MongoUsageRepository(options.client, db);
+    this.runAdmissionRepository = new MongoRunAdmissionRepository(
+      options.client,
+      db,
+    );
     this.repositories = {
       agentProfiles: {
         listEnabled: () => this.agentListEnabled(),
@@ -335,6 +332,11 @@ export class MongoStore {
         insert: (record, runId, scope) =>
           this.usageInsert(record, runId, scope),
       },
+      usageAdmission: this.usageAccounting,
+      usagePrices: this.usageAccounting,
+      usageLedger: this.usageAccounting,
+      runAdmission: this.runAdmissionRepository,
+      usageAdmin: new UsageAdminService(this.usageAccounting),
     };
   }
 
@@ -352,6 +354,8 @@ export class MongoStore {
       { revision: { $exists: false } },
       { $set: { revision: 0 } },
     );
+    await this.usageAccounting.initialize();
+    await this.runAdmissionRepository.initialize();
     await Promise.all([
       this.agents.createIndex({ role: 1 }, { unique: true }),
       this.users.createIndex({ emailKey: 1 }, { unique: true }),
@@ -857,10 +861,11 @@ export class MongoStore {
       status: { $ne: "deleted" },
     });
     if (!parent) throw new CaseNotOwnedError();
-    const active =
-      parsed.status === "queued" || parsed.status === "running"
-        ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
-        : {};
+    const active = ["queued", "running", "waiting-for-input"].includes(
+      parsed.status,
+    )
+      ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
+      : {};
     await insertUnique(this.runs, RunRecordSchema, {
       ...parsed,
       ...active,
@@ -870,10 +875,11 @@ export class MongoStore {
   async runUpdateOwned(run: RunRecord, ownerId: string): Promise<boolean> {
     const parsed = RunRecordSchema.parse(run);
     if (parsed.ownerId !== ownerId) return false;
-    const active =
-      parsed.status === "queued" || parsed.status === "running"
-        ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
-        : {};
+    const active = ["queued", "running", "waiting-for-input"].includes(
+      parsed.status,
+    )
+      ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
+      : {};
     try {
       const result = await this.runs.replaceOne(
         {
@@ -1176,7 +1182,34 @@ export class MongoStore {
       .find({ runId, caseId: scope.caseId, ownerId: scope.ownerId })
       .sort({ recordedAt: 1, id: 1 })
       .toArray();
-    return records.map((record) => decode(UsageRecordSchema, record)!);
+    const ledger = await this.usageAccounting.list({
+      ownerId: scope.ownerId,
+      runId,
+      limit: 5_000,
+    });
+    const ledgerAttempts = new Set(ledger.map((entry) => entry.attemptId));
+    return [
+      ...records
+        .map((record) => decode(UsageRecordSchema, record)!)
+        .filter((record) => !ledgerAttempts.has(record.attemptId)),
+      ...ledger.map((entry) =>
+        UsageRecordSchema.parse({
+          id: entry.id,
+          attemptId: entry.attemptId,
+          provider: entry.provider,
+          model: entry.model,
+          settings: entry.settings,
+          units: entry.units,
+          costUsd: entry.costUsd,
+          costStatus: entry.costStatus,
+          recordedAt: entry.settledAt ?? entry.createdAt,
+        }),
+      ),
+    ].sort(
+      (left, right) =>
+        left.recordedAt.localeCompare(right.recordedAt) ||
+        left.id.localeCompare(right.id),
+    );
   }
 
   async usageInsert(

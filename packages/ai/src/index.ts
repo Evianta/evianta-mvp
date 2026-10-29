@@ -16,7 +16,9 @@ export interface ModelConfiguration {
   model: string;
   reasoning?: string;
   maxOutputTokens: number;
+  maxInputTokens: number;
   pricingIdentity: string;
+  pricingSettings: Record<string, string | number | boolean | null>;
   capabilities: readonly ModelCapability[];
 }
 
@@ -24,7 +26,9 @@ export interface ModelSettings {
   provider: ModelProviderName;
   sparkModel?: string;
   wonderModel?: string;
+  maxInputTokens?: number;
   maxOutputTokens?: number;
+  pricingSettings?: Record<string, string | number | boolean | null>;
   capabilitiesByTier?: Partial<Record<ModelTier, readonly ModelCapability[]>>;
 }
 
@@ -49,11 +53,18 @@ export function modelForTier(
     );
   }
 
+  const maxOutputTokens = settings.maxOutputTokens ?? 2048;
+
   return {
     provider: settings.provider,
     model,
-    maxOutputTokens: settings.maxOutputTokens ?? 2048,
+    maxOutputTokens,
+    maxInputTokens: settings.maxInputTokens ?? 32_000,
     pricingIdentity: `${settings.provider}:${model}`,
+    pricingSettings: {
+      ...settings.pricingSettings,
+      maxOutputTokens,
+    },
     capabilities:
       settings.capabilitiesByTier?.[tier] ??
       (settings.provider === "mock"
@@ -74,16 +85,21 @@ export interface UsageAttempt {
   context: UsageContext;
   provider: ModelProviderName;
   model: string;
+  settings: Record<string, string | number | boolean | null>;
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  searchRequested: boolean;
   outcome: "success" | "failed" | "unknown";
   units: UsageUnits;
   errorCode?: string;
 }
 
 export interface UsageAccounting {
+  mode?: "test" | "admitted";
   admit(
     attempt: Omit<UsageAttempt, "outcome" | "units" | "errorCode">,
   ): Promise<void>;
-  record(attempt: UsageAttempt): Promise<void>;
+  record(attempt: UsageAttempt): Promise<CostEstimate | void>;
 }
 
 export interface Citation {
@@ -179,8 +195,8 @@ export class OutputValidationError extends AiError {
 }
 
 export class AdmissionRejectedError extends AiError {
-  constructor() {
-    super("Usage admission was rejected", "usage-admission-rejected");
+  constructor(message = "Usage admission was rejected") {
+    super(message, "usage-admission-rejected");
   }
 }
 
@@ -207,8 +223,8 @@ export interface RunStructuredRequest<I, O> {
 }
 
 export interface CostEstimate {
-  status: "unknown";
-  costUsd: null;
+  status: "estimated" | "unknown";
+  costUsd: number | null;
   pricingIdentity: string;
 }
 
@@ -335,7 +351,47 @@ function validateImages(images: readonly ImageInput[] | undefined): void {
   }
 }
 
+function inputTokenAllowance(input: {
+  system: string;
+  input: unknown;
+  schema?: Record<string, unknown>;
+  images?: readonly ImageInput[];
+}): number {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify({
+      system: input.system,
+      input: input.input,
+      schema: input.schema,
+    });
+  } catch {
+    throw new AiError(
+      "The model input cannot be serialized for usage admission",
+      "invalid-model-input",
+    );
+  }
+  const bytes =
+    Buffer.byteLength(serialized ?? "", "utf8") +
+    (input.images ?? []).reduce(
+      (total, image) => total + image.bytes.byteLength,
+      0,
+    );
+  return Math.ceil(bytes * 1.5) + 256;
+}
+
 export function createAi(options: AiClientOptions): AiClient {
+  if (
+    options.models.provider === "muse" &&
+    (options.accounting.mode !== "admitted" ||
+      !Number.isInteger(options.models.maxInputTokens) ||
+      (options.models.maxInputTokens ?? 0) < 1 ||
+      !Number.isInteger(options.models.maxOutputTokens) ||
+      (options.models.maxOutputTokens ?? 0) < 1)
+  ) {
+    throw new AdmissionRejectedError(
+      "Paid models require durable accounting and explicit input/output limits",
+    );
+  }
   const defaultTimeout = options.timeoutMs ?? 60_000;
 
   async function runStructured<I, O>(
@@ -384,20 +440,37 @@ export function createAi(options: AiClientOptions): AiClient {
     try {
       for (let attemptNumber = 0; attemptNumber < 3; attemptNumber += 1) {
         const attemptId = randomUUID();
-        await options.accounting.admit({
+        const system = correction
+          ? `${request.system}\n\n${correction}`
+          : request.system;
+        const usageAttempt = {
           attemptId,
           context: request.usageContext,
           provider: model.provider,
           model: model.model,
-        });
+          settings: model.pricingSettings,
+          maxInputTokens: inputTokenAllowance({
+            system,
+            input: structuredInput,
+            schema,
+            images: request.images,
+          }),
+          maxOutputTokens,
+          searchRequested: Boolean(request.webSearch),
+        };
+        if (usageAttempt.maxInputTokens > model.maxInputTokens) {
+          throw new AiError(
+            "The model input exceeds the configured token limit",
+            "input-limit-exceeded",
+          );
+        }
+        await options.accounting.admit(usageAttempt);
 
         let result: ProviderResult;
         try {
           result = await options.provider.generateStructured({
             model,
-            system: correction
-              ? `${request.system}\n\n${correction}`
-              : request.system,
+            system,
             input: structuredInput,
             schema,
             maxOutputTokens,
@@ -408,10 +481,7 @@ export function createAi(options: AiClientOptions): AiClient {
         } catch (error) {
           const retryable = isRetryable(error);
           await options.accounting.record({
-            attemptId,
-            context: request.usageContext,
-            provider: model.provider,
-            model: model.model,
+            ...usageAttempt,
             outcome:
               (error instanceof ProviderRequestError &&
                 error.statusCode === 429) ||
@@ -442,10 +512,7 @@ export function createAi(options: AiClientOptions): AiClient {
         } catch {
           lastValidationError = new OutputValidationError();
           await options.accounting.record({
-            attemptId,
-            context: request.usageContext,
-            provider: model.provider,
-            model: model.model,
+            ...usageAttempt,
             outcome: "failed",
             units: result.units,
             errorCode: lastValidationError.code,
@@ -457,18 +524,15 @@ export function createAi(options: AiClientOptions): AiClient {
           continue;
         }
 
-        await options.accounting.record({
-          attemptId,
-          context: request.usageContext,
-          provider: model.provider,
-          model: model.model,
+        const cost = await options.accounting.record({
+          ...usageAttempt,
           outcome: "success",
           units: result.units,
         });
         return {
           output,
           usage: result.units,
-          cost: {
+          cost: cost ?? {
             status: "unknown",
             costUsd: null,
             pricingIdentity: model.pricingIdentity,
@@ -502,13 +566,32 @@ export function createAi(options: AiClientOptions): AiClient {
     if (!Number.isInteger(requestedOutputTokens) || requestedOutputTokens < 1) {
       throw new Error("maxOutputTokens must be a positive integer");
     }
+    const maxOutputTokens = Math.min(
+      requestedOutputTokens,
+      model.maxOutputTokens,
+    );
+    const inputTokens = inputTokenAllowance({
+      system: request.system,
+      input: request.input,
+    });
+    if (inputTokens > model.maxInputTokens) {
+      throw new AiError(
+        "The model input exceeds the configured token limit",
+        "input-limit-exceeded",
+      );
+    }
     const attemptId = randomUUID();
-    await options.accounting.admit({
+    const usageAttempt = {
       attemptId,
       context: request.usageContext,
       provider: model.provider,
       model: model.model,
-    });
+      settings: model.pricingSettings,
+      maxInputTokens: inputTokens,
+      maxOutputTokens,
+      searchRequested: false,
+    };
+    await options.accounting.admit(usageAttempt);
     const timeout = combineSignals(
       request.signal,
       request.timeoutMs ?? defaultTimeout,
@@ -520,7 +603,7 @@ export function createAi(options: AiClientOptions): AiClient {
         model,
         system: request.system,
         input: request.input,
-        maxOutputTokens: Math.min(requestedOutputTokens, model.maxOutputTokens),
+        maxOutputTokens,
         signal: timeout.signal,
       })) {
         yield chunk;
@@ -528,10 +611,7 @@ export function createAi(options: AiClientOptions): AiClient {
     } catch (error) {
       recorded = true;
       await options.accounting.record({
-        attemptId,
-        context: request.usageContext,
-        provider: model.provider,
-        model: model.model,
+        ...usageAttempt,
         outcome: "unknown",
         units: unknownUsage(),
         errorCode: error instanceof AiError ? error.code : "provider-unknown",
@@ -542,10 +622,7 @@ export function createAi(options: AiClientOptions): AiClient {
       if (!recorded) {
         recorded = true;
         await options.accounting.record({
-          attemptId,
-          context: request.usageContext,
-          provider: model.provider,
-          model: model.model,
+          ...usageAttempt,
           outcome: "unknown",
           units: unknownUsage(),
         });
@@ -708,6 +785,7 @@ export class MuseProvider implements ModelProvider {
     ) {
       throw new Error("Muse base URL must use HTTPS");
     }
+
     if (this.baseUrl.username || this.baseUrl.password) {
       throw new Error("Muse base URL must not include credentials");
     }
@@ -1021,3 +1099,9 @@ export function createMockProvider(
 ): MockProvider {
   return new MockProvider(options);
 }
+
+export {
+  createAdmittedUsageAccounting,
+  estimateUsageCost,
+  pricingSettingsKey,
+} from "./accounting.js";
