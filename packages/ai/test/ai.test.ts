@@ -192,6 +192,35 @@ describe("@evianta/ai", () => {
     );
   });
 
+  it("settles a cancelled stream even when the consumer stops pulling", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    vi.spyOn(provider, "streamText").mockImplementation(async function* () {
+      yield "first";
+      yield "second";
+    });
+    const client = createAi({ provider, accounting, models });
+    const controller = new AbortController();
+    const stream = client.streamText({
+      tier: "cheap",
+      system: "Answer",
+      input: "prompt",
+      usageContext: { userId: "user-1" },
+      signal: controller.signal,
+    });
+    const iterator = stream[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({ value: "first" });
+    controller.abort(new Error("caller cancelled"));
+    await vi.waitFor(() => expect(accounting.record).toHaveBeenCalledOnce());
+    expect(accounting.record).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "unknown" }),
+    );
+
+    await iterator.return?.();
+    expect(accounting.record).toHaveBeenCalledOnce();
+  });
+
   it("allows one correction attempt for invalid structured output", async () => {
     const accounting = createAccounting();
     const client = createAi({

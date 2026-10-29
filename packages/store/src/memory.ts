@@ -535,11 +535,16 @@ export class InMemoryStore {
             record.ownerId !== ownerId ||
             current.caseId !== record.caseId ||
             current.fencingToken !== record.fencingToken ||
-            (current.status === "running" &&
-              record.status === "running" &&
-              current.leaseId === record.leaseId &&
-              current.leaseId !== null &&
-              current.leaseExpiresAt !== record.leaseExpiresAt)
+            // Lease and admission transitions belong to the admission API, and
+            // a renewed lease must not be overwritten by an older snapshot.
+            current.leaseId !== record.leaseId ||
+            current.leaseExpiresAt !== record.leaseExpiresAt ||
+            ((current.leaseId !== null ||
+              current.status === "waiting-for-input") &&
+              record.status !== current.status) ||
+            (record.status === "waiting-for-input" &&
+              current.status !== "waiting-for-input") ||
+            (current.cancellationRequested && !record.cancellationRequested)
           ) {
             return false;
           }
@@ -766,7 +771,7 @@ export class InMemoryStore {
             ),
           ].sort(
             (left, right) =>
-              left.recordedAt.localeCompare(right.recordedAt) ||
+              Date.parse(left.recordedAt) - Date.parse(right.recordedAt) ||
               left.id.localeCompare(right.id),
           );
         },

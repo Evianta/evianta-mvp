@@ -366,7 +366,7 @@ export class MongoUsageRepository
           ),
         );
         if (!parent) throw new CaseNotOwnedError();
-        const activePrice = decode(
+        const storedPrice = decode(
           UsagePriceSchema,
           await this.prices
             .aggregate(
@@ -394,6 +394,10 @@ export class MongoUsageRepository
             )
             .next(),
         );
+        const activePrice = storedPrice && {
+          ...storedPrice,
+          effectiveAt: canonicalTimestamp(storedPrice.effectiveAt),
+        };
         if (
           !activePrice ||
           canonicalJson(activePrice) !== canonicalJson(request.price) ||
@@ -602,11 +606,22 @@ export class MongoUsageRepository
         );
       }
 
-      const expiredAdmission =
-        entry.outcome === "unknown" &&
+      const estimate = estimateUsageCost(
+        settlement.units,
+        entry.price,
+        entry.searchRequested,
+      );
+      const reservedUnknownCost =
+        entry.outcome !== "admitted" &&
+        entry.costStatus === "unknown" &&
         entry.reservationStatus === "reserved" &&
         reservation.status === "reserved";
-      if (entry.outcome !== "admitted" && !expiredAdmission) {
+      // Unknown-cost attempts keep their reservation, so any of them can be
+      // reconciled once verified usage arrives.
+      const reconcilable =
+        reservedUnknownCost &&
+        (entry.outcome === "unknown" || estimate.status === "estimated");
+      if (entry.outcome !== "admitted" && !reconcilable) {
         this.assertSameSettlement(entry, settlement);
         return;
       }
@@ -617,11 +632,6 @@ export class MongoUsageRepository
         );
       }
 
-      const estimate = estimateUsageCost(
-        settlement.units,
-        entry.price,
-        entry.searchRequested,
-      );
       const costIsKnown = estimate.status === "estimated";
       const reservationSubunits = moneySubunits(reservation.reservedUsd);
       const costSubunits = costIsKnown

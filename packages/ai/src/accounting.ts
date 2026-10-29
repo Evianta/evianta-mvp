@@ -102,6 +102,29 @@ export function createAdmittedUsageAccounting(
     1_000,
     Math.floor((runLeaseTtlSeconds * 1_000) / 3),
   );
+  const renewalTimeoutMs = 5_000;
+
+  async function withRenewalDeadline<T>(operation: Promise<T>): Promise<T> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(
+                new AdmissionRejectedError(
+                  "Run lease renewal timed out before provider dispatch",
+                ),
+              ),
+            renewalTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
 
   async function stopHeartbeat(attempt: ActiveUsageAttempt): Promise<void> {
     attempt.stopped = true;
@@ -112,7 +135,7 @@ export function createAdmittedUsageAccounting(
     await Promise.race([
       attempt.renewal,
       new Promise<void>((resolve) => {
-        timeout = setTimeout(resolve, 5_000);
+        timeout = setTimeout(resolve, renewalTimeoutMs);
       }),
     ]);
     if (timeout) clearTimeout(timeout);
@@ -229,7 +252,7 @@ export function createAdmittedUsageAccounting(
       };
       let lease: RunAdmissionLease | null;
       try {
-        lease = await renewLease();
+        lease = await withRenewalDeadline(renewLease());
       } catch (error) {
         await options.admission.release(reservation.id, "cancelled");
         throw error;
@@ -250,24 +273,28 @@ export function createAdmittedUsageAccounting(
       };
       const scheduleExpiryGuard = (): void => {
         if (active.expiryTimer) clearTimeout(active.expiryTimer);
+        if (active.stopped) return;
         const remainingMs =
           Date.parse(active.leaseExpiresAt) - now().getTime() - 1_000;
-        active.expiryTimer = setTimeout(
-          () => {
-            active.heartbeat.abort(
-              new AdmissionRejectedError(
-                "The run lease expired during provider execution",
-              ),
-            );
-          },
-          Math.max(0, remainingMs),
-        );
+        const expire = (): void => {
+          active.heartbeat.abort(
+            new AdmissionRejectedError(
+              "The run lease expired during provider execution",
+            ),
+          );
+        };
+        if (!(remainingMs > 0)) {
+          expire();
+          return;
+        }
+        active.expiryTimer = setTimeout(expire, remainingMs);
       };
       const scheduleHeartbeat = (): void => {
         active.timer = setTimeout(() => {
           active.renewal = (async () => {
             try {
               const renewedLease = await renewLease();
+              if (active.stopped) return;
               if (!renewedLease) {
                 active.heartbeat.abort(
                   new AdmissionRejectedError(
@@ -289,8 +316,15 @@ export function createAdmittedUsageAccounting(
           });
         }, heartbeatIntervalMs);
       };
-      attempts.set(attempt.attemptId, active);
       scheduleExpiryGuard();
+      if (active.heartbeat.signal.aborted) {
+        active.stopped = true;
+        await options.admission.release(reservation.id, "cancelled");
+        throw new AdmissionRejectedError(
+          "The run lease expired before provider dispatch",
+        );
+      }
+      attempts.set(attempt.attemptId, active);
       scheduleHeartbeat();
       return active.heartbeat.signal;
     },

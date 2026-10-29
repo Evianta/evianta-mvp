@@ -977,12 +977,16 @@ export class MongoStore {
           ownerId,
           caseId: parsed.caseId,
           fencingToken: parsed.fencingToken,
-          ...(parsed.status === "running" && parsed.leaseId
-            ? {
-                leaseId: parsed.leaseId,
-                leaseExpiresAt: parsed.leaseExpiresAt,
-              }
-            : {}),
+          // Lease and admission transitions belong to the admission API, and
+          // a renewed lease must not be overwritten by an older snapshot.
+          leaseId: parsed.leaseId,
+          leaseExpiresAt: parsed.leaseExpiresAt,
+          ...(parsed.cancellationRequested
+            ? {}
+            : { cancellationRequested: false }),
+          ...(parsed.leaseId !== null || parsed.status === "waiting-for-input"
+            ? { status: parsed.status }
+            : { status: { $ne: "waiting-for-input" as const } }),
         },
         { ...documentFor(parsed), ...active },
       );
@@ -1366,7 +1370,7 @@ export class MongoStore {
       ),
     ].sort(
       (left, right) =>
-        left.recordedAt.localeCompare(right.recordedAt) ||
+        Date.parse(left.recordedAt) - Date.parse(right.recordedAt) ||
         left.id.localeCompare(right.id),
     );
   }

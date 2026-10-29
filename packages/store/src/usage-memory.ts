@@ -391,11 +391,17 @@ export class InMemoryUsageRepository
       entry.price,
       entry.searchRequested,
     );
-    const expiredAdmission =
-      entry.outcome === "unknown" &&
+    const reservedUnknownCost =
+      entry.outcome !== "admitted" &&
+      entry.costStatus === "unknown" &&
       entry.reservationStatus === "reserved" &&
       reservation.status === "reserved";
-    if (entry.outcome !== "admitted" && !expiredAdmission) {
+    // Unknown-cost attempts keep their reservation, so any of them can be
+    // reconciled once verified usage arrives.
+    const reconcilable =
+      reservedUnknownCost &&
+      (entry.outcome === "unknown" || estimate.status === "estimated");
+    if (entry.outcome !== "admitted" && !reconcilable) {
       if (
         entry.outcome !== input.outcome ||
         entry.costStatus !== estimate.status ||

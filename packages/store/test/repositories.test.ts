@@ -918,9 +918,10 @@ function repositoryContract(
       const reservation = await repositories.usageAdmission.reserve(
         makeReservationRequest("attempt-late-usage", 0.6),
       );
+      // A successful response that omitted usage keeps its reservation.
       await repositories.usageAdmission.settle({
         reservation,
-        outcome: "unknown",
+        outcome: "success",
         units: {
           input: null,
           output: null,
@@ -930,7 +931,7 @@ function repositoryContract(
           cacheWrite: null,
           search: null,
         },
-        errorCode: "provider-timeout",
+        errorCode: null,
         at: "2026-01-15T00:01:00.000Z",
       });
 
@@ -1367,6 +1368,70 @@ function repositoryContract(
       expect(
         await repositories.runs.findOwnedById("run-1", "owner-1"),
       ).toMatchObject({ status: "running", cancellationRequested: true });
+    });
+
+    it("keeps lease and admission transitions out of generic run updates", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      const admitted = await repositories.runs.findOwnedById(
+        "run-1",
+        "owner-1",
+      );
+      if (!admitted) throw new Error("Run disappeared after admission");
+
+      expect(
+        await repositories.runs.updateOwned(
+          {
+            ...admitted,
+            status: "waiting-for-input",
+            inputRequired: true,
+            leaseId: null,
+            leaseExpiresAt: null,
+          },
+          "owner-1",
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.runs.updateOwned(
+          { ...admitted, status: "completed" },
+          "owner-1",
+        ),
+      ).toBe(false);
+
+      expect(
+        await repositories.runs.updateOwned(
+          { ...admitted, cancellationRequested: true },
+          "owner-1",
+        ),
+      ).toBe(true);
+      const cancelled = await repositories.runs.findOwnedById(
+        "run-1",
+        "owner-1",
+      );
+      if (!cancelled) throw new Error("Run disappeared after cancellation");
+      expect(
+        await repositories.runs.updateOwned(
+          { ...cancelled, cancellationRequested: false },
+          "owner-1",
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({
+        status: "running",
+        leaseId: "lease-1",
+        cancellationRequested: true,
+      });
     });
   });
 }
@@ -1876,6 +1941,14 @@ describe("MongoDB repositories", () => {
         ),
       ).toMatchObject({ id: "price-later" });
 
+      // Stored and requested snapshots use different offsets for one instant.
+      await harness.client
+        .db(harness.dbName)
+        .collection("usagePrices")
+        .updateOne(
+          { _id: price.id },
+          { $set: { effectiveAt: "2025-12-31T19:00:00-05:00" } },
+        );
       const reservation =
         await harness.store.repositories.usageAdmission.reserve({
           ...makeReservationRequest("attempt-timestamp", 0.1),

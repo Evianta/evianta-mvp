@@ -225,6 +225,47 @@ describe("admitted usage accounting", () => {
     }
   });
 
+  it("releases the reservation when the pre-dispatch renewal hangs", async () => {
+    vi.useFakeTimers();
+    try {
+      const { accounting, admission, runAdmission } = setup();
+      vi.mocked(runAdmission.renew).mockImplementationOnce(
+        () => new Promise(() => {}),
+      );
+
+      const admitted = accounting.admit(admittedAttempt());
+      const rejection = expect(admitted).rejects.toThrow(
+        "Run lease renewal timed out before provider dispatch",
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      await rejection;
+      expect(admission.release).toHaveBeenCalledWith(
+        "reservation:attempt-1",
+        "cancelled",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects dispatch synchronously when the renewed lease is already expiring", async () => {
+    const { accounting, admission, runAdmission } = setup();
+    vi.mocked(runAdmission.renew).mockResolvedValueOnce({
+      leaseId: "lease-1",
+      fencingToken: 1,
+      expiresAt: "2026-06-01T12:00:00.500Z",
+    });
+
+    await expect(accounting.admit(admittedAttempt())).rejects.toThrow(
+      "The run lease expired before provider dispatch",
+    );
+    expect(admission.release).toHaveBeenCalledWith(
+      "reservation:attempt-1",
+      "cancelled",
+    );
+    await expect(accounting.cancel("attempt-1")).resolves.toBeUndefined();
+  });
+
   it("settles known provider usage using the versioned model price", async () => {
     const { accounting, admission } = setup();
     await accounting.admit(admittedAttempt());

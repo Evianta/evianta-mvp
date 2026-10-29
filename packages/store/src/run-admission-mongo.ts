@@ -74,6 +74,9 @@ function canonicalTimestamp(value: string): string {
   return new Date(Date.parse(value)).toISOString();
 }
 
+const CanonicalTimestampPattern =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
 export class MongoRunAdmissionRepository implements RunAdmissionPort {
   private readonly cases: Collection<StoredDocument>;
   private readonly runs: Collection<StoredDocument>;
@@ -92,8 +95,52 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
 
   async initialize(): Promise<void> {
     await this.locks.createIndex({ state: 1, leaseExpiresAt: 1 });
+    await this.canonicalizeActiveLeaseExpiry();
     await this.backfillActiveRuns();
     await this.backfillWaitingRuns();
+  }
+
+  // Expiry reaping compares canonical UTC strings so it can use the
+  // { state, leaseExpiresAt } index; normalize any legacy offset values first.
+  private async canonicalizeActiveLeaseExpiry(): Promise<void> {
+    const cursor = this.locks.find({
+      state: "active",
+      leaseExpiresAt: {
+        $type: "string",
+        $not: CanonicalTimestampPattern,
+      },
+    });
+    for await (const document of cursor) {
+      const lock = parseLock(document);
+      if (!lock?.leaseExpiresAt) continue;
+      const canonical = canonicalTimestamp(lock.leaseExpiresAt);
+      await this.withTransaction(async (session) => {
+        const updated = await this.locks.updateOne(
+          {
+            _id: lock._id,
+            state: "active",
+            leaseId: lock.leaseId,
+            fencingToken: lock.fencingToken,
+            leaseExpiresAt: lock.leaseExpiresAt,
+          },
+          { $set: { leaseExpiresAt: canonical } },
+          { session },
+        );
+        if (updated.matchedCount !== 1) return;
+        await this.runs.updateOne(
+          {
+            _id: lock.runId,
+            ownerId: lock.ownerId,
+            caseId: lock.caseId,
+            leaseId: lock.leaseId,
+            fencingToken: lock.fencingToken,
+            leaseExpiresAt: lock.leaseExpiresAt,
+          },
+          { $set: { leaseExpiresAt: canonical } },
+          { session },
+        );
+      });
+    }
   }
 
   async acquire(input: RunAdmissionRequest): Promise<RunAdmissionLease> {
@@ -659,12 +706,7 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
       .find(
         {
           state: "active",
-          $expr: {
-            $lte: [
-              { $toDate: "$leaseExpiresAt" },
-              new Date(canonicalTimestamp(at)),
-            ],
-          },
+          leaseExpiresAt: { $lte: canonicalTimestamp(at) },
         },
         { session },
       )
@@ -770,6 +812,7 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
         );
         if (!runDocument) return;
         const run = RunRecordSchema.parse(withoutId(runDocument));
+        const leaseExpiresAt = canonicalTimestamp(run.leaseExpiresAt!);
         const existing = parseLock(
           await this.locks.findOne({ _id: id }, { session }),
         );
@@ -778,7 +821,8 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
           existing.runId === run.id &&
           existing.leaseId === run.leaseId &&
           existing.fencingToken === run.fencingToken &&
-          existing.leaseExpiresAt === run.leaseExpiresAt
+          existing.leaseExpiresAt === leaseExpiresAt &&
+          run.leaseExpiresAt === leaseExpiresAt
         ) {
           return;
         }
@@ -800,7 +844,10 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
             leaseExpiresAt: run.leaseExpiresAt,
             fencingToken: run.fencingToken,
           },
-          { $inc: { admissionMigrationRevision: 1 } },
+          {
+            $set: { leaseExpiresAt },
+            $inc: { admissionMigrationRevision: 1 },
+          },
           { session },
         );
         if (guard.matchedCount !== 1) return;
@@ -826,7 +873,7 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
             state: "active",
             leaseId: run.leaseId,
             fencingToken: run.fencingToken,
-            leaseExpiresAt: run.leaseExpiresAt,
+            leaseExpiresAt,
             updatedAt: run.updatedAt,
           },
           { session },

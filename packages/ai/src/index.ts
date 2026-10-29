@@ -522,11 +522,11 @@ export function createAi(options: AiClientOptions): AiClient {
       string,
       unknown
     >;
+    const structuredInput = snapshotJsonValue(input);
     const timeout = combineSignals(
       request.signal,
       request.timeoutMs ?? defaultTimeout,
     );
-    const structuredInput = snapshotJsonValue(input);
     let correction: string | undefined;
     let correctionUsed = false;
     let lastValidationError: OutputValidationError | undefined;
@@ -730,7 +730,23 @@ export function createAi(options: AiClientOptions): AiClient {
       timeout.signal,
       admissionSignal,
     ]);
-    let recorded = false;
+    let recording: Promise<unknown> | undefined;
+    const recordUnknown = (errorCode?: string): Promise<unknown> => {
+      recording ??= (async () =>
+        options.accounting.record({
+          ...usageAttempt,
+          outcome: "unknown",
+          units: unknownUsage(),
+          ...(errorCode ? { errorCode } : {}),
+        }))();
+      return recording;
+    };
+    // A consumer that stops pulling never resumes the generator, so settle
+    // the dispatched attempt (and stop its lease heartbeat) on abort directly.
+    const onAbort = (): void => {
+      void recordUnknown("provider-cancelled").catch(() => undefined);
+    };
+    providerSignals.signal.addEventListener("abort", onAbort, { once: true });
 
     try {
       for await (const chunk of options.provider.streamText({
@@ -743,25 +759,15 @@ export function createAi(options: AiClientOptions): AiClient {
         yield chunk;
       }
     } catch (error) {
-      recorded = true;
-      await options.accounting.record({
-        ...usageAttempt,
-        outcome: "unknown",
-        units: unknownUsage(),
-        errorCode: error instanceof AiError ? error.code : "provider-unknown",
-      });
+      await recordUnknown(
+        error instanceof AiError ? error.code : "provider-unknown",
+      );
       throw error;
     } finally {
+      providerSignals.signal.removeEventListener("abort", onAbort);
       providerSignals.clear();
       timeout.clear();
-      if (!recorded) {
-        recorded = true;
-        await options.accounting.record({
-          ...usageAttempt,
-          outcome: "unknown",
-          units: unknownUsage(),
-        });
-      }
+      await recordUnknown();
     }
   }
 
