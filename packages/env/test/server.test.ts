@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   getAiEnvironment,
+  getApiEnvironment,
+  getDocumentStoreConfig,
   getMongoConfig,
   getRequiredEnv,
   getUsageEnvironment,
-  getDocumentStoreConfig,
 } from "../src/server.js";
 
 describe("getRequiredEnv", () => {
@@ -222,5 +223,65 @@ describe("getUsageEnvironment", () => {
     ).toThrow(
       'Required environment variable "MODEL_MAX_INPUT_TOKENS" is not set',
     );
+  });
+});
+
+describe("getApiEnvironment", () => {
+  const configuration = {
+    JWT_SIGNING_KEY: "test-only-signing-key-that-is-at-least-32-bytes",
+    JWT_ISSUER: "evianta-test",
+    JWT_AUDIENCE: "evianta-api-test",
+    WEB_ORIGIN: "https://app.example.test",
+    AUTH_RATE_LIMIT_PER_MINUTE: "10",
+    API_RATE_LIMIT_PER_MINUTE: "60",
+    SESSION_RECHECK_SECONDS: "30",
+  };
+
+  it("parses the required auth settings and fixed session lifetime", () => {
+    expect(getApiEnvironment(configuration)).toMatchObject({
+      jwtTtlSeconds: 1800,
+      webOrigin: "https://app.example.test",
+      apiPort: 3001,
+      authRateLimitPerMinute: 10,
+      apiRateLimitPerMinute: 60,
+      sessionRecheckSeconds: 30,
+      trustProxyHops: 0,
+    });
+  });
+
+  it("rejects weak signing keys and non-origin web URLs", () => {
+    expect(() =>
+      getApiEnvironment({
+        ...configuration,
+        JWT_SIGNING_KEY: "too-short",
+      }),
+    ).toThrow("JWT_SIGNING_KEY must be at least 32 bytes");
+    expect(() =>
+      getApiEnvironment({
+        ...configuration,
+        WEB_ORIGIN: "https://app.example.test/path",
+      }),
+    ).toThrow("WEB_ORIGIN must be an exact http(s) origin");
+  });
+
+  it("rejects invalid rate limits, proxy hops, and non-30-minute lifetimes", () => {
+    expect(() =>
+      getApiEnvironment({
+        ...configuration,
+        AUTH_RATE_LIMIT_PER_MINUTE: "0",
+      }),
+    ).toThrow('"AUTH_RATE_LIMIT_PER_MINUTE" must be a positive integer');
+    expect(() =>
+      getApiEnvironment({
+        ...configuration,
+        TRUST_PROXY_HOPS: "-1",
+      }),
+    ).toThrow("TRUST_PROXY_HOPS must be a non-negative integer");
+    expect(() =>
+      getApiEnvironment({
+        ...configuration,
+        JWT_TTL_SECONDS: "3600",
+      }),
+    ).toThrow("JWT_TTL_SECONDS must be 1800");
   });
 });

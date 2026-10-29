@@ -33,7 +33,7 @@ cloud services or model providers.
 | `packages/store`  | MongoDB repositories and private document storage adapters        |
 | `packages/ai`     | Muse/mock provider adapters, structured output and usage boundary |
 | `packages/agents` | Agent boundary; orchestration comes later                         |
-| `apps/api`        | API application boundary; HTTP features come later                |
+| `apps/api`        | Express API, access-key authentication and admin CLI              |
 | `apps/web`        | Web application boundary; UI features come in the web work pack   |
 
 Keep shared types in `core`, environment reads in `env`, persistence in
@@ -72,3 +72,22 @@ S3 download URLs are short-lived and capped at one hour. Add settings to the
 example alongside the work package that introduces them. Secrets must be read
 through the server-only `@evianta/env/server` entry point and must never be
 exposed to the web client.
+
+## API authentication
+
+Configure the required API values in `.env`, including a unique random
+`JWT_SIGNING_KEY` of at least 32 bytes, exact `WEB_ORIGIN`, rate limits and
+`SESSION_RECHECK_SECONDS`. Keep `TRUST_PROXY_HOPS` at `0` unless the API is
+behind a known proxy chain. JWTs last 30 minutes and are checked against the
+current user, access key and revocable session on each request.
+The API start and admin commands load the repository-root `.env` automatically;
+environment variables already exported by the process take precedence.
+Clients must hold tokens in memory only and ask users to re-enter their key
+after a reload or token expiry; there are no refresh tokens.
+
+Build and run the API with `pnpm --filter @evianta/api build` and
+`pnpm --filter @evianta/api start`. The admin CLI supports `create-user`,
+`disable-user`, `issue-key` and `revoke-key`; run it with
+`pnpm --filter @evianta/api admin -- <command> <arguments>`. An issued key is
+printed once and only its SHA-256 verifier is stored. Do not pass keys in
+shell history or logs.

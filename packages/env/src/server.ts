@@ -169,6 +169,103 @@ export function getUsageEnvironment(
   };
 }
 
+export interface ApiEnvironment {
+  jwtSigningKey: string;
+  jwtIssuer: string;
+  jwtAudience: string;
+  jwtTtlSeconds: 1800;
+  webOrigin: string;
+  apiPort: number;
+  authRateLimitPerMinute: number;
+  apiRateLimitPerMinute: number;
+  sessionRecheckSeconds: number;
+  trustProxyHops: number;
+}
+
+function getPositiveInteger(
+  name: string,
+  env: NodeJS.ProcessEnv,
+  defaultValue?: number,
+): number {
+  const raw =
+    env[name] ??
+    (defaultValue === undefined ? undefined : String(defaultValue));
+  if (raw === undefined || !/^[1-9]\d*$/.test(raw)) {
+    throw new Error(`"${name}" must be a positive integer`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`"${name}" must be a safe integer`);
+  }
+  return value;
+}
+
+export function getApiEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): ApiEnvironment {
+  const jwtSigningKey = getRequiredEnv("JWT_SIGNING_KEY", env);
+  if (Buffer.byteLength(jwtSigningKey, "utf8") < 32) {
+    throw new Error("JWT_SIGNING_KEY must be at least 32 bytes");
+  }
+
+  const webOrigin = getRequiredEnv("WEB_ORIGIN", env).trim();
+  let originUrl: URL;
+  try {
+    originUrl = new URL(webOrigin);
+  } catch (error) {
+    throw new Error("WEB_ORIGIN must be an exact http(s) origin", {
+      cause: error,
+    });
+  }
+  if (
+    originUrl.origin !== webOrigin ||
+    (originUrl.protocol !== "https:" &&
+      !(
+        originUrl.protocol === "http:" &&
+        ["localhost", "127.0.0.1", "[::1]"].includes(originUrl.hostname)
+      ))
+  ) {
+    throw new Error("WEB_ORIGIN must be an exact http(s) origin");
+  }
+
+  const ttl = Number(env.JWT_TTL_SECONDS ?? "1800");
+  if (ttl !== 1800) {
+    throw new Error("JWT_TTL_SECONDS must be 1800");
+  }
+
+  const apiPort = getPositiveInteger("API_PORT", env, 3001);
+  if (apiPort > 65535) {
+    throw new Error("API_PORT must be between 1 and 65535");
+  }
+  const sessionRecheckSeconds = getPositiveInteger(
+    "SESSION_RECHECK_SECONDS",
+    env,
+  );
+  if (sessionRecheckSeconds > 1800) {
+    throw new Error("SESSION_RECHECK_SECONDS must not exceed 1800");
+  }
+  const trustProxyHops = Number(env.TRUST_PROXY_HOPS ?? "0");
+  if (!Number.isSafeInteger(trustProxyHops) || trustProxyHops < 0) {
+    throw new Error("TRUST_PROXY_HOPS must be a non-negative integer");
+  }
+
+  return {
+    jwtSigningKey,
+    jwtIssuer: getRequiredEnv("JWT_ISSUER", env),
+    jwtAudience: getRequiredEnv("JWT_AUDIENCE", env),
+    jwtTtlSeconds: 1800,
+    webOrigin,
+    apiPort,
+    authRateLimitPerMinute: getPositiveInteger(
+      "AUTH_RATE_LIMIT_PER_MINUTE",
+      env,
+    ),
+    apiRateLimitPerMinute: getPositiveInteger("API_RATE_LIMIT_PER_MINUTE", env),
+    sessionRecheckSeconds,
+    trustProxyHops,
+  };
+}
+
 export function getAiEnvironment(
   env: NodeJS.ProcessEnv = process.env,
 ): AiEnvironment {

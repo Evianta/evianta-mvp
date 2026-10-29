@@ -52,6 +52,7 @@ import {
   type TaskRepository,
   type UserRepository,
   type UsageRepository,
+  type RateLimitRepository,
 } from "@evianta/core";
 import {
   type ClientSession,
@@ -80,6 +81,10 @@ export {
   SequenceConflictError,
   StoreError,
 } from "./errors.js";
+import {
+  MongoRateLimitRepository,
+  type MongoRateLimitCounter,
+} from "./rate-limits.js";
 
 type Stored<T> = T & Document & { _id: string };
 const TimestampSchema = z.string().datetime({ offset: true });
@@ -195,6 +200,7 @@ export class MongoStore {
     Stored<UsageReservation> & { idempotencyKey: string }
   >;
   readonly budgets: Collection<Document>;
+  readonly rateLimits: MongoRateLimitRepository;
   private readonly pageSize: number;
   readonly repositories: {
     agentProfiles: AgentProfileRepository;
@@ -217,6 +223,7 @@ export class MongoStore {
     usageLedger: UsageLedgerRepository;
     runAdmission: RunAdmissionPort;
     usageAdmin: UsageAdminService;
+    rateLimits: RateLimitRepository;
   };
   private readonly usageAccounting: MongoUsageRepository;
   private readonly runAdmissionRepository: MongoRunAdmissionRepository;
@@ -251,6 +258,10 @@ export class MongoStore {
       options.client,
       db,
     );
+    this.rateLimits = new MongoRateLimitRepository(
+      db.collection<MongoRateLimitCounter>("rateLimitCounters"),
+      (message, code) => new StoreError(message, code),
+    );
     this.repositories = {
       agentProfiles: {
         listEnabled: () => this.agentListEnabled(),
@@ -272,9 +283,10 @@ export class MongoStore {
         replace: (user) => this.userReplace(user),
       },
       accessKeys: {
-        findActiveById: (id) => this.accessKeyFindActiveById(id),
+        findActiveById: (id, at) => this.accessKeyFindActiveById(id, at),
         insert: (record) => this.accessKeyInsert(record),
         revoke: (id, at) => this.accessKeyRevoke(id, at),
+        markUsed: (id, at) => this.accessKeyMarkUsed(id, at),
       },
       sessions: {
         findActiveById: (id, at) => this.sessionFindActiveById(id, at),
@@ -341,10 +353,21 @@ export class MongoStore {
       usageLedger: this.usageAccounting,
       runAdmission: this.runAdmissionRepository,
       usageAdmin: new UsageAdminService(this.usageAccounting),
+      rateLimits: this.rateLimits,
     };
   }
 
   async initialize(): Promise<void> {
+    await Promise.all([
+      this.accessKeys.updateMany(
+        { expiresAt: { $exists: false } },
+        { $set: { expiresAt: null } },
+      ),
+      this.sessions.updateMany(
+        { accessKeyId: { $exists: false } },
+        { $set: { accessKeyId: null } },
+      ),
+    ]);
     await this.cases.updateMany({ createdAtInstant: { $exists: false } }, [
       {
         $set: {
@@ -364,8 +387,10 @@ export class MongoStore {
     await Promise.all([
       this.agents.createIndex({ role: 1 }, { unique: true }),
       this.users.createIndex({ emailKey: 1 }, { unique: true }),
-      this.accessKeys.createIndex({ userId: 1, revokedAt: 1 }),
+      this.accessKeys.createIndex({ userId: 1, revokedAt: 1, expiresAt: 1 }),
       this.sessions.createIndex({ userId: 1, expiresAt: 1, revokedAt: 1 }),
+      this.sessions.createIndex({ accessKeyId: 1, revokedAt: 1 }),
+      this.rateLimits.initialize(),
       this.cases.createIndex({
         ownerId: 1,
         createdAtInstant: -1,
@@ -613,10 +638,33 @@ export class MongoStore {
     }
   }
 
-  async accessKeyFindActiveById(id: string): Promise<AccessKeyRecord | null> {
+  async accessKeyFindActiveById(
+    id: string,
+    at = new Date().toISOString(),
+  ): Promise<AccessKeyRecord | null> {
+    const atDate = new Date(TimestampSchema.parse(at));
     return decode(
       AccessKeyRecordSchema,
-      await this.accessKeys.findOne({ _id: id, revokedAt: null }),
+      await this.accessKeys.findOne({
+        _id: id,
+        revokedAt: null,
+        $or: [
+          { expiresAt: null },
+          {
+            $expr: {
+              $gt: [
+                {
+                  $dateFromString: {
+                    dateString: "$expiresAt",
+                    onError: null,
+                  },
+                },
+                atDate,
+              ],
+            },
+          },
+        ],
+      }),
     );
   }
 
@@ -631,6 +679,14 @@ export class MongoStore {
       { $set: { revokedAt: validatedAt } },
     );
     return result.modifiedCount === 1;
+  }
+
+  async accessKeyMarkUsed(id: string, usedAt: string): Promise<void> {
+    const validatedAt = TimestampSchema.parse(usedAt);
+    await this.accessKeys.updateOne(
+      { _id: id, revokedAt: null },
+      { $set: { lastUsedAt: validatedAt } },
+    );
   }
 
   async sessionFindActiveById(

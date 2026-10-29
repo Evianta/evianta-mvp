@@ -38,6 +38,7 @@ export const AccessKeyRecordSchema = z.object({
   userId: IdSchema,
   keyHash: z.string().min(1),
   keyPrefix: z.string().min(1),
+  expiresAt: TimestampSchema.nullable(),
   lastUsedAt: TimestampSchema.nullable(),
   revokedAt: TimestampSchema.nullable(),
   createdAt: TimestampSchema,
@@ -47,6 +48,7 @@ export type AccessKeyRecord = z.infer<typeof AccessKeyRecordSchema>;
 export const SessionRecordSchema = z.object({
   id: IdSchema,
   userId: IdSchema,
+  accessKeyId: IdSchema.nullable(),
   issuedAt: TimestampSchema,
   expiresAt: TimestampSchema,
   revokedAt: TimestampSchema.nullable(),

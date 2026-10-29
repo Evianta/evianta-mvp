@@ -212,6 +212,7 @@ function repositoryContract(
       await repositories.sessions.insert({
         id: "session-expired",
         userId: "user-1",
+        accessKeyId: "key-1",
         issuedAt: timestamp,
         expiresAt: "2026-01-15T01:00:00+02:00",
         revokedAt: null,
@@ -220,6 +221,7 @@ function repositoryContract(
       await repositories.sessions.insert({
         id: "session-valid",
         userId: "user-1",
+        accessKeyId: "key-1",
         issuedAt: timestamp,
         expiresAt: "2026-01-15T00:00:00-05:00",
         revokedAt: null,
@@ -246,6 +248,7 @@ function repositoryContract(
         userId: "user-1",
         keyHash: "hash",
         keyPrefix: "prefix",
+        expiresAt: null,
         lastUsedAt: null,
         revokedAt: null,
         createdAt: timestamp,
@@ -253,6 +256,7 @@ function repositoryContract(
       await repositories.sessions.insert({
         id: "session-1",
         userId: "user-1",
+        accessKeyId: "access-key-1",
         issuedAt: timestamp,
         expiresAt: "2026-01-16T00:00:00.000Z",
         revokedAt: null,
@@ -271,6 +275,65 @@ function repositoryContract(
       expect(
         await repositories.sessions.findActiveById("session-1", timestamp),
       ).not.toBeNull();
+    });
+
+    it("expires access keys and records their last use", async () => {
+      await repositories.accessKeys.insert({
+        id: "expiring-key",
+        userId: "user-1",
+        keyHash: "hash",
+        keyPrefix: "prefix",
+        expiresAt: "2026-01-15T00:00:00.000Z",
+        lastUsedAt: null,
+        revokedAt: null,
+        createdAt: timestamp,
+      });
+
+      expect(
+        await repositories.accessKeys.findActiveById(
+          "expiring-key",
+          "2026-01-14T23:59:59.999Z",
+        ),
+      ).not.toBeNull();
+      expect(
+        await repositories.accessKeys.findActiveById(
+          "expiring-key",
+          "2026-01-15T00:00:00.000Z",
+        ),
+      ).toBeNull();
+
+      await repositories.accessKeys.markUsed("expiring-key", timestamp);
+      expect(
+        await repositories.accessKeys.findActiveById(
+          "expiring-key",
+          "2026-01-14T23:00:00.000Z",
+        ),
+      ).toMatchObject({ lastUsedAt: timestamp });
+    });
+
+    it("atomically counts rate-limit requests in a fixed window", async () => {
+      const request = {
+        key: "hashed-source",
+        limit: 3,
+        windowSeconds: 60,
+        at: timestamp,
+      };
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          repositories.rateLimits.consume(request),
+        ),
+      );
+      const counts = results
+        .map((result) => result.count)
+        .sort((a, b) => a - b);
+      expect(results.filter((result) => result.allowed)).toHaveLength(3);
+      expect(results.filter((result) => !result.allowed)).toHaveLength(2);
+      expect(counts).toEqual([1, 2, 3, 4, 5]);
+      expect(
+        results.every(
+          (result) => result.resetAt === "2026-01-15T00:01:00.000Z",
+        ),
+      ).toBe(true);
     });
 
     it("upserts agent profiles by role even when the profile ID changes", async () => {
