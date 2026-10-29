@@ -186,7 +186,9 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
   await page.goto("/cases/new");
   await signIn(page);
   await page.getByLabel("Case title", { exact: true }).fill("Recovery case");
-  await page.getByLabel("Workflow", { exact: true }).selectOption("data-analysis");
+  await page
+    .getByLabel("Workflow", { exact: true })
+    .selectOption("data-analysis");
   await page.locator("#case-files").setInputFiles([
     {
       name: "first.csv",

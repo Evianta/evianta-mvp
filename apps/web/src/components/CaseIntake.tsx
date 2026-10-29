@@ -132,11 +132,13 @@ function SessionCaseIntake({
     setError(null);
     setFiles((current) => [
       ...current,
-      ...selected.map((file): SelectedDocument => ({
-        file,
-        state: "selected",
-        uploadFailed: false,
-      })),
+      ...selected.map(
+        (file): SelectedDocument => ({
+          file,
+          state: "selected",
+          uploadFailed: false,
+        }),
+      ),
     ]);
     event.target.value = "";
   }
@@ -152,11 +154,13 @@ function SessionCaseIntake({
     setError(null);
     setFiles((current) => [
       ...current,
-      ...selected.map((file): SelectedDocument => ({
-        file,
-        state: "selected",
-        uploadFailed: false,
-      })),
+      ...selected.map(
+        (file): SelectedDocument => ({
+          file,
+          state: "selected",
+          uploadFailed: false,
+        }),
+      ),
     ]);
   }
 
