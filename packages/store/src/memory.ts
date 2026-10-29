@@ -46,6 +46,9 @@ import {
   type TaskRepository,
   type UserRepository,
   type UsageRepository,
+  type RateLimitRepository,
+  type RateLimitRequest,
+  type RateLimitResult,
 } from "@evianta/core";
 import { CaseNotOwnedError, InvalidCursorError, StoreError } from "./mongo.js";
 import { z, type ZodType } from "zod";
@@ -87,6 +90,10 @@ export class InMemoryStore {
     string,
     { record: UsageRecord; runId: string; scope: OwnerScope }
   > = new Map();
+  private readonly rateLimitCounters = new Map<
+    string,
+    { count: number; resetAt: string }
+  >();
   private readonly pageSize: number;
 
   readonly repositories: {
@@ -105,6 +112,7 @@ export class InMemoryStore {
     approvals: ApprovalRepository;
     events: RunEventRepository;
     usage: UsageRepository;
+    rateLimits: RateLimitRepository;
   };
 
   constructor(options: { pageSize?: number } = {}) {
@@ -246,9 +254,11 @@ export class InMemoryStore {
         },
       },
       accessKeys: {
-        findActiveById: async (id) => {
+        findActiveById: async (id, at = new Date().toISOString()) => {
           const record = this.accessKeys.get(id);
-          return record?.revokedAt === null
+          return record?.revokedAt === null &&
+            (record.expiresAt === null ||
+              Date.parse(record.expiresAt) > Date.parse(at))
             ? parse(AccessKeyRecordSchema, record)
             : null;
         },
@@ -269,6 +279,19 @@ export class InMemoryStore {
             }),
           );
           return true;
+        },
+        markUsed: async (id, usedAt) => {
+          const validatedAt = TimestampSchema.parse(usedAt);
+          const record = this.accessKeys.get(id);
+          if (record && record.revokedAt === null) {
+            this.accessKeys.set(
+              id,
+              parse(AccessKeyRecordSchema, {
+                ...record,
+                lastUsedAt: validatedAt,
+              }),
+            );
+          }
         },
       },
       sessions: {
@@ -682,6 +705,40 @@ export class InMemoryStore {
           });
         },
       },
+      rateLimits: {
+        consume: async (request) => this.rateLimitConsume(request),
+      },
+    };
+  }
+
+  private async rateLimitConsume(
+    request: RateLimitRequest,
+  ): Promise<RateLimitResult> {
+    const at = Date.parse(TimestampSchema.parse(request.at));
+    if (
+      !request.key ||
+      !Number.isSafeInteger(request.limit) ||
+      request.limit < 1 ||
+      !Number.isSafeInteger(request.windowSeconds) ||
+      request.windowSeconds < 1
+    ) {
+      throw new StoreError(
+        "Rate-limit request is invalid",
+        "invalid-rate-limit",
+      );
+    }
+
+    const windowMs = request.windowSeconds * 1000;
+    const windowStart = Math.floor(at / windowMs) * windowMs;
+    const resetAt = new Date(windowStart + windowMs).toISOString();
+    const key = `${request.key}:${windowStart}`;
+    const counter = this.rateLimitCounters.get(key) ?? { count: 0, resetAt };
+    counter.count += 1;
+    this.rateLimitCounters.set(key, counter);
+    return {
+      allowed: counter.count <= request.limit,
+      count: counter.count,
+      resetAt,
     };
   }
 
