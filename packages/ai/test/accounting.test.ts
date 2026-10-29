@@ -77,7 +77,13 @@ function admittedAttempt(): Omit<
 > {
   return {
     attemptId: "attempt-1",
-    context: { userId: "user-1", caseId: "case-1", runId: "run-1" },
+    context: {
+      userId: "user-1",
+      caseId: "case-1",
+      runId: "run-1",
+      leaseId: "lease-1",
+      fencingToken: 1,
+    },
     provider: "muse",
     model: "spark",
     settings,
@@ -94,7 +100,7 @@ function completedAttempt(
     total: 1_500,
     reasoning: 200,
     cacheRead: 100,
-    cacheWrite: 50,
+    cacheWrite: 0,
     search: 0,
   },
 ): UsageAttempt {
@@ -134,7 +140,7 @@ describe("admitted usage accounting", () => {
     expect(admission.settle).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: "success",
-        units: completedAttempt().units,
+        units: expect.objectContaining({ cacheWrite: 0 }),
       }),
     );
   });

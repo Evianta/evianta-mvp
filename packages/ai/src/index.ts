@@ -77,6 +77,8 @@ export interface UsageContext {
   userId: string;
   caseId?: string;
   runId?: string;
+  leaseId?: string;
+  fencingToken?: number;
   taskId?: string;
 }
 
@@ -132,6 +134,7 @@ export interface ImageInput {
 }
 
 export interface ModelProvider {
+  readonly providerName: ModelProviderName;
   generateStructured(
     request: StructuredGenerationRequest,
   ): Promise<ProviderResult>;
@@ -379,7 +382,25 @@ function inputTokenAllowance(input: {
   return Math.ceil(bytes * 1.5) + 256;
 }
 
+function validateWebSearchQuery(input: unknown): void {
+  if (
+    typeof input !== "string" ||
+    input.trim().length === 0 ||
+    input.trim().length > 500
+  ) {
+    throw new AiError(
+      "Web-search input must be an explicit query of at most 500 characters",
+      "invalid-web-search-query",
+    );
+  }
+}
+
 export function createAi(options: AiClientOptions): AiClient {
+  if (options.provider.providerName !== options.models.provider) {
+    throw new AdmissionRejectedError(
+      "The configured model provider does not match the injected provider adapter",
+    );
+  }
   if (
     options.models.provider === "muse" &&
     (options.accounting.mode !== "admitted" ||
@@ -412,6 +433,27 @@ export function createAi(options: AiClientOptions): AiClient {
       );
     }
     validateImages(request.images);
+    if (request.webSearch) validateWebSearchQuery(input);
+    if (
+      options.accounting.mode === "admitted" &&
+      model.provider === "muse" &&
+      request.webSearch
+    ) {
+      throw new AiError(
+        "Paid web search is disabled until provider search usage can be bounded",
+        "unbounded-usage-capability",
+      );
+    }
+    if (
+      options.accounting.mode === "admitted" &&
+      model.provider === "muse" &&
+      request.images?.length
+    ) {
+      throw new AiError(
+        "Paid image requests are disabled until provider image usage can be bounded",
+        "unbounded-usage-capability",
+      );
+    }
 
     const requestedOutputTokens =
       request.maxOutputTokens ??
@@ -424,6 +466,14 @@ export function createAi(options: AiClientOptions): AiClient {
       requestedOutputTokens,
       model.maxOutputTokens,
     );
+    const dispatchedModel: ModelConfiguration = {
+      ...model,
+      maxOutputTokens,
+      pricingSettings: {
+        ...model.pricingSettings,
+        maxOutputTokens,
+      },
+    };
     const schema = zod.toJSONSchema(request.outputSchema) as Record<
       string,
       unknown
@@ -446,9 +496,9 @@ export function createAi(options: AiClientOptions): AiClient {
         const usageAttempt = {
           attemptId,
           context: request.usageContext,
-          provider: model.provider,
-          model: model.model,
-          settings: model.pricingSettings,
+          provider: dispatchedModel.provider,
+          model: dispatchedModel.model,
+          settings: dispatchedModel.pricingSettings,
           maxInputTokens: inputTokenAllowance({
             system,
             input: structuredInput,
@@ -469,7 +519,7 @@ export function createAi(options: AiClientOptions): AiClient {
         let result: ProviderResult;
         try {
           result = await options.provider.generateStructured({
-            model,
+            model: dispatchedModel,
             system,
             input: structuredInput,
             schema,
@@ -570,6 +620,14 @@ export function createAi(options: AiClientOptions): AiClient {
       requestedOutputTokens,
       model.maxOutputTokens,
     );
+    const dispatchedModel: ModelConfiguration = {
+      ...model,
+      maxOutputTokens,
+      pricingSettings: {
+        ...model.pricingSettings,
+        maxOutputTokens,
+      },
+    };
     const inputTokens = inputTokenAllowance({
       system: request.system,
       input: request.input,
@@ -584,9 +642,9 @@ export function createAi(options: AiClientOptions): AiClient {
     const usageAttempt = {
       attemptId,
       context: request.usageContext,
-      provider: model.provider,
-      model: model.model,
-      settings: model.pricingSettings,
+      provider: dispatchedModel.provider,
+      model: dispatchedModel.model,
+      settings: dispatchedModel.pricingSettings,
       maxInputTokens: inputTokens,
       maxOutputTokens,
       searchRequested: false,
@@ -600,7 +658,7 @@ export function createAi(options: AiClientOptions): AiClient {
 
     try {
       for await (const chunk of options.provider.streamText({
-        model,
+        model: dispatchedModel,
         system: request.system,
         input: request.input,
         maxOutputTokens,
@@ -770,6 +828,7 @@ function normalizeCitations(body: Record<string, unknown>): Citation[] {
 }
 
 export class MuseProvider implements ModelProvider {
+  readonly providerName = "muse" as const;
   private readonly baseUrl: URL;
   private readonly fetchImplementation: typeof fetch;
 
@@ -822,19 +881,14 @@ export class MuseProvider implements ModelProvider {
     }
     let webSearchQuery: string | undefined;
     if (request.webSearch) {
+      validateWebSearchQuery(request.input);
       if (typeof request.input !== "string") {
         throw new AiError(
-          "Web-search input must be an explicit query of at most 500 characters",
+          "Invalid web-search query",
           "invalid-web-search-query",
         );
       }
       webSearchQuery = request.input.trim();
-      if (webSearchQuery.length > 500) {
-        throw new AiError(
-          "Web-search input must be an explicit query of at most 500 characters",
-          "invalid-web-search-query",
-        );
-      }
     }
 
     const isGrounded = request.webSearch;
@@ -1052,6 +1106,7 @@ export interface MockProviderOptions {
 }
 
 export class MockProvider implements ModelProvider {
+  readonly providerName = "mock" as const;
   private index = 0;
 
   constructor(private readonly options: MockProviderOptions = {}) {}

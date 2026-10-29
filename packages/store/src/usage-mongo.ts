@@ -15,6 +15,7 @@ import {
   type UsageReservation,
   type UsageReservationRequest,
   type UsageSettlement,
+  usdToSubunits,
 } from "@evianta/core";
 import {
   type ClientSession,
@@ -43,6 +44,8 @@ const ReservationRequestSchema = z
     ownerId: z.string().min(1),
     caseId: z.string().min(1),
     runId: z.string().min(1),
+    leaseId: z.string().min(1),
+    fencingToken: z.number().safe().int().positive(),
     taskId: z.string().min(1).nullable(),
     provider: z.string().min(1),
     model: z.string().min(1),
@@ -99,6 +102,10 @@ function globalBudgetOwner(periodSeconds: number): string {
   return `global:${periodSeconds}`;
 }
 
+function runAdmissionId(ownerId: string, caseId: string): string {
+  return JSON.stringify([ownerId, caseId]);
+}
+
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(canonicalJson).join(",")}]`;
@@ -112,11 +119,30 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
+function canonicalTimestamp(value: string): string {
+  return new Date(Date.parse(value)).toISOString();
+}
+
+function moneySubunits(value: number): number {
+  try {
+    return usdToSubunits(value);
+  } catch (error) {
+    throw new StoreError(
+      "USD value exceeds supported precision",
+      "invalid-usd",
+      {
+        cause: error,
+      },
+    );
+  }
+}
+
 export class MongoUsageRepository
   implements UsageAdmissionPort, UsagePriceRepository, UsageLedgerRepository
 {
   private readonly cases: Collection<Document>;
   private readonly runs: Collection<Document>;
+  private readonly runAdmissions: Collection<Document>;
   private readonly prices: Collection<Document>;
   private readonly ledger: Collection<Document>;
   private readonly reservations: Collection<Document>;
@@ -128,6 +154,7 @@ export class MongoUsageRepository
   ) {
     this.cases = db.collection("cases");
     this.runs = db.collection("runs");
+    this.runAdmissions = db.collection("runAdmissions");
     this.prices = db.collection("usagePrices");
     this.ledger = db.collection("usageLedger");
     this.reservations = db.collection("usageReservations");
@@ -135,6 +162,37 @@ export class MongoUsageRepository
   }
 
   async initialize(): Promise<void> {
+    const legacyBudgets = await this.budgets
+      .find({
+        $or: [
+          { spentSubunits: { $exists: false } },
+          { reservedSubunits: { $exists: false } },
+        ],
+      })
+      .toArray();
+    for (const budget of legacyBudgets) {
+      const updates: Document = {};
+      if (budget.spentSubunits === undefined) {
+        updates.spentSubunits = moneySubunits(Number(budget.spentUsd ?? 0));
+      }
+      if (budget.reservedSubunits === undefined) {
+        updates.reservedSubunits = moneySubunits(
+          Number(budget.reservedUsd ?? 0),
+        );
+      }
+      await this.budgets.updateOne(
+        {
+          _id: budget._id,
+          ...(budget.spentSubunits === undefined
+            ? { spentSubunits: { $exists: false } }
+            : {}),
+          ...(budget.reservedSubunits === undefined
+            ? { reservedSubunits: { $exists: false } }
+            : {}),
+        },
+        { $set: updates },
+      );
+    }
     await Promise.all([
       this.prices.createIndex(
         { provider: 1, model: 1, settingsKey: 1, version: 1 },
@@ -161,20 +219,23 @@ export class MongoUsageRepository
     return decode(
       UsagePriceSchema,
       await this.prices
-        .find({
-          provider,
-          model,
-          settingsKey,
-          effectiveAt: { $lte: at },
-        })
-        .sort({ effectiveAt: -1, version: -1 })
-        .limit(1)
+        .aggregate([
+          { $match: { provider, model, settingsKey } },
+          { $set: { effectiveAtInstant: { $toDate: "$effectiveAt" } } },
+          { $match: { effectiveAtInstant: { $lte: new Date(at) } } },
+          { $sort: { effectiveAtInstant: -1, version: -1 } },
+          { $limit: 1 },
+          { $unset: "effectiveAtInstant" },
+        ])
         .next(),
     );
   }
 
   async insert(price: UsagePrice): Promise<void> {
-    const parsed = UsagePriceSchema.parse(price);
+    const parsed = UsagePriceSchema.parse({
+      ...price,
+      effectiveAt: canonicalTimestamp(price.effectiveAt),
+    });
     try {
       await this.prices.insertOne({ ...parsed, _id: parsed.id });
     } catch (error) {
@@ -190,7 +251,12 @@ export class MongoUsageRepository
   }
 
   async reserve(input: UsageReservationRequest): Promise<UsageReservation> {
-    const request = ReservationRequestSchema.parse(input);
+    const parsedRequest = ReservationRequestSchema.parse(input);
+    const request = {
+      ...parsedRequest,
+      at: canonicalTimestamp(parsedRequest.at),
+      expiresAt: canonicalTimestamp(parsedRequest.expiresAt),
+    };
     if (
       request.price.provider !== request.provider ||
       request.price.model !== request.model
@@ -208,10 +274,13 @@ export class MongoUsageRepository
     );
     if (amountUsd === null) {
       throw new StoreError(
-        "No price is configured for the requested web-search capability",
-        "unpriced-capability",
+        "The requested capability has no bounded usage allowance",
+        "unbounded-capability",
       );
     }
+    const amountSubunits = moneySubunits(amountUsd);
+    const userLimitSubunits = moneySubunits(request.userSpendLimitUsd);
+    const globalLimitSubunits = moneySubunits(request.globalSpendLimitUsd);
     const start = periodStart(request.at, request.periodSeconds);
     const reservationId = `reservation:${request.attemptId}`;
     const userOwner = userBudgetOwner(request.ownerId, request.periodSeconds);
@@ -241,6 +310,10 @@ export class MongoUsageRepository
             entry.model !== request.model ||
             entry.priceId !== request.price.id ||
             entry.priceVersion !== request.price.version ||
+            entry.inputAllowanceTokens !== request.inputAllowanceTokens ||
+            entry.outputAllowanceTokens !== request.outputAllowanceTokens ||
+            entry.searchRequested !== request.searchRequested ||
+            canonicalJson(entry.price) !== canonicalJson(request.price) ||
             canonicalJson(entry.settings) !== canonicalJson(request.settings)
           ) {
             throw new StoreError(
@@ -270,17 +343,29 @@ export class MongoUsageRepository
         const activePrice = decode(
           UsagePriceSchema,
           await this.prices
-            .find(
-              {
-                provider: request.provider,
-                model: request.model,
-                settingsKey: request.price.settingsKey,
-                effectiveAt: { $lte: request.at },
-              },
+            .aggregate(
+              [
+                {
+                  $match: {
+                    provider: request.provider,
+                    model: request.model,
+                    settingsKey: request.price.settingsKey,
+                  },
+                },
+                {
+                  $set: { effectiveAtInstant: { $toDate: "$effectiveAt" } },
+                },
+                {
+                  $match: {
+                    effectiveAtInstant: { $lte: new Date(request.at) },
+                  },
+                },
+                { $sort: { effectiveAtInstant: -1, version: -1 } },
+                { $limit: 1 },
+                { $unset: "effectiveAtInstant" },
+              ],
               { session },
             )
-            .sort({ effectiveAt: -1, version: -1 })
-            .limit(1)
             .next(),
         );
         if (
@@ -302,14 +387,28 @@ export class MongoUsageRepository
             ownerId: request.ownerId,
             caseId: request.caseId,
             status: "running",
+            fencingToken: request.fencingToken,
             cancellationRequested: false,
           },
           { session },
         );
-        if (!run) {
+        const admission = await this.runAdmissions.findOne(
+          {
+            _id: runAdmissionId(request.ownerId, request.caseId),
+            runId: request.runId,
+            state: "active",
+            leaseId: request.leaseId,
+            fencingToken: request.fencingToken,
+            $expr: {
+              $gt: [{ $toDate: "$leaseExpiresAt" }, new Date(request.at)],
+            },
+          },
+          { session },
+        );
+        if (!run || !admission) {
           throw new StoreError(
-            "The run does not belong to this case and owner",
-            "run-not-owned",
+            "Usage admission requires the run's active fenced lease",
+            "run-admission-required",
           );
         }
 
@@ -318,15 +417,15 @@ export class MongoUsageRepository
         await this.increaseReservedBudget(
           userOwner,
           start,
-          request.userSpendLimitUsd,
-          amountUsd,
+          userLimitSubunits,
+          amountSubunits,
           session,
         );
         await this.increaseReservedBudget(
           globalOwner,
           start,
-          request.globalSpendLimitUsd,
-          amountUsd,
+          globalLimitSubunits,
+          amountSubunits,
           session,
         );
 
@@ -408,7 +507,11 @@ export class MongoUsageRepository
   }
 
   async settle(input: UsageSettlement): Promise<void> {
-    const settlement = SettlementSchema.parse(input);
+    const parsedSettlement = SettlementSchema.parse(input);
+    const settlement = {
+      ...parsedSettlement,
+      at: canonicalTimestamp(parsedSettlement.at),
+    };
     await this.withTransaction(async (session) => {
       const reservation = decode(
         UsageReservationSchema,
@@ -457,29 +560,16 @@ export class MongoUsageRepository
         entry.searchRequested,
       );
       const costIsKnown = estimate.status === "estimated";
-      if (costIsKnown) {
-        await this.consumeReservedBudget(
-          userBudgetOwner(reservation.ownerId, reservation.periodSeconds),
-          reservation,
-          estimate.costUsd!,
-          settlement.at,
-          session,
-        );
-        await this.consumeReservedBudget(
-          globalBudgetOwner(reservation.periodSeconds),
-          reservation,
-          estimate.costUsd!,
-          settlement.at,
-          session,
-        );
-      }
-
-      const updatedReservation = {
+      const reservationSubunits = moneySubunits(reservation.reservedUsd);
+      const costSubunits = costIsKnown
+        ? moneySubunits(estimate.costUsd!)
+        : null;
+      const updatedReservation = UsageReservationSchema.parse({
         ...reservation,
         actualCostUsd: costIsKnown ? estimate.costUsd : null,
         status: costIsKnown ? "settled" : "reserved",
         updatedAt: settlement.at,
-      };
+      });
       const updatedEntry = UsageLedgerEntrySchema.parse({
         ...entry,
         units: settlement.units,
@@ -491,16 +581,44 @@ export class MongoUsageRepository
         updatedAt: settlement.at,
         settledAt: settlement.at,
       });
-      await this.reservations.replaceOne(
+      if (costIsKnown) {
+        await this.consumeReservedBudget(
+          userBudgetOwner(reservation.ownerId, reservation.periodSeconds),
+          reservation.periodStart,
+          reservationSubunits,
+          costSubunits!,
+          settlement.at,
+          session,
+        );
+        await this.consumeReservedBudget(
+          globalBudgetOwner(reservation.periodSeconds),
+          reservation.periodStart,
+          reservationSubunits,
+          costSubunits!,
+          settlement.at,
+          session,
+        );
+      }
+
+      const reservationResult = await this.reservations.replaceOne(
         { _id: reservation.id, status: "reserved" },
         { ...updatedReservation, _id: reservation.id },
         { session },
       );
-      await this.ledger.replaceOne(
+      const ledgerResult = await this.ledger.replaceOne(
         { _id: entry.id },
         { ...updatedEntry, _id: entry.id },
         { session },
       );
+      if (
+        reservationResult.matchedCount !== 1 ||
+        ledgerResult.matchedCount !== 1
+      ) {
+        throw new StoreError(
+          "Usage settlement changed during update",
+          "settlement-conflict",
+        );
+      }
     });
   }
 
@@ -570,6 +688,7 @@ export class MongoUsageRepository
   async list(filter: UsageLedgerFilter = {}) {
     const query: Document = {};
     if (filter.ownerId) query.ownerId = filter.ownerId;
+    if (filter.caseId) query.caseId = filter.caseId;
     if (filter.runId) query.runId = filter.runId;
     const from = filter.from ? Date.parse(filter.from) : undefined;
     const to = filter.to ? Date.parse(filter.to) : undefined;
@@ -580,12 +699,6 @@ export class MongoUsageRepository
     ) {
       throw new StoreError("Invalid usage time range", "invalid-usage-range");
     }
-    if (filter.from || filter.to) {
-      query.createdAt = {
-        ...(from !== undefined ? { $gte: new Date(from).toISOString() } : {}),
-        ...(to !== undefined ? { $lt: new Date(to).toISOString() } : {}),
-      };
-    }
     const limit = filter.limit ?? 500;
     if (!Number.isInteger(limit) || limit < 1 || limit > 5_000) {
       throw new StoreError(
@@ -593,13 +706,53 @@ export class MongoUsageRepository
         "invalid-query-limit",
       );
     }
-    return (
-      await this.ledger
-        .find(query)
-        .sort({ createdAt: -1, attemptId: -1 })
-        .limit(limit)
-        .toArray()
-    ).map((record) => decode(UsageLedgerEntrySchema, record)!);
+    const pipeline: Document[] = [
+      { $match: query },
+      { $set: { createdAtInstant: { $toDate: "$createdAt" } } },
+    ];
+    if (from !== undefined || to !== undefined) {
+      pipeline.push({
+        $match: {
+          createdAtInstant: {
+            ...(from !== undefined ? { $gte: new Date(from) } : {}),
+            ...(to !== undefined ? { $lt: new Date(to) } : {}),
+          },
+        },
+      });
+    }
+    pipeline.push(
+      { $sort: { createdAtInstant: -1, attemptId: -1 } },
+      { $limit: limit },
+      { $unset: "createdAtInstant" },
+    );
+    return (await this.ledger.aggregate(pipeline).toArray()).map(
+      (record) => decode(UsageLedgerEntrySchema, record)!,
+    );
+  }
+
+  async recoverExpired(at: string): Promise<void> {
+    const recoveryAt = canonicalTimestamp(at);
+    const cursor = this.reservations.find({
+      status: "reserved",
+      $expr: {
+        $lte: [{ $toDate: "$expiresAt" }, new Date(recoveryAt)],
+      },
+    });
+    for await (const document of cursor) {
+      const reservation = decode(UsageReservationSchema, document);
+      if (!reservation) continue;
+      await this.ledger.updateOne(
+        { attemptId: reservation.attemptId, outcome: "admitted" },
+        {
+          $set: {
+            outcome: "unknown",
+            errorCode: "admission-expired",
+            updatedAt: recoveryAt,
+            settledAt: recoveryAt,
+          },
+        },
+      );
+    }
   }
 
   private async ensureBudget(
@@ -616,8 +769,8 @@ export class MongoUsageRepository
           _id: id,
           ownerId,
           periodStart: period,
-          spentUsd: 0,
-          reservedUsd: 0,
+          spentSubunits: 0,
+          reservedSubunits: 0,
           updatedAt: at,
         },
       },
@@ -628,8 +781,8 @@ export class MongoUsageRepository
   private async increaseReservedBudget(
     ownerId: string,
     period: string,
-    limitUsd: number,
-    amountUsd: number,
+    limitSubunits: number,
+    amountSubunits: number,
     session: ClientSession,
   ): Promise<void> {
     const result = await this.budgets.updateOne(
@@ -639,15 +792,15 @@ export class MongoUsageRepository
           $lte: [
             {
               $add: [
-                { $ifNull: ["$spentUsd", 0] },
-                { $ifNull: ["$reservedUsd", 0] },
+                { $ifNull: ["$spentSubunits", 0] },
+                { $ifNull: ["$reservedSubunits", 0] },
               ],
             },
-            limitUsd - amountUsd,
+            limitSubunits - amountSubunits,
           ],
         },
       },
-      { $inc: { reservedUsd: amountUsd } },
+      { $inc: { reservedSubunits: amountSubunits } },
       { session },
     );
     if (result.matchedCount !== 1) {
@@ -660,20 +813,21 @@ export class MongoUsageRepository
 
   private async consumeReservedBudget(
     ownerId: string,
-    reservation: UsageReservation,
-    costUsd: number,
+    periodStart: string,
+    reservationSubunits: number,
+    costSubunits: number,
     at: string,
     session: ClientSession,
   ): Promise<void> {
     const result = await this.budgets.updateOne(
       {
-        _id: budgetIdentity(ownerId, reservation.periodStart),
-        reservedUsd: { $gte: reservation.reservedUsd },
+        _id: budgetIdentity(ownerId, periodStart),
+        reservedSubunits: { $gte: reservationSubunits },
       },
       {
         $inc: {
-          reservedUsd: -reservation.reservedUsd,
-          spentUsd: costUsd,
+          reservedSubunits: -reservationSubunits,
+          spentSubunits: costSubunits,
         },
         $set: { updatedAt: at },
       },
@@ -696,10 +850,14 @@ export class MongoUsageRepository
     const result = await this.budgets.updateOne(
       {
         _id: budgetIdentity(ownerId, reservation.periodStart),
-        reservedUsd: { $gte: reservation.reservedUsd },
+        reservedSubunits: {
+          $gte: moneySubunits(reservation.reservedUsd),
+        },
       },
       {
-        $inc: { reservedUsd: -reservation.reservedUsd },
+        $inc: {
+          reservedSubunits: -moneySubunits(reservation.reservedUsd),
+        },
         $set: { updatedAt: at },
       },
       { session },

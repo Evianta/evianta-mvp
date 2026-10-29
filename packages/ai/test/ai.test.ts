@@ -51,6 +51,7 @@ describe("@evianta/ai", () => {
       system: "Answer the question",
       input: "data-analysis",
       usageContext: { userId: "user-1", caseId: "case-1" },
+      maxOutputTokens: 5,
     });
 
     expect(result.output).toBe("tax-notice");
@@ -60,6 +61,12 @@ describe("@evianta/ai", () => {
       pricingIdentity: "mock:mock-spark",
     });
     expect(accounting.admit).toHaveBeenCalledTimes(1);
+    expect(accounting.admit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        settings: expect.objectContaining({ maxOutputTokens: 5 }),
+        maxOutputTokens: 5,
+      }),
+    );
     expect(accounting.record).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: "success",
@@ -199,6 +206,85 @@ describe("@evianta/ai", () => {
         },
       }),
     ).toThrow(AdmissionRejectedError);
+  });
+
+  it("binds paid model configuration to the injected provider adapter", () => {
+    expect(() =>
+      createAi({
+        provider: new MuseProvider({ apiKey: "test-key" }),
+        accounting: createAccounting(),
+        models,
+      }),
+    ).toThrow(AdmissionRejectedError);
+  });
+
+  it("rejects unbounded paid image and web-search requests before admission", async () => {
+    for (const capability of ["vision", "web-search"] as const) {
+      const accounting = createAccounting();
+      const fetchImplementation: typeof fetch = vi.fn();
+      const provider = new MuseProvider({
+        apiKey: "test-key",
+        fetchImplementation,
+      });
+      const client = createAi({
+        provider,
+        accounting,
+        models: {
+          ...models,
+          provider: "muse",
+          maxInputTokens: 32_000,
+          maxOutputTokens: 2_048,
+          capabilitiesByTier: {
+            cheap: ["structured-json", "vision", "web-search"],
+          },
+        },
+      });
+
+      await expect(
+        client.runStructured({
+          tier: "cheap",
+          inputSchema: z.unknown(),
+          outputSchema: z.string(),
+          system: "Research",
+          input: "A valid search query",
+          usageContext: { userId: "user-1" },
+          ...(capability === "vision"
+            ? {
+                images: [
+                  {
+                    mimeType: "image/png",
+                    bytes: new Uint8Array([1]),
+                  },
+                ],
+              }
+            : { webSearch: true }),
+        }),
+      ).rejects.toMatchObject({ code: "unbounded-usage-capability" });
+      expect(accounting.admit).not.toHaveBeenCalled();
+      expect(fetchImplementation).not.toHaveBeenCalled();
+    }
+  });
+
+  it("validates web-search input before usage admission", async () => {
+    const accounting = createAccounting();
+    const client = createAi({
+      provider: createMockProvider(),
+      accounting,
+      models,
+    });
+
+    await expect(
+      client.runStructured({
+        tier: "cheap",
+        inputSchema: z.unknown(),
+        outputSchema: z.string(),
+        system: "Search",
+        input: { query: "not an explicit query" },
+        usageContext: { userId: "user-1" },
+        webSearch: true,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-web-search-query" });
+    expect(accounting.admit).not.toHaveBeenCalled();
   });
 
   it("does not attach a timeout listener when output schema conversion fails", async () => {

@@ -37,9 +37,7 @@ function addEntry(totals: UsageAdminTotals, entry: UsageLedgerEntry): void {
   }
   if (entry.reservationStatus === "reserved") {
     totals.reservedUsd += entry.reservedUsd;
-    if (entry.outcome !== "admitted") {
-      totals.unknownExposureUsd += entry.reservedUsd;
-    }
+    totals.unknownExposureUsd += entry.reservedUsd;
   }
 }
 
@@ -56,6 +54,7 @@ export class UsageAdminService {
         "admin-required",
       );
     }
+    await this.ledger.recoverExpired(new Date().toISOString());
     const limit = filter.limit ?? 500;
     const entries = await this.ledger.list({ ...filter, limit });
     const totals = emptyTotals();

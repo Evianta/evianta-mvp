@@ -181,6 +181,8 @@ export interface UsageReservationRequest {
   ownerId: string;
   caseId: string;
   runId: string;
+  leaseId: string;
+  fencingToken: number;
   taskId: string | null;
   provider: string;
   model: string;
@@ -222,6 +224,7 @@ export interface UsagePriceRepository {
 
 export interface UsageLedgerFilter {
   ownerId?: string;
+  caseId?: string;
   runId?: string;
   from?: string;
   to?: string;
@@ -230,6 +233,7 @@ export interface UsageLedgerFilter {
 
 export interface UsageLedgerRepository {
   list(filter?: UsageLedgerFilter): Promise<UsageLedgerEntry[]>;
+  recoverExpired(at: string): Promise<void>;
 }
 
 export interface RunAdmissionRequest {
@@ -258,7 +262,7 @@ export interface RunAdmissionPort {
     leaseId: string;
     fencingToken: number;
     at: string;
-  }): Promise<boolean>;
+  }): Promise<number | null>;
   resume(
     request: RunAdmissionRequest & { fencingToken: number },
   ): Promise<RunAdmissionLease>;

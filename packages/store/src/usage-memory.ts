@@ -16,12 +16,13 @@ import {
   type UsageReservation,
   type UsageReservationRequest,
   type UsageSettlement,
+  usdToSubunits,
 } from "@evianta/core";
 import { StoreError } from "./errors.js";
 
 interface Budget {
-  spentUsd: number;
-  reservedUsd: number;
+  spentSubunits: number;
+  reservedSubunits: number;
 }
 
 const unknownUnits = UsageUnitsSchema.parse({
@@ -65,6 +66,20 @@ function compareUnits(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function moneySubunits(value: number): number {
+  try {
+    return usdToSubunits(value);
+  } catch (error) {
+    throw new StoreError(
+      "USD value exceeds supported precision",
+      "invalid-usd",
+      {
+        cause: error,
+      },
+    );
+  }
+}
+
 export class InMemoryUsageRepository
   implements UsageAdmissionPort, UsagePriceRepository, UsageLedgerRepository
 {
@@ -84,6 +99,14 @@ export class InMemoryUsageRepository
       caseId: string,
       ownerId: string,
     ) => RunRecord | null,
+    private readonly hasActiveLease: (request: {
+      ownerId: string;
+      caseId: string;
+      runId: string;
+      leaseId: string;
+      fencingToken: number;
+      at: string;
+    }) => boolean,
   ) {}
 
   async findActive(
@@ -111,6 +134,7 @@ export class InMemoryUsageRepository
   async insert(price: UsagePrice): Promise<void> {
     const record = UsagePriceSchema.parse(price);
     if (
+      this.prices.has(record.id) ||
       [...this.prices.values()].some(
         (existing) => priceIdentity(existing) === priceIdentity(record),
       )
@@ -197,10 +221,16 @@ export class InMemoryUsageRepository
       );
     }
     const run = this.findOwnedRun(input.runId, input.caseId, input.ownerId);
-    if (!run || run.status !== "running" || run.cancellationRequested) {
+    if (
+      !run ||
+      run.status !== "running" ||
+      run.cancellationRequested ||
+      run.fencingToken !== input.fencingToken ||
+      !this.hasActiveLease(input)
+    ) {
       throw new StoreError(
-        "The run does not belong to this case and owner",
-        "run-not-owned",
+        "Usage admission requires the run's active fenced lease",
+        "run-admission-required",
       );
     }
     if (this.ledger.has(input.attemptId)) {
@@ -241,31 +271,36 @@ export class InMemoryUsageRepository
     );
     if (amountUsd === null) {
       throw new StoreError(
-        "No price is configured for the requested web-search capability",
-        "unpriced-capability",
+        "The requested capability has no bounded usage allowance",
+        "unbounded-capability",
       );
     }
+    const amountSubunits = moneySubunits(amountUsd);
+    const userLimitSubunits = moneySubunits(input.userSpendLimitUsd);
+    const globalLimitSubunits = moneySubunits(input.globalSpendLimitUsd);
 
     const start = periodStart(input.at, input.periodSeconds);
     const userKey = `user:${input.ownerId}:${input.periodSeconds}:${start}`;
     const globalKey = `global:${input.periodSeconds}:${start}`;
     const userBudget = this.budgets.get(userKey) ?? {
-      spentUsd: 0,
-      reservedUsd: 0,
+      spentSubunits: 0,
+      reservedSubunits: 0,
     };
     const globalBudget = this.budgets.get(globalKey) ?? {
-      spentUsd: 0,
-      reservedUsd: 0,
+      spentSubunits: 0,
+      reservedSubunits: 0,
     };
     if (
-      userBudget.spentUsd + userBudget.reservedUsd + amountUsd >
-      input.userSpendLimitUsd
+      userBudget.spentSubunits + userBudget.reservedSubunits + amountSubunits >
+      userLimitSubunits
     ) {
       throw new StoreError("User spend limit exceeded", "spend-limit-exceeded");
     }
     if (
-      globalBudget.spentUsd + globalBudget.reservedUsd + amountUsd >
-      input.globalSpendLimitUsd
+      globalBudget.spentSubunits +
+        globalBudget.reservedSubunits +
+        amountSubunits >
+      globalLimitSubunits
     ) {
       throw new StoreError(
         "Global spend limit exceeded",
@@ -320,11 +355,11 @@ export class InMemoryUsageRepository
     });
     this.budgets.set(userKey, {
       ...userBudget,
-      reservedUsd: userBudget.reservedUsd + amountUsd,
+      reservedSubunits: userBudget.reservedSubunits + amountSubunits,
     });
     this.budgets.set(globalKey, {
       ...globalBudget,
-      reservedUsd: globalBudget.reservedUsd + amountUsd,
+      reservedSubunits: globalBudget.reservedSubunits + amountSubunits,
     });
     this.reservations.set(reservation.id, reservation);
     this.reservationKeys.set(input.idempotencyKey, reservation.id);
@@ -374,6 +409,27 @@ export class InMemoryUsageRepository
     }
     const userKey = `user:${reservation.ownerId}:${reservation.periodSeconds}:${reservation.periodStart}`;
     const globalKey = `global:${reservation.periodSeconds}:${reservation.periodStart}`;
+    const reservationSubunits = moneySubunits(reservation.reservedUsd);
+    const costSubunits =
+      estimate.status === "estimated" ? moneySubunits(estimate.costUsd!) : null;
+    const costIsKnown = costSubunits !== null;
+    const updatedReservation = UsageReservationSchema.parse({
+      ...reservation,
+      actualCostUsd: costIsKnown ? estimate.costUsd : null,
+      status: costIsKnown ? "settled" : "reserved",
+      updatedAt: input.at,
+    });
+    const updatedEntry = UsageLedgerEntrySchema.parse({
+      ...entry,
+      units: input.units,
+      outcome: input.outcome,
+      costUsd: costIsKnown ? estimate.costUsd : null,
+      costStatus: estimate.status,
+      reservationStatus: costIsKnown ? "settled" : "reserved",
+      errorCode: input.errorCode,
+      updatedAt: input.at,
+      settledAt: input.at,
+    });
     if (estimate.status === "estimated") {
       const affectedBudgets = [
         [userKey, "user"],
@@ -381,7 +437,7 @@ export class InMemoryUsageRepository
       ] as const;
       const currentBudgets = affectedBudgets.map(([key, owner]) => {
         const budget = this.budgets.get(key);
-        if (!budget || budget.reservedUsd < reservation.reservedUsd) {
+        if (!budget || budget.reservedSubunits < reservationSubunits) {
           throw new StoreError(
             `The ${owner} reservation no longer matches its budget`,
             "reservation-budget-conflict",
@@ -391,36 +447,14 @@ export class InMemoryUsageRepository
       });
       for (const { key, budget } of currentBudgets) {
         this.budgets.set(key, {
-          spentUsd: budget.spentUsd + estimate.costUsd!,
-          reservedUsd: budget.reservedUsd - reservation.reservedUsd,
+          spentSubunits: budget.spentSubunits + costSubunits!,
+          reservedSubunits: budget.reservedSubunits - reservationSubunits,
         });
       }
     }
 
-    const costIsKnown = estimate.status === "estimated";
-    this.reservations.set(
-      reservation.id,
-      UsageReservationSchema.parse({
-        ...reservation,
-        actualCostUsd: costIsKnown ? estimate.costUsd : null,
-        status: costIsKnown ? "settled" : "reserved",
-        updatedAt: input.at,
-      }),
-    );
-    this.ledger.set(
-      entry.id,
-      UsageLedgerEntrySchema.parse({
-        ...entry,
-        units: input.units,
-        outcome: input.outcome,
-        costUsd: costIsKnown ? estimate.costUsd : null,
-        costStatus: estimate.status,
-        reservationStatus: costIsKnown ? "settled" : "reserved",
-        errorCode: input.errorCode,
-        updatedAt: input.at,
-        settledAt: input.at,
-      }),
-    );
+    this.reservations.set(reservation.id, updatedReservation);
+    this.ledger.set(entry.id, updatedEntry);
   }
 
   async release(
@@ -446,7 +480,10 @@ export class InMemoryUsageRepository
     const globalKey = `global:${reservation.periodSeconds}:${reservation.periodStart}`;
     for (const key of [userKey, globalKey]) {
       const budget = this.budgets.get(key);
-      if (!budget || budget.reservedUsd < reservation.reservedUsd) {
+      if (
+        !budget ||
+        budget.reservedSubunits < moneySubunits(reservation.reservedUsd)
+      ) {
         throw new StoreError(
           "The usage reservation no longer matches its budget",
           "reservation-budget-conflict",
@@ -454,32 +491,29 @@ export class InMemoryUsageRepository
       }
     }
     const at = new Date().toISOString();
+    const updatedReservation = UsageReservationSchema.parse({
+      ...reservation,
+      status: "released",
+      updatedAt: at,
+    });
+    const updatedEntry = UsageLedgerEntrySchema.parse({
+      ...entry,
+      outcome: reason === "cancelled" ? "cancelled" : "failed",
+      reservationStatus: "released",
+      errorCode: reason,
+      updatedAt: at,
+      settledAt: at,
+    });
+    const reservationSubunits = moneySubunits(reservation.reservedUsd);
     for (const key of [userKey, globalKey]) {
       const budget = this.budgets.get(key)!;
       this.budgets.set(key, {
         ...budget,
-        reservedUsd: budget.reservedUsd - reservation.reservedUsd,
+        reservedSubunits: budget.reservedSubunits - reservationSubunits,
       });
     }
-    this.reservations.set(
-      reservation.id,
-      UsageReservationSchema.parse({
-        ...reservation,
-        status: "released",
-        updatedAt: at,
-      }),
-    );
-    this.ledger.set(
-      entry.id,
-      UsageLedgerEntrySchema.parse({
-        ...entry,
-        outcome: reason === "cancelled" ? "cancelled" : "failed",
-        reservationStatus: "released",
-        errorCode: reason,
-        updatedAt: at,
-        settledAt: at,
-      }),
-    );
+    this.reservations.set(reservation.id, updatedReservation);
+    this.ledger.set(entry.id, updatedEntry);
   }
 
   async list(filter: UsageLedgerFilter = {}): Promise<UsageLedgerEntry[]> {
@@ -503,16 +537,48 @@ export class InMemoryUsageRepository
       .filter(
         (entry) =>
           (!filter.ownerId || entry.ownerId === filter.ownerId) &&
+          (!filter.caseId || entry.caseId === filter.caseId) &&
           (!filter.runId || entry.runId === filter.runId) &&
           (from === undefined || Date.parse(entry.createdAt) >= from) &&
           (to === undefined || Date.parse(entry.createdAt) < to),
       )
       .sort(
         (left, right) =>
-          right.createdAt.localeCompare(left.createdAt) ||
+          Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
           right.attemptId.localeCompare(left.attemptId),
       )
       .slice(0, limit)
       .map((entry) => structuredClone(entry));
+  }
+
+  async recoverExpired(at: string): Promise<void> {
+    const atMs = Date.parse(at);
+    if (!Number.isFinite(atMs)) {
+      throw new StoreError(
+        "Invalid expiration recovery time",
+        "invalid-timestamp",
+      );
+    }
+    for (const [attemptId, entry] of this.ledger) {
+      if (entry.outcome !== "admitted") continue;
+      const reservation = this.reservations.get(`reservation:${attemptId}`);
+      if (
+        !reservation ||
+        reservation.status !== "reserved" ||
+        Date.parse(reservation.expiresAt) > atMs
+      ) {
+        continue;
+      }
+      this.ledger.set(
+        entry.id,
+        UsageLedgerEntrySchema.parse({
+          ...entry,
+          outcome: "unknown",
+          errorCode: "admission-expired",
+          updatedAt: new Date(atMs).toISOString(),
+          settledAt: new Date(atMs).toISOString(),
+        }),
+      );
+    }
   }
 }

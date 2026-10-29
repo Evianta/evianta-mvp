@@ -91,9 +91,17 @@ export function createAdmittedUsageAccounting(
     mode: "admitted",
     async admit(attempt) {
       const { caseId, runId } = attempt.context;
-      if (!caseId || !runId) {
+      const { leaseId, fencingToken } = attempt.context;
+      if (
+        !caseId ||
+        !runId ||
+        !leaseId ||
+        typeof fencingToken !== "number" ||
+        !Number.isSafeInteger(fencingToken) ||
+        fencingToken < 1
+      ) {
         throw new AdmissionRejectedError(
-          "Paid model calls require an owned case and run",
+          "Paid model calls require an owned case and an active fenced run lease",
         );
       }
       if (
@@ -136,6 +144,8 @@ export function createAdmittedUsageAccounting(
         ownerId: attempt.context.userId,
         caseId,
         runId,
+        leaseId,
+        fencingToken,
         taskId: attempt.context.taskId ?? null,
         provider: attempt.provider,
         model: attempt.model,

@@ -138,13 +138,27 @@ export class InMemoryStore {
         ? parse(RunRecordSchema, run)
         : null;
     };
-    this.usageAccounting = new InMemoryUsageRepository(
-      findOwnedCase,
-      findOwnedRun,
-    );
     this.runAdmissionRepository = new InMemoryRunAdmissionRepository(
       findOwnedCase,
       findOwnedRun,
+      (runId, caseId, ownerId, fencingToken, updates) => {
+        const run = this.runs.get(runId);
+        if (
+          !run ||
+          run.caseId !== caseId ||
+          run.ownerId !== ownerId ||
+          run.fencingToken !== fencingToken
+        ) {
+          return false;
+        }
+        this.runs.set(runId, RunRecordSchema.parse({ ...run, ...updates }));
+        return true;
+      },
+    );
+    this.usageAccounting = new InMemoryUsageRepository(
+      findOwnedCase,
+      findOwnedRun,
+      (request) => this.runAdmissionRepository.hasActiveLease(request),
     );
     this.repositories = {
       agentProfiles: {
@@ -473,7 +487,9 @@ export class InMemoryStore {
             throw new CaseNotOwnedError();
           }
           if (
-            ["queued", "running"].includes(record.status) &&
+            ["queued", "running", "waiting-for-input"].includes(
+              record.status,
+            ) &&
             [...this.runs.values()].some(
               (other) =>
                 other.ownerId === record.ownerId &&
@@ -697,6 +713,7 @@ export class InMemoryStore {
             .map((entry) => parse(UsageRecordSchema, entry.record));
           const ledger = await this.usageAccounting.list({
             ownerId: scope.ownerId,
+            caseId: scope.caseId,
             runId,
             limit: 5_000,
           });

@@ -187,6 +187,7 @@ export class MongoStore {
   >;
   readonly approvals: Collection<Stored<Approval>>;
   readonly runs: Collection<Stored<RunRecord> & { activeCaseKey?: string }>;
+  private readonly runAdmissions: Collection<Document>;
   readonly events: Collection<Stored<RunEvent>>;
   readonly eventCounters: Collection<Stored<{ id: string; sequence: number }>>;
   readonly usageAttempts: Collection<Stored<UsageRecord>>;
@@ -237,6 +238,7 @@ export class MongoStore {
     this.deliverables = db.collection("deliverables");
     this.approvals = db.collection("approvals");
     this.runs = db.collection("runs");
+    this.runAdmissions = db.collection("runAdmissions");
     this.events = db.collection("events");
     this.eventCounters = db.collection("eventCounters");
     this.usageAttempts = db.collection("usageAttempts");
@@ -356,6 +358,7 @@ export class MongoStore {
     );
     await this.usageAccounting.initialize();
     await this.runAdmissionRepository.initialize();
+    await this.backfillActiveRunKeys();
     await Promise.all([
       this.agents.createIndex({ role: 1 }, { unique: true }),
       this.users.createIndex({ emailKey: 1 }, { unique: true }),
@@ -905,39 +908,101 @@ export class MongoStore {
 
   async acquireRunLease(request: MongoRunLease): Promise<RunRecord | null> {
     const parsedRequest = MongoRunLeaseSchema.parse(request);
-    const result = await this.runs.findOneAndUpdate(
-      {
-        _id: parsedRequest.runId,
-        ownerId: parsedRequest.ownerId,
-        status: "running",
-        $or: [
-          { leaseExpiresAt: null },
+    const at = new Date(Date.parse(parsedRequest.at)).toISOString();
+    const expiresAt = new Date(
+      Date.parse(parsedRequest.expiresAt),
+    ).toISOString();
+    return this.withTransaction(async (session) => {
+      const current = decode(
+        RunRecordSchema,
+        await this.runs.findOne(
           {
-            $expr: {
-              $lte: [
-                {
-                  $dateFromString: {
-                    dateString: "$leaseExpiresAt",
-                    onError: null,
-                  },
+            _id: parsedRequest.runId,
+            ownerId: parsedRequest.ownerId,
+            status: "running",
+            $or: [
+              { leaseExpiresAt: null },
+              {
+                $expr: {
+                  $lte: [{ $toDate: "$leaseExpiresAt" }, new Date(at)],
                 },
-                new Date(parsedRequest.at),
-              ],
+              },
+            ],
+          },
+          { session },
+        ),
+      );
+      if (!current) return null;
+      const fencingToken = current.fencingToken + 1;
+      const update = await this.runs.updateOne(
+        {
+          _id: current.id,
+          ownerId: current.ownerId,
+          caseId: current.caseId,
+          fencingToken: current.fencingToken,
+          status: "running",
+        },
+        {
+          $set: {
+            leaseId: parsedRequest.leaseId,
+            leaseExpiresAt: expiresAt,
+            fencingToken,
+            updatedAt: at,
+          },
+        },
+        { session },
+      );
+      if (update.matchedCount !== 1) return null;
+
+      const activeAdmission = await this.runAdmissions.findOne(
+        {
+          runId: current.id,
+          ownerId: current.ownerId,
+          caseId: current.caseId,
+          state: "active",
+        },
+        { session },
+      );
+      if (activeAdmission) {
+        if (
+          activeAdmission.fencingToken !== current.fencingToken ||
+          activeAdmission.leaseId !== current.leaseId
+        ) {
+          throw new StoreError(
+            "Run and admission fencing state is inconsistent",
+            "stale-run-admission",
+          );
+        }
+        const admissionUpdate = await this.runAdmissions.updateOne(
+          {
+            _id: activeAdmission._id,
+            state: "active",
+            fencingToken: current.fencingToken,
+            leaseId: current.leaseId,
+          },
+          {
+            $set: {
+              leaseId: parsedRequest.leaseId,
+              leaseExpiresAt: expiresAt,
+              fencingToken,
+              updatedAt: at,
             },
           },
-        ],
-      },
-      {
-        $set: {
-          leaseId: parsedRequest.leaseId,
-          leaseExpiresAt: parsedRequest.expiresAt,
-          updatedAt: parsedRequest.at,
-        },
-        $inc: { fencingToken: 1 },
-      },
-      { returnDocument: "after" },
-    );
-    return decode(RunRecordSchema, result);
+          { session },
+        );
+        if (admissionUpdate.matchedCount !== 1) {
+          throw new StoreError(
+            "Run admission changed during lease acquisition",
+            "stale-run-admission",
+          );
+        }
+      }
+
+      return decode(
+        RunRecordSchema,
+        await this.runs.findOne({ _id: current.id }, { session }),
+      );
+    });
   }
 
   async deliverableFindOwnedById(
@@ -1184,6 +1249,7 @@ export class MongoStore {
       .toArray();
     const ledger = await this.usageAccounting.list({
       ownerId: scope.ownerId,
+      caseId: scope.caseId,
       runId,
       limit: 5_000,
     });
@@ -1210,6 +1276,44 @@ export class MongoStore {
         left.recordedAt.localeCompare(right.recordedAt) ||
         left.id.localeCompare(right.id),
     );
+  }
+
+  private async backfillActiveRunKeys(): Promise<void> {
+    const conflicts = await this.runs
+      .aggregate<{ _id: { ownerId: string; caseId: string }; count: number }>([
+        {
+          $match: {
+            status: { $in: ["queued", "running", "waiting-for-input"] },
+          },
+        },
+        {
+          $group: {
+            _id: { ownerId: "$ownerId", caseId: "$caseId" },
+            count: { $sum: 1 },
+          },
+        },
+        { $match: { count: { $gt: 1 } } },
+        { $limit: 1 },
+      ])
+      .toArray();
+    if (conflicts.length > 0) {
+      throw new StoreError(
+        "Cannot initialize active-run uniqueness: existing cases have conflicting active runs",
+        "active-run-migration-conflict",
+      );
+    }
+
+    const cursor = this.runs.find({
+      status: { $in: ["queued", "running", "waiting-for-input"] },
+    });
+    for await (const run of cursor) {
+      const activeKey = activeCaseKey(run.ownerId, run.caseId);
+      if (run.activeCaseKey === activeKey) continue;
+      await this.runs.updateOne(
+        { _id: run._id },
+        { $set: { activeCaseKey: activeKey } },
+      );
+    }
   }
 
   async usageInsert(

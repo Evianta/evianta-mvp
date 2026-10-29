@@ -1,5 +1,6 @@
 import {
   CaseSchema,
+  RunRecordSchema,
   type RunAdmissionLease,
   type RunAdmissionPort,
   type RunAdmissionRequest,
@@ -67,6 +68,10 @@ function parseLock(document: Document | null): RunLock | null {
   return RunLockSchema.parse(document);
 }
 
+function canonicalTimestamp(value: string): string {
+  return new Date(Date.parse(value)).toISOString();
+}
+
 export class MongoRunAdmissionRepository implements RunAdmissionPort {
   private readonly cases: Collection<Document>;
   private readonly runs: Collection<Document>;
@@ -88,9 +93,14 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
   }
 
   async acquire(input: RunAdmissionRequest): Promise<RunAdmissionLease> {
-    const request = RequestSchema.parse(input);
+    const parsedRequest = RequestSchema.parse(input);
+    const request = {
+      ...parsedRequest,
+      at: canonicalTimestamp(parsedRequest.at),
+      expiresAt: canonicalTimestamp(parsedRequest.expiresAt),
+    };
+    await this.reapExpired(request.at);
     return this.withTransaction(async (session) => {
-      await this.reapExpired(request.at, session);
       const parent = await this.cases.findOne(
         {
           _id: request.caseId,
@@ -106,18 +116,20 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
           "case-not-owned",
         );
       }
-      if (
-        !(await this.runs.findOne(
-          {
-            _id: request.runId,
-            ownerId: request.ownerId,
-            caseId: request.caseId,
-            status: { $in: ["queued", "running"] },
-            cancellationRequested: false,
-          },
-          { session },
-        ))
-      ) {
+      const runDocument = await this.runs.findOne(
+        {
+          _id: request.runId,
+          ownerId: request.ownerId,
+          caseId: request.caseId,
+          status: { $in: ["queued", "running"] },
+          cancellationRequested: false,
+        },
+        { session },
+      );
+      const run = runDocument
+        ? RunRecordSchema.parse(withoutId(runDocument))
+        : null;
+      if (!run) {
         throw new StoreError(
           "The run does not belong to this case and owner",
           "run-not-owned",
@@ -164,7 +176,34 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
         session,
       );
 
-      const fencingToken = (existing?.fencingToken ?? 0) + 1;
+      const fencingToken = run.fencingToken + 1;
+      const runUpdate = await this.runs.updateOne(
+        {
+          _id: request.runId,
+          ownerId: request.ownerId,
+          caseId: request.caseId,
+          fencingToken: run.fencingToken,
+          status: { $in: ["queued", "running"] },
+          cancellationRequested: false,
+        },
+        {
+          $set: {
+            status: "running",
+            inputRequired: false,
+            leaseId: request.leaseId,
+            leaseExpiresAt: request.expiresAt,
+            fencingToken,
+            updatedAt: request.at,
+          },
+        },
+        { session },
+      );
+      if (runUpdate.matchedCount !== 1) {
+        throw new StoreError(
+          "Run lease changed during admission",
+          "stale-run-admission",
+        );
+      }
       await this.locks.replaceOne(
         { _id: id },
         {
@@ -195,8 +234,9 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
     leaseId: string;
     fencingToken: number;
     at: string;
-  }): Promise<boolean> {
+  }): Promise<number | null> {
     const id = lockId(request.ownerId, request.caseId);
+    const at = canonicalTimestamp(request.at);
     return this.withTransaction(async (session) => {
       const lock = parseLock(
         await this.locks.findOne({ _id: id }, { session }),
@@ -208,10 +248,47 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
         lock.leaseId !== request.leaseId ||
         lock.fencingToken !== request.fencingToken ||
         !lock.leaseExpiresAt ||
-        Date.parse(lock.leaseExpiresAt) <= Date.parse(request.at)
+        Date.parse(lock.leaseExpiresAt) <= Date.parse(at)
       ) {
-        return false;
+        return null;
       }
+      const runDocument = await this.runs.findOne(
+        {
+          _id: request.runId,
+          ownerId: request.ownerId,
+          caseId: request.caseId,
+          status: "running",
+          fencingToken: request.fencingToken,
+          cancellationRequested: false,
+        },
+        { session },
+      );
+      const run = runDocument
+        ? RunRecordSchema.parse(withoutId(runDocument))
+        : null;
+      if (!run) return null;
+      const fencingToken = run.fencingToken + 1;
+      const runUpdate = await this.runs.updateOne(
+        {
+          _id: request.runId,
+          ownerId: request.ownerId,
+          caseId: request.caseId,
+          fencingToken: run.fencingToken,
+          status: "running",
+        },
+        {
+          $set: {
+            status: "waiting-for-input",
+            inputRequired: true,
+            leaseId: null,
+            leaseExpiresAt: null,
+            fencingToken,
+            updatedAt: at,
+          },
+        },
+        { session },
+      );
+      if (runUpdate.matchedCount !== 1) return null;
       const result = await this.locks.updateOne(
         {
           _id: id,
@@ -224,25 +301,36 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
             state: "waiting-for-input",
             leaseId: null,
             leaseExpiresAt: null,
-            updatedAt: request.at,
+            fencingToken,
+            updatedAt: at,
           },
         },
         { session },
       );
-      if (result.matchedCount !== 1) return false;
+      if (result.matchedCount !== 1) {
+        throw new StoreError(
+          "The run admission changed during the waiting transition",
+          "stale-run-admission",
+        );
+      }
       await this.decreaseCounter(counterId("user", request.ownerId), session);
       await this.decreaseCounter(counterId("global"), session);
-      return result.matchedCount === 1;
+      return result.matchedCount === 1 ? fencingToken : null;
     });
   }
 
   async resume(
     input: RunAdmissionRequest & { fencingToken: number },
   ): Promise<RunAdmissionLease> {
-    const request = RequestSchema.parse(input);
+    const parsedRequest = RequestSchema.parse(input);
+    const request = {
+      ...parsedRequest,
+      at: canonicalTimestamp(parsedRequest.at),
+      expiresAt: canonicalTimestamp(parsedRequest.expiresAt),
+    };
     const id = lockId(request.ownerId, request.caseId);
+    await this.reapExpired(request.at);
     return this.withTransaction(async (session) => {
-      await this.reapExpired(request.at, session);
       const lock = parseLock(
         await this.locks.findOne({ _id: id }, { session }),
       );
@@ -272,19 +360,21 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
           "case-not-owned",
         );
       }
-      if (
-        !(await this.runs.findOne(
-          {
-            _id: request.runId,
-            ownerId: request.ownerId,
-            caseId: request.caseId,
-            status: "waiting-for-input",
-            inputRequired: true,
-            cancellationRequested: false,
-          },
-          { session },
-        ))
-      ) {
+      const runDocument = await this.runs.findOne(
+        {
+          _id: request.runId,
+          ownerId: request.ownerId,
+          caseId: request.caseId,
+          status: "waiting-for-input",
+          inputRequired: true,
+          cancellationRequested: false,
+        },
+        { session },
+      );
+      const run = runDocument
+        ? RunRecordSchema.parse(withoutId(runDocument))
+        : null;
+      if (!run || run.fencingToken !== lock.fencingToken) {
         throw new StoreError(
           "The run does not belong to this case and owner",
           "run-not-owned",
@@ -302,7 +392,35 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
         request.globalLimit,
         session,
       );
-      const fencingToken = lock.fencingToken + 1;
+      const fencingToken = run.fencingToken + 1;
+      const runUpdate = await this.runs.updateOne(
+        {
+          _id: request.runId,
+          ownerId: request.ownerId,
+          caseId: request.caseId,
+          status: "waiting-for-input",
+          inputRequired: true,
+          fencingToken: run.fencingToken,
+          cancellationRequested: false,
+        },
+        {
+          $set: {
+            status: "running",
+            inputRequired: false,
+            leaseId: request.leaseId,
+            leaseExpiresAt: request.expiresAt,
+            fencingToken,
+            updatedAt: request.at,
+          },
+        },
+        { session },
+      );
+      if (runUpdate.matchedCount !== 1) {
+        throw new StoreError(
+          "Run lease changed during resume",
+          "stale-run-admission",
+        );
+      }
       const result = await this.locks.updateOne(
         {
           _id: id,
@@ -344,6 +462,7 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
     at: string;
   }): Promise<boolean> {
     const id = lockId(request.ownerId, request.caseId);
+    const at = canonicalTimestamp(request.at);
     return this.withTransaction(async (session) => {
       const lock = parseLock(
         await this.locks.findOne({ _id: id }, { session }),
@@ -358,6 +477,36 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
       ) {
         return false;
       }
+      const runDocument = await this.runs.findOne(
+        {
+          _id: request.runId,
+          ownerId: request.ownerId,
+          caseId: request.caseId,
+          fencingToken: request.fencingToken,
+        },
+        { session },
+      );
+      if (!runDocument) return false;
+      const run = RunRecordSchema.parse(withoutId(runDocument));
+      const nextFencingToken = run.fencingToken + 1;
+      const runUpdate = await this.runs.updateOne(
+        {
+          _id: request.runId,
+          ownerId: request.ownerId,
+          caseId: request.caseId,
+          fencingToken: run.fencingToken,
+        },
+        {
+          $set: {
+            leaseId: null,
+            leaseExpiresAt: null,
+            fencingToken: nextFencingToken,
+            updatedAt: at,
+          },
+        },
+        { session },
+      );
+      if (runUpdate.matchedCount !== 1) return false;
       const result = await this.locks.updateOne(
         {
           _id: id,
@@ -370,12 +519,18 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
             state: "released",
             leaseId: null,
             leaseExpiresAt: null,
-            updatedAt: request.at,
+            fencingToken: nextFencingToken,
+            updatedAt: at,
           },
         },
         { session },
       );
-      if (result.matchedCount !== 1) return false;
+      if (result.matchedCount !== 1) {
+        throw new StoreError(
+          "The run admission changed during release",
+          "stale-run-admission",
+        );
+      }
       if (lock.state === "active") {
         await this.decreaseCounter(counterId("user", request.ownerId), session);
         await this.decreaseCounter(counterId("global"), session);
@@ -384,11 +539,35 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
     });
   }
 
-  private async reapExpired(at: string, session: ClientSession): Promise<void> {
+  private async reapExpired(at: string): Promise<void> {
+    while (true) {
+      const reaped = await this.withTransaction((session) =>
+        this.reapExpiredBatch(at, session),
+      );
+      if (reaped < 1_000) return;
+    }
+  }
+
+  private async reapExpiredBatch(
+    at: string,
+    session: ClientSession,
+  ): Promise<number> {
     const expired = await this.locks
-      .find({ state: "active", leaseExpiresAt: { $lte: at } }, { session })
+      .find(
+        {
+          state: "active",
+          $expr: {
+            $lte: [
+              { $toDate: "$leaseExpiresAt" },
+              new Date(canonicalTimestamp(at)),
+            ],
+          },
+        },
+        { session },
+      )
       .limit(1_000)
       .toArray();
+    let reaped = 0;
     for (const document of expired) {
       const lock = parseLock(document);
       if (!lock) continue;
@@ -396,7 +575,7 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
         {
           _id: lock._id,
           state: "active",
-          leaseExpiresAt: { $lte: at },
+          leaseExpiresAt: lock.leaseExpiresAt,
           fencingToken: lock.fencingToken,
         },
         {
@@ -404,15 +583,46 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
             state: "released",
             leaseId: null,
             leaseExpiresAt: null,
+            fencingToken: lock.fencingToken + 1,
             updatedAt: at,
           },
         },
         { session },
       );
       if (result.matchedCount !== 1) continue;
+      const run = await this.runs.findOne(
+        {
+          _id: lock.runId,
+          ownerId: lock.ownerId,
+          caseId: lock.caseId,
+          fencingToken: lock.fencingToken,
+        },
+        { session },
+      );
+      if (run) {
+        await this.runs.updateOne(
+          {
+            _id: lock.runId,
+            ownerId: lock.ownerId,
+            caseId: lock.caseId,
+            fencingToken: lock.fencingToken,
+          },
+          {
+            $set: {
+              leaseId: null,
+              leaseExpiresAt: null,
+              fencingToken: lock.fencingToken + 1,
+              updatedAt: canonicalTimestamp(at),
+            },
+          },
+          { session },
+        );
+      }
       await this.decreaseCounter(counterId("user", lock.ownerId), session);
       await this.decreaseCounter(counterId("global"), session);
+      reaped += 1;
     }
+    return reaped;
   }
 
   private async ensureCounter(

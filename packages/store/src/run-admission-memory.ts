@@ -37,6 +37,13 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
       caseId: string,
       ownerId: string,
     ) => RunRecord | null,
+    private readonly updateRun: (
+      runId: string,
+      caseId: string,
+      ownerId: string,
+      fencingToken: number,
+      updates: Partial<RunRecord>,
+    ) => boolean,
   ) {}
 
   async acquire(request: RunAdmissionRequest): Promise<RunAdmissionLease> {
@@ -77,8 +84,29 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
       request.userLimit,
       request.globalLimit,
     );
+    const fencingToken = run.fencingToken + 1;
+    if (
+      !this.updateRun(
+        request.runId,
+        request.caseId,
+        request.ownerId,
+        run.fencingToken,
+        {
+          status: "running",
+          inputRequired: false,
+          leaseId: request.leaseId,
+          leaseExpiresAt: request.expiresAt,
+          fencingToken,
+          updatedAt: request.at,
+        },
+      )
+    ) {
+      throw new StoreError(
+        "Run lease changed during admission",
+        "stale-run-admission",
+      );
+    }
     this.increment(request.ownerId);
-    const fencingToken = (existing?.fencingToken ?? 0) + 1;
     this.locks.set(id, {
       ownerId: request.ownerId,
       caseId: request.caseId,
@@ -103,7 +131,7 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
     leaseId: string;
     fencingToken: number;
     at: string;
-  }): Promise<boolean> {
+  }): Promise<number | null> {
     const id = lockId(request.ownerId, request.caseId);
     const lock = this.locks.get(id);
     if (
@@ -115,17 +143,45 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
       !lock.leaseExpiresAt ||
       Date.parse(lock.leaseExpiresAt) <= Date.parse(request.at)
     ) {
-      return false;
+      return null;
+    }
+    const run = this.findOwnedRun(
+      request.runId,
+      request.caseId,
+      request.ownerId,
+    );
+    if (
+      !run ||
+      run.status !== "running" ||
+      run.fencingToken !== request.fencingToken ||
+      !this.updateRun(
+        request.runId,
+        request.caseId,
+        request.ownerId,
+        run.fencingToken,
+        {
+          status: "waiting-for-input",
+          inputRequired: true,
+          leaseId: null,
+          leaseExpiresAt: null,
+          fencingToken: run.fencingToken + 1,
+          updatedAt: request.at,
+        },
+      )
+    ) {
+      return null;
     }
     this.decrement(request.ownerId);
+    const fencingToken = lock.fencingToken + 1;
     this.locks.set(id, {
       ...lock,
       state: "waiting-for-input",
       leaseId: null,
       leaseExpiresAt: null,
+      fencingToken,
       updatedAt: request.at,
     });
-    return true;
+    return fencingToken;
   }
 
   async resume(
@@ -162,6 +218,7 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
       !run ||
       run.status !== "waiting-for-input" ||
       !run.inputRequired ||
+      run.fencingToken !== lock.fencingToken ||
       run.cancellationRequested
     ) {
       throw new StoreError(
@@ -174,8 +231,29 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
       request.userLimit,
       request.globalLimit,
     );
-    this.increment(request.ownerId);
     const fencingToken = lock.fencingToken + 1;
+    if (
+      !this.updateRun(
+        request.runId,
+        request.caseId,
+        request.ownerId,
+        run.fencingToken,
+        {
+          status: "running",
+          inputRequired: false,
+          leaseId: request.leaseId,
+          leaseExpiresAt: request.expiresAt,
+          fencingToken,
+          updatedAt: request.at,
+        },
+      )
+    ) {
+      throw new StoreError(
+        "Run lease changed during resume",
+        "stale-run-admission",
+      );
+    }
+    this.increment(request.ownerId);
     this.locks.set(id, {
       ...lock,
       state: "active",
@@ -211,11 +289,36 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
     ) {
       return false;
     }
+    const run = this.findOwnedRun(
+      request.runId,
+      request.caseId,
+      request.ownerId,
+    );
+    if (
+      !run ||
+      run.fencingToken !== request.fencingToken ||
+      !this.updateRun(
+        request.runId,
+        request.caseId,
+        request.ownerId,
+        run.fencingToken,
+        {
+          leaseId: null,
+          leaseExpiresAt: null,
+          fencingToken: run.fencingToken + 1,
+          updatedAt: request.at,
+        },
+      )
+    ) {
+      return false;
+    }
+    const fencingToken = run.fencingToken + 1;
     if (lock.state === "active") this.decrement(request.ownerId);
     this.locks.set(id, {
       ...lock,
       state: "released",
       leaseId: null,
+      fencingToken,
       leaseExpiresAt: null,
       updatedAt: request.at,
     });
@@ -288,14 +391,51 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
       ) {
         continue;
       }
+      const fencingToken = lock.fencingToken + 1;
+      const run = this.findOwnedRun(lock.runId, lock.caseId, lock.ownerId);
+      if (run && run.fencingToken === lock.fencingToken) {
+        this.updateRun(
+          lock.runId,
+          lock.caseId,
+          lock.ownerId,
+          run.fencingToken,
+          {
+            leaseId: null,
+            leaseExpiresAt: null,
+            fencingToken,
+            updatedAt: at,
+          },
+        );
+      }
       this.decrement(lock.ownerId);
       this.locks.set(id, {
         ...lock,
         state: "released",
         leaseId: null,
+        fencingToken,
         leaseExpiresAt: null,
         updatedAt: at,
       });
     }
+  }
+
+  hasActiveLease(input: {
+    ownerId: string;
+    caseId: string;
+    runId: string;
+    leaseId: string;
+    fencingToken: number;
+    at: string;
+  }): boolean {
+    const lock = this.locks.get(lockId(input.ownerId, input.caseId));
+    return Boolean(
+      lock &&
+        lock.state === "active" &&
+        lock.runId === input.runId &&
+        lock.leaseId === input.leaseId &&
+        lock.fencingToken === input.fencingToken &&
+        lock.leaseExpiresAt &&
+        Date.parse(lock.leaseExpiresAt) > Date.parse(input.at),
+    );
   }
 }
