@@ -17,6 +17,7 @@ import {
   type AuthConfiguration,
   type AuthenticationRepositories,
 } from "./auth.js";
+import { sendApiError } from "./errors.js";
 
 export interface ApiAppConfiguration extends AuthConfiguration {
   webOrigin: string;
@@ -40,6 +41,17 @@ export interface ApiAppOptions {
   }) => void;
 }
 
+export interface ApiApp {
+  app: Express;
+  service: AuthenticationService;
+  guards: {
+    requireAdmin: typeof requireAdmin;
+    requireCaseOwner: (
+      caseId?: (request: Request) => string | undefined,
+    ) => ReturnType<typeof requireCaseOwner>;
+  };
+}
+
 type RequestWithAuth = Request & {
   authContext?: Awaited<ReturnType<AuthenticationService["authenticate"]>>;
 };
@@ -49,9 +61,7 @@ function sendRateLimitError(response: Response, resetAt: string): void {
     "Retry-After",
     String(Math.max(1, Math.ceil((Date.parse(resetAt) - Date.now()) / 1000))),
   );
-  response.status(429).json({
-    error: { code: "rate_limited", message: "Too many requests" },
-  });
+  sendApiError(response, 429, "limit-reached", "Too many requests");
 }
 
 export function createAuthenticationMiddleware(
@@ -61,9 +71,7 @@ export function createAuthenticationMiddleware(
   return (request, response, next) => {
     const token = bearerToken(request);
     if (!token) {
-      response.status(401).json({
-        error: { code: "unauthorized", message: "Authentication required" },
-      });
+      sendApiError(response, 401, "unauthenticated", "Authentication required");
       return;
     }
 
@@ -89,12 +97,12 @@ export function createAuthenticationMiddleware(
       })
       .catch((error: unknown) => {
         if (error instanceof AuthenticationError) {
-          response.status(401).json({
-            error: {
-              code: "unauthorized",
-              message: "Authentication required",
-            },
-          });
+          sendApiError(
+            response,
+            401,
+            "unauthenticated",
+            "Authentication required",
+          );
           return;
         }
         next(error);
@@ -102,7 +110,7 @@ export function createAuthenticationMiddleware(
   };
 }
 
-export function createApiApp(options: ApiAppOptions) {
+export function createApiApp(options: ApiAppOptions): ApiApp {
   const { configuration, repositories } = options;
   const service = new AuthenticationService(
     repositories,
@@ -117,9 +125,7 @@ export function createApiApp(options: ApiAppOptions) {
     response.vary("Origin");
     const origin = request.get("origin");
     if (origin && origin !== configuration.webOrigin) {
-      response.status(403).json({
-        error: { code: "origin_not_allowed", message: "Origin not allowed" },
-      });
+      sendApiError(response, 403, "forbidden", "Origin not allowed");
       return;
     }
     if (origin) {
@@ -166,12 +172,12 @@ export function createApiApp(options: ApiAppOptions) {
         .exchangeAccessKey(request.body?.accessKey)
         .then((result) => {
           if (!result) {
-            response.status(401).json({
-              error: {
-                code: "invalid_credentials",
-                message: "Access key is invalid",
-              },
-            });
+            sendApiError(
+              response,
+              401,
+              "unauthenticated",
+              "Access key is invalid",
+            );
             return;
           }
           response.status(200).json(result);
@@ -193,9 +199,12 @@ export function createApiApp(options: ApiAppOptions) {
     (request, response, next) => {
       const context = (request as RequestWithAuth).authContext;
       if (!context) {
-        response.status(401).json({
-          error: { code: "unauthorized", message: "Authentication required" },
-        });
+        sendApiError(
+          response,
+          401,
+          "unauthenticated",
+          "Authentication required",
+        );
         return;
       }
       void service
@@ -207,9 +216,7 @@ export function createApiApp(options: ApiAppOptions) {
   app.get("/auth/me", authenticated, requirePrincipal, (request, response) => {
     const context = (request as RequestWithAuth).authContext;
     if (!context) {
-      response.status(401).json({
-        error: { code: "unauthorized", message: "Authentication required" },
-      });
+      sendApiError(response, 401, "unauthenticated", "Authentication required");
       return;
     }
     response.status(200).json({
@@ -231,9 +238,7 @@ export function createApiApp(options: ApiAppOptions) {
   });
 
   app.use((_request, response) => {
-    response.status(404).json({
-      error: { code: "not_found", message: "Resource not found" },
-    });
+    sendApiError(response, 404, "not-found", "Resource not found");
   });
 
   const errorHandler: ErrorRequestHandler = (
@@ -257,26 +262,23 @@ export function createApiApp(options: ApiAppOptions) {
         errorName,
       });
     }
-    response.status(status).json({
-      error: {
-        code:
-          status === 413
-            ? "request_too_large"
-            : status === 400
-              ? "invalid_request"
-              : error instanceof AuthenticationError
-                ? "unauthorized"
-                : "internal_error",
-        message:
-          status === 413
-            ? "Request body is too large"
-            : status === 400
-              ? "Request body is invalid"
-              : error instanceof AuthenticationError
-                ? "Authentication required"
-                : "An unexpected error occurred",
-      },
-    });
+    const code =
+      status === 413
+        ? "limit-reached"
+        : status === 400
+          ? "validation-failed"
+          : error instanceof AuthenticationError
+            ? "unauthenticated"
+            : "internal-error";
+    const message =
+      status === 413
+        ? "Request body is too large"
+        : status === 400
+          ? "Request body is invalid"
+          : error instanceof AuthenticationError
+            ? "Authentication required"
+            : "An unexpected error occurred";
+    sendApiError(response, status, code, message);
   };
   app.use(errorHandler);
 

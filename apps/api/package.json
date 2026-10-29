@@ -13,8 +13,8 @@
     "zod": "4.4.3"
   },
   "scripts": {
-    "start": "node dist/index.js",
-    "admin": "node dist/admin.js",
+    "start": "node --env-file-if-exists=../../.env dist/index.js",
+    "admin": "node --env-file-if-exists=../../.env dist/admin.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "build": "tsc -p tsconfig.build.json"

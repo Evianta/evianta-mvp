@@ -17,6 +17,7 @@ import {
 } from "@evianta/core";
 import type { NextFunction, Request, Response } from "express";
 import { z } from "zod";
+import { sendApiError } from "./errors.js";
 
 const TokenClaimsSchema = z
   .object({
@@ -328,9 +329,7 @@ export function createRateLimitKey(
 type RequestWithAuth = Request & { authContext?: AuthContext };
 
 function authFailure(response: Response): void {
-  response.status(401).json({
-    error: { code: "unauthorized", message: "Authentication required" },
-  });
+  sendApiError(response, 401, "unauthenticated", "Authentication required");
 }
 
 export function requirePrincipal(
@@ -356,9 +355,7 @@ export function requireAdmin(
     return;
   }
   if (context.principal.role !== "admin") {
-    response.status(403).json({
-      error: { code: "forbidden", message: "Administrator access required" },
-    });
+    sendApiError(response, 403, "forbidden", "Administrator access required");
     return;
   }
   next();
@@ -379,18 +376,14 @@ export function requireCaseOwner(
       return;
     }
     if (!id) {
-      response.status(404).json({
-        error: { code: "not_found", message: "Resource not found" },
-      });
+      sendApiError(response, 404, "not-found", "Resource not found");
       return;
     }
     void cases
       .findOwnedById(id, context.principal.userId)
       .then((record) => {
         if (!record) {
-          response.status(404).json({
-            error: { code: "not_found", message: "Resource not found" },
-          });
+          sendApiError(response, 404, "not-found", "Resource not found");
           return;
         }
         next();

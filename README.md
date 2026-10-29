@@ -65,6 +65,8 @@ Configure the required API values in `.env`, including a unique random
 `SESSION_RECHECK_SECONDS`. Keep `TRUST_PROXY_HOPS` at `0` unless the API is
 behind a known proxy chain. JWTs last 30 minutes and are checked against the
 current user, access key and revocable session on each request.
+The API start and admin commands load the repository-root `.env` automatically;
+environment variables already exported by the process take precedence.
 Clients must hold tokens in memory only and ask users to re-enter their key
 after a reload or token expiry; there are no refresh tokens.
 

@@ -1,4 +1,9 @@
-import { CaseSchema, syntheticWorkflowFixtures } from "@evianta/core";
+import {
+  ApiErrorSchema,
+  CaseSchema,
+  syntheticWorkflowFixtures,
+  type ApiError,
+} from "@evianta/core";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import express, { type Request } from "express";
@@ -56,6 +61,16 @@ async function listen(app: express.Express): Promise<{
         server.close((error) => (error ? reject(error) : resolve()));
       }),
   };
+}
+
+async function readApiError(
+  response: Response,
+  expectedCode: ApiError["error"]["code"],
+): Promise<ApiError> {
+  const error = ApiErrorSchema.parse(await response.json());
+  expect(error.error.code).toBe(expectedCode);
+  expect(error.error.requestId).not.toBeNull();
+  return error;
 }
 
 describe("API access-key authentication", () => {
@@ -180,14 +195,15 @@ describe("API access-key authentication", () => {
     const first = await exchange("not-an-access-key");
     const second = await exchange("not-an-access-key");
     expect(malformed.status).toBe(400);
-    expect(await malformed.json()).toEqual({
-      error: { code: "invalid_request", message: "Request body is invalid" },
-    });
+    expect(
+      (await readApiError(malformed, "validation-failed")).error.message,
+    ).toBe("Request body is invalid");
     expect(first.status).toBe(401);
-    expect(await first.json()).toEqual({
-      error: { code: "invalid_credentials", message: "Access key is invalid" },
-    });
+    expect((await readApiError(first, "unauthenticated")).error.message).toBe(
+      "Access key is invalid",
+    );
     expect(second.status).toBe(429);
+    await readApiError(second, "limit-reached");
   });
 
   it("rejects malformed signatures, logs out sessions, and rechecks key revocation", async () => {
@@ -200,7 +216,9 @@ describe("API access-key authentication", () => {
     if (!signature) throw new Error("Token signature is missing");
     segments[2] = `${signature[0] === "A" ? "B" : "A"}${signature.slice(1)}`;
 
-    expect((await me(segments.join("."))).status).toBe(401);
+    const invalidSignature = await me(segments.join("."));
+    expect(invalidSignature.status).toBe(401);
+    await readApiError(invalidSignature, "unauthenticated");
     expect((await me(accessToken)).status).toBe(200);
 
     const logout = await fetch(`${baseUrl}/auth/logout`, {
@@ -243,7 +261,18 @@ describe("API access-key authentication", () => {
       iat: nowSeconds,
       exp: nowSeconds + 1800,
     };
+    await repositories.sessions.insert({
+      id: claims.jti,
+      userId: claims.sub,
+      accessKeyId: accessKey.record.id,
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(claims.exp * 1000).toISOString(),
+      revokedAt: null,
+      createdAt: now.toISOString(),
+    });
     const validHeader = { alg: "HS256", typ: "JWT" };
+    const validToken = makeToken(validHeader, claims);
+    expect((await me(validToken)).status).toBe(200);
     const forgedTokens = [
       makeToken({ alg: "HS512", typ: "JWT" }, claims),
       makeToken(validHeader, { ...claims, iss: "another-issuer" }),
@@ -350,9 +379,11 @@ describe("API access-key authentication", () => {
     const guardServer = await listen(guardApp);
     try {
       const headers = { authorization: `Bearer ${accessToken}` };
-      expect(
-        (await fetch(`${guardServer.baseUrl}/admin`, { headers })).status,
-      ).toBe(403);
+      const forbidden = await fetch(`${guardServer.baseUrl}/admin`, {
+        headers,
+      });
+      expect(forbidden.status).toBe(403);
+      await readApiError(forbidden, "forbidden");
       const owned = await fetch(`${guardServer.baseUrl}/cases/owned-case`, {
         headers,
       });
@@ -365,7 +396,10 @@ describe("API access-key authentication", () => {
       expect(owned.status).toBe(200);
       expect(other.status).toBe(404);
       expect(missing.status).toBe(404);
-      expect(await other.json()).toEqual(await missing.json());
+      const otherError = await readApiError(other, "not-found");
+      const missingError = await readApiError(missing, "not-found");
+      expect(otherError.error.message).toBe(missingError.error.message);
+      expect(otherError.error.details).toEqual(missingError.error.details);
 
       const user = await repositories.users.findById("user-1");
       if (!user) throw new Error("Test user disappeared");
@@ -383,6 +417,7 @@ describe("API access-key authentication", () => {
       headers: { origin: "https://attacker.example.test" },
     });
     expect(response.status).toBe(403);
+    await readApiError(response, "forbidden");
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
     const allowed = await fetch(`${baseUrl}/healthz`, {
       headers: { origin: webOrigin },
@@ -415,6 +450,8 @@ describe("API access-key authentication", () => {
     const result = await limited.service.exchangeAccessKey(accessKey.plaintext);
     if (!result) throw new Error("Test access key was not accepted");
     expect((await me(result.accessToken)).status).toBe(200);
-    expect((await me(result.accessToken)).status).toBe(429);
+    const limitedResponse = await me(result.accessToken);
+    expect(limitedResponse.status).toBe(429);
+    await readApiError(limitedResponse, "limit-reached");
   });
 });
