@@ -985,7 +985,12 @@ export class MongoStore {
             ? {}
             : { cancellationRequested: false }),
           ...(parsed.leaseId !== null || parsed.status === "waiting-for-input"
-            ? { status: parsed.status }
+            ? {
+                status: parsed.status,
+                ...(parsed.status === "waiting-for-input"
+                  ? { inputRequired: parsed.inputRequired }
+                  : {}),
+              }
             : { status: { $ne: "waiting-for-input" as const } }),
         },
         { ...documentFor(parsed), ...active },

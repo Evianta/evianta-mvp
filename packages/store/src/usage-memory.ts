@@ -431,6 +431,8 @@ export class InMemoryUsageRepository
       ...reservation,
       actualCostUsd: costIsKnown ? estimate.costUsd : null,
       status: costIsKnown ? "settled" : "reserved",
+      // A recorded outcome no longer needs expiry recovery; funds stay held.
+      recoveryCheckedAt: reservation.recoveryCheckedAt ?? input.at,
       updatedAt: input.at,
     });
     const updatedEntry = UsageLedgerEntrySchema.parse({

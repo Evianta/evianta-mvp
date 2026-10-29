@@ -641,6 +641,8 @@ export class MongoUsageRepository
         ...reservation,
         actualCostUsd: costIsKnown ? estimate.costUsd : null,
         status: costIsKnown ? "settled" : "reserved",
+        // A recorded outcome no longer needs expiry recovery; funds stay held.
+        recoveryCheckedAt: reservation.recoveryCheckedAt ?? settlement.at,
         updatedAt: settlement.at,
       });
       const updatedEntry = UsageLedgerEntrySchema.parse({

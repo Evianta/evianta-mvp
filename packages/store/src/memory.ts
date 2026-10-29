@@ -544,6 +544,8 @@ export class InMemoryStore {
               record.status !== current.status) ||
             (record.status === "waiting-for-input" &&
               current.status !== "waiting-for-input") ||
+            (current.status === "waiting-for-input" &&
+              record.inputRequired !== current.inputRequired) ||
             (current.cancellationRequested && !record.cancellationRequested)
           ) {
             return false;

@@ -1102,6 +1102,69 @@ function repositoryContract(
       );
     });
 
+    it("skips expiry recovery for attempts that already recorded an unknown outcome", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.usagePrices.insert(makeUsagePrice());
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2027-01-15T00:15:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      });
+      const recorded = await repositories.usageAdmission.reserve({
+        ...makeReservationRequest("attempt-a-recorded", 0.1),
+        expiresAt: "2026-01-15T00:01:00.000Z",
+      });
+      await repositories.usageAdmission.reserve({
+        ...makeReservationRequest("attempt-b-abandoned", 0.1),
+        expiresAt: "2026-01-15T00:01:00.000Z",
+      });
+      await repositories.usageAdmission.settle({
+        reservation: recorded,
+        outcome: "unknown",
+        units: {
+          input: null,
+          output: null,
+          total: null,
+          reasoning: null,
+          cacheRead: null,
+          cacheWrite: null,
+          search: null,
+        },
+        errorCode: "provider-cancelled",
+        at: "2026-01-15T00:00:30.000Z",
+      });
+
+      expect(
+        await repositories.usageLedger.recoverExpired(
+          "2026-01-15T00:02:00.000Z",
+          1,
+        ),
+      ).toBe(1);
+      const entries = await repositories.usageLedger.list();
+      expect(
+        entries.find((entry) => entry.attemptId === "attempt-b-abandoned"),
+      ).toMatchObject({ outcome: "unknown", errorCode: "admission-expired" });
+      expect(
+        entries.find((entry) => entry.attemptId === "attempt-a-recorded"),
+      ).toMatchObject({
+        outcome: "unknown",
+        errorCode: "provider-cancelled",
+        reservationStatus: "reserved",
+      });
+      expect(
+        await repositories.usageLedger.recoverExpired(
+          "2026-01-15T00:02:00.000Z",
+          1,
+        ),
+      ).toBe(0);
+    });
+
     it("recovers expired admitted attempts as unknown exposure without releasing funds", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
@@ -1368,6 +1431,49 @@ function repositoryContract(
       expect(
         await repositories.runs.findOwnedById("run-1", "owner-1"),
       ).toMatchObject({ status: "running", cancellationRequested: true });
+    });
+
+    it("preserves the input requirement of a waiting run", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const lease = await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:15:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      expect(
+        await repositories.runAdmission.waitForInput({
+          ownerId: "owner-1",
+          caseId: "case-1",
+          runId: "run-1",
+          leaseId: lease.leaseId,
+          fencingToken: lease.fencingToken,
+          at: "2026-01-15T00:01:00.000Z",
+        }),
+      ).not.toBeNull();
+      const waiting = await repositories.runs.findOwnedById("run-1", "owner-1");
+      if (!waiting) throw new Error("Run disappeared while waiting");
+
+      expect(
+        await repositories.runs.updateOwned(
+          { ...waiting, inputRequired: false },
+          "owner-1",
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.runs.updateOwned(
+          { ...waiting, updatedAt: "2026-01-15T00:02:00.000Z" },
+          "owner-1",
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({ status: "waiting-for-input", inputRequired: true });
     });
 
     it("keeps lease and admission transitions out of generic run updates", async () => {
