@@ -493,6 +493,27 @@ export class InMemoryStore {
           if (this.tasks.has(record.id)) duplicate();
           this.tasks.set(record.id, record);
         },
+        replaceOwned: async (task, scope, options) => {
+          const record = parse(TaskSchema, task);
+          if (record.caseId !== scope.caseId || !this.ownsCase(scope)) {
+            return false;
+          }
+          const current = this.tasks.get(record.id);
+          const run = this.runs.get(record.runId);
+          if (
+            !current ||
+            current.runId !== record.runId ||
+            current.caseId !== record.caseId ||
+            !run ||
+            run.ownerId !== scope.ownerId ||
+            run.caseId !== scope.caseId ||
+            (options !== undefined && run.fencingToken !== options.fencingToken)
+          ) {
+            return false;
+          }
+          this.tasks.set(record.id, record);
+          return true;
+        },
       },
       runs: {
         findOwnedById: async (id, ownerId) => {
@@ -568,6 +589,24 @@ export class InMemoryStore {
           }
           this.runs.set(record.id, record);
           return true;
+        },
+        listClaimable: async (at, limit = 50) => {
+          const atMs = Date.parse(TimestampSchema.parse(at));
+          return [...this.runs.values()]
+            .filter(
+              (run) =>
+                ["queued", "running"].includes(run.status) &&
+                !run.cancellationRequested &&
+                (run.leaseExpiresAt === null ||
+                  Date.parse(run.leaseExpiresAt) <= atMs),
+            )
+            .sort(
+              (a, b) =>
+                Date.parse(a.createdAt) - Date.parse(b.createdAt) ||
+                a.id.localeCompare(b.id),
+            )
+            .slice(0, limit)
+            .map((run) => parse(RunRecordSchema, run));
         },
       },
       deliverables: {

@@ -317,11 +317,14 @@ export class MongoStore {
       tasks: {
         listForRun: (id, scope) => this.taskListForRun(id, scope),
         insert: (record, scope) => this.taskInsert(record, scope),
+        replaceOwned: (record, scope, options) =>
+          this.taskReplaceOwned(record, scope, options),
       },
       runs: {
         findOwnedById: (id, ownerId) => this.runFindOwnedById(id, ownerId),
         insert: (record) => this.runInsert(record),
         updateOwned: (record, ownerId) => this.runUpdateOwned(record, ownerId),
+        listClaimable: (at, limit) => this.runListClaimable(at, limit),
       },
       deliverables: {
         findOwnedById: (id, scope) => this.deliverableFindOwnedById(id, scope),
@@ -930,6 +933,67 @@ export class MongoStore {
       ...parsed,
       ownerId: scope.ownerId,
     });
+  }
+
+  async taskReplaceOwned(
+    task: Task,
+    scope: OwnerScope,
+    options?: { fencingToken: number },
+  ): Promise<boolean> {
+    const parsed = TaskSchema.parse(task);
+    if (parsed.caseId !== scope.caseId || !(await this.ownsCase(scope))) {
+      return false;
+    }
+    return this.withTransaction(async (session) => {
+      const run = await this.runs.findOne(
+        {
+          _id: parsed.runId,
+          ownerId: scope.ownerId,
+          caseId: scope.caseId,
+          ...(options ? { fencingToken: options.fencingToken } : {}),
+        },
+        { session },
+      );
+      if (!run) return false;
+      if (options) {
+        // Touch the fenced run so a concurrent lease change conflicts with
+        // this transaction instead of letting a stale worker commit.
+        await this.runs.updateOne(
+          { _id: parsed.runId, fencingToken: options.fencingToken },
+          { $inc: { taskWrites: 1 } },
+          { session },
+        );
+      }
+      const result = await this.tasks.replaceOne(
+        {
+          _id: parsed.id,
+          runId: parsed.runId,
+          caseId: scope.caseId,
+          ownerId: scope.ownerId,
+        },
+        { ...documentFor(parsed), ownerId: scope.ownerId },
+        { session },
+      );
+      return result.matchedCount === 1;
+    });
+  }
+
+  async runListClaimable(at: string, limit = 50): Promise<RunRecord[]> {
+    const atMs = Date.parse(TimestampSchema.parse(at));
+    const records = await this.runs
+      .find({
+        status: { $in: ["queued", "running"] },
+        cancellationRequested: false,
+      })
+      .sort({ createdAt: 1, _id: 1 })
+      .toArray();
+    return records
+      .map((record) => decode(RunRecordSchema, record)!)
+      .filter(
+        (run) =>
+          run.leaseExpiresAt === null || Date.parse(run.leaseExpiresAt) <= atMs,
+      )
+      .slice(0, limit);
   }
 
   async runFindOwnedById(

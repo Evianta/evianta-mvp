@@ -697,6 +697,88 @@ function repositoryContract(
       ).toHaveLength(1);
     });
 
+    it("replaces tasks only within their run and current lease generation", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const task = {
+        id: "task-1",
+        caseId: "case-1",
+        runId: "run-1",
+        role: "analyst",
+        dependencyIds: [],
+        status: "pending" as const,
+        attemptCount: 0,
+        lastError: null,
+        usage: usageSummary,
+      };
+      await repositories.tasks.insert(task, ownerScope);
+      const running = { ...task, status: "running" as const, attemptCount: 1 };
+
+      expect(
+        await repositories.tasks.replaceOwned(running, ownerScope, {
+          fencingToken: 7,
+        }),
+      ).toBe(false);
+      expect(
+        await repositories.tasks.replaceOwned(running, {
+          ownerId: "owner-2",
+          caseId: "case-1",
+        }),
+      ).toBe(false);
+      expect(
+        await repositories.tasks.replaceOwned(
+          { ...running, id: "missing" },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.tasks.replaceOwned(running, ownerScope, {
+          fencingToken: 0,
+        }),
+      ).toBe(true);
+      expect(
+        await repositories.tasks.listForRun("run-1", ownerScope),
+      ).toMatchObject([{ id: "task-1", status: "running", attemptCount: 1 }]);
+    });
+
+    it("lists queued and abandoned runs as claimable", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.cases.insert(makeCase("case-2", "owner-1"));
+      await repositories.cases.insert(makeCase("case-3", "owner-1"));
+      await repositories.runs.insert({
+        ...makeRun("run-queued", "case-1", "owner-1"),
+        status: "queued",
+      });
+      await repositories.runs.insert({
+        ...makeRun("run-done", "case-2", "owner-1"),
+        status: "completed",
+      });
+      await repositories.runs.insert({
+        ...makeRun("run-leased", "case-3", "owner-1"),
+        status: "queued",
+        createdAt: "2026-01-16T00:00:00.000Z",
+      });
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-3",
+        runId: "run-leased",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:10:00.000Z",
+        userLimit: 5,
+        globalLimit: 5,
+      });
+
+      expect(
+        (await repositories.runs.listClaimable(timestamp)).map((run) => run.id),
+      ).toEqual(["run-queued"]);
+      expect(
+        (await repositories.runs.listClaimable("2026-01-15T00:20:00.000Z")).map(
+          (run) => run.id,
+        ),
+      ).toEqual(["run-queued", "run-leased"]);
+    });
+
     it("uses distinct cache identities for null and the string none", async () => {
       const store = createInMemoryStore();
       const { repositories } = store;
