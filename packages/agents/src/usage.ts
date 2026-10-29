@@ -44,7 +44,6 @@ export function summarizeUsage(
       reservedUsd += entry.reservedUsd;
     }
     if (entry.reservationStatus === "released") continue;
-    if (entry.outcome === "admitted") continue;
     inputUnits = addUnits(inputUnits, entry.units.input);
     outputUnits = addUnits(outputUnits, entry.units.output);
     totalUnits = addUnits(totalUnits, entry.units.total);

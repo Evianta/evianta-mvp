@@ -67,6 +67,16 @@ export const DocumentSliceSchema = z.object({
   documentId: z.string(),
   name: z.string(),
   pages: z.array(z.object({ page: z.number().int(), text: z.string() })),
+  tables: z
+    .array(
+      z.object({
+        tableId: z.string(),
+        sheet: z.string().nullable(),
+        cellRange: z.string().nullable(),
+        text: z.string(),
+      }),
+    )
+    .optional(),
   truncated: z.boolean(),
 });
 

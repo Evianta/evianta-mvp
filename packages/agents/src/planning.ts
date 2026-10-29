@@ -149,6 +149,37 @@ export function validateAdaptedPlan(
     throw new PlanValidationError("Coordinator plan is invalid", issues);
   }
   validateTaskGraph(asGraph(tasks));
+  const ancestors = (
+    key: string,
+    graph: readonly { key: string; dependsOn: string[] }[],
+  ) => {
+    const seen = new Set<string>();
+    const pending = [
+      ...(graph.find((task) => task.key === key)?.dependsOn ?? []),
+    ];
+    while (pending.length) {
+      const dependency = pending.pop()!;
+      if (seen.has(dependency)) continue;
+      seen.add(dependency);
+      pending.push(
+        ...(graph.find((task) => task.key === dependency)?.dependsOn ?? []),
+      );
+    }
+    return seen;
+  };
+  for (const required of reference.tasks.filter((task) => task.required)) {
+    const actual = ancestors(required.key, tasks);
+    for (const dependency of ancestors(required.key, reference.tasks)) {
+      if (
+        reference.tasks.find((task) => task.key === dependency)?.required &&
+        !actual.has(dependency)
+      ) {
+        throw new PlanValidationError(
+          `Required dependency ${dependency} must precede ${required.key}`,
+        );
+      }
+    }
+  }
   return tasks;
 }
 
@@ -231,6 +262,7 @@ export function toTaskRecords(
     caseId,
     runId,
     role: task.role,
+    instructions: task.instructions,
     dependencyIds: task.dependsOn.map((key) => taskIdFor(runId, key)),
     status: "pending",
     attemptCount: 0,

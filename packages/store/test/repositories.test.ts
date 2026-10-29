@@ -741,6 +741,175 @@ function repositoryContract(
       ).toMatchObject([{ id: "task-1", status: "running", attemptCount: 1 }]);
     });
 
+    it("publishes retry runs and complete plans atomically", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const run = makeRun("run-atomic", "case-1", "owner-1");
+      const task = {
+        id: "run-atomic:a",
+        caseId: "case-1",
+        runId: run.id,
+        role: "analyst",
+        instructions: "Keep these adapted instructions",
+        dependencyIds: [],
+        status: "pending" as const,
+        attemptCount: 0,
+        lastError: null,
+        usage: usageSummary,
+      };
+      await expect(
+        repositories.runs.insert(run, [task, { ...task }]),
+      ).rejects.toThrow();
+      expect(
+        await repositories.runs.findOwnedById(run.id, "owner-1"),
+      ).toBeNull();
+      await repositories.runs.insert(run, [task]);
+      expect(
+        await repositories.tasks.listForRun(run.id, ownerScope),
+      ).toMatchObject([{ id: task.id, instructions: task.instructions }]);
+      const next = { ...task, id: "run-atomic:b" };
+      await expect(
+        repositories.tasks.insertPlan([next, task], ownerScope, {
+          fencingToken: 0,
+        }),
+      ).rejects.toThrow();
+      expect(
+        await repositories.tasks.listForRun(run.id, ownerScope),
+      ).toHaveLength(1);
+      await expect(
+        repositories.tasks.insertPlan([next], ownerScope, { fencingToken: 5 }),
+      ).rejects.toMatchObject({ code: "stale-fencing-token" });
+      await repositories.tasks.insertPlan([next], ownerScope, {
+        fencingToken: 0,
+      });
+      expect(
+        await repositories.tasks.listForRun(run.id, ownerScope),
+      ).toHaveLength(2);
+    });
+
+    it("fences the entire result commit and writes it idempotently", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const run = makeRun("run-1", "case-1", "owner-1");
+      const task = {
+        id: "task-atomic",
+        caseId: "case-1",
+        runId: run.id,
+        role: "analyst",
+        dependencyIds: [],
+        status: "running" as const,
+        attemptCount: 1,
+        lastError: null,
+        usage: usageSummary,
+      };
+      await repositories.runs.insert(run, [task]);
+      const finding = {
+        id: "atomic-finding",
+        caseId: "case-1",
+        title: "Test",
+        description: "Test",
+        severity: "low" as const,
+        confidence: 1,
+        evidenceIds: [],
+        assumptions: [],
+        openQuestions: [],
+        createdAt: timestamp,
+      };
+      const result = {
+        evidence: [],
+        findings: [finding],
+        deliverable: makeDeliverable("atomic-deliverable", 1),
+      };
+      expect(
+        await repositories.tasks.commitResult(task, result, ownerScope, {
+          fencingToken: 5,
+        }),
+      ).toBe(false);
+      expect(await repositories.findings.listForCase(ownerScope)).toEqual([]);
+      expect(
+        await repositories.deliverables.findOwnedById(
+          "atomic-deliverable",
+          ownerScope,
+        ),
+      ).toBeNull();
+      await expect(
+        repositories.tasks.commitResult(
+          task,
+          {
+            ...result,
+            findings: [
+              finding,
+              { ...finding, id: "wrong-scope", caseId: "case-2" },
+            ],
+          },
+          ownerScope,
+          { fencingToken: 0 },
+        ),
+      ).rejects.toMatchObject({ code: "case-not-owned" });
+      expect(await repositories.findings.listForCase(ownerScope)).toEqual([]);
+      expect(
+        await repositories.tasks.commitResult(task, result, ownerScope, {
+          fencingToken: 0,
+        }),
+      ).toBe(true);
+      expect(await repositories.findings.listForCase(ownerScope)).toHaveLength(
+        1,
+      );
+      expect(
+        await repositories.tasks.commitResult(task, result, ownerScope, {
+          fencingToken: 0,
+        }),
+      ).toBe(true);
+      expect(await repositories.findings.listForCase(ownerScope)).toHaveLength(
+        1,
+      );
+    });
+
+    it("atomically honors cancellation during terminal release", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const lease = await repositories.runAdmission.acquire({
+        ...ownerScope,
+        runId: "run-1",
+        leaseId: "terminal-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:10:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      const current = (await repositories.runs.findOwnedById(
+        "run-1",
+        "owner-1",
+      ))!;
+      expect(
+        await repositories.runs.updateOwned(
+          { ...current, cancellationRequested: true },
+          "owner-1",
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.runAdmission.release({
+          ...ownerScope,
+          runId: "run-1",
+          ...lease,
+          at: timestamp,
+          terminal: { status: "completed", usage: usageSummary },
+        }),
+      ).toBe(true);
+      expect(
+        await repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({
+        status: "cancelled",
+        leaseId: null,
+        terminalEvent: { pending: true },
+      });
+      expect(
+        (await repositories.runs.listClaimable(timestamp)).map((run) => run.id),
+      ).toEqual(["run-1"]);
+      await repositories.runs.insert({
+        ...makeRun("run-2", "case-1", "owner-1"),
+        status: "queued",
+      });
+    });
+
     it("lists queued and abandoned runs as claimable", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.cases.insert(makeCase("case-2", "owner-1"));
@@ -771,6 +940,29 @@ function repositoryContract(
 
       expect(
         (await repositories.runs.listClaimable(timestamp)).map((run) => run.id),
+      ).toEqual(["run-queued"]);
+      expect(
+        (await repositories.runs.listClaimable("2026-01-15T00:20:00.000Z")).map(
+          (run) => run.id,
+        ),
+      ).toEqual(["run-queued", "run-leased"]);
+      const live = (await repositories.runs.findOwnedById(
+        "run-leased",
+        "owner-1",
+      ))!;
+      expect(
+        await repositories.runs.updateOwned(
+          { ...live, cancellationRequested: true },
+          "owner-1",
+        ),
+      ).toBe(true);
+      expect(
+        (await repositories.runs.listClaimable(timestamp)).map((run) => run.id),
+      ).toEqual(["run-queued"]);
+      expect(
+        (
+          await repositories.runs.listClaimable("2026-01-15T00:20:00.000Z", 1)
+        ).map((run) => run.id),
       ).toEqual(["run-queued"]);
       expect(
         (await repositories.runs.listClaimable("2026-01-15T00:20:00.000Z")).map(
@@ -1660,6 +1852,12 @@ describe("in-memory repositories", () => {
     expect(
       await repositories.usage.listForRun("run-1", ownerScope),
     ).toHaveLength(5_001);
+    expect(
+      await repositories.usageLedger.listForCase("owner-1", "case-1"),
+    ).toHaveLength(5_001);
+    expect(
+      await repositories.usageLedger.listForCase("owner-2", "case-1"),
+    ).toEqual([]);
   });
 });
 
@@ -2237,6 +2435,12 @@ describe("MongoDB repositories", () => {
 
       expect(
         await harness.store.repositories.usage.listForRun("run-1", ownerScope),
+      ).toHaveLength(5_002);
+      expect(
+        await harness.store.repositories.usageLedger.listForCase(
+          "owner-1",
+          "case-1",
+        ),
       ).toHaveLength(5_002);
     } finally {
       await harness.client.db(harness.dbName).dropDatabase();

@@ -32,7 +32,7 @@ cloud services or model providers.
 | `packages/env`    | Server-side environment and storage configuration validation      |
 | `packages/store`  | MongoDB repositories and private document storage adapters        |
 | `packages/ai`     | Muse/mock provider adapters, structured output and usage boundary |
-| `packages/agents` | Agent boundary; orchestration comes later                         |
+| `packages/agents` | LangGraph planning, specialist execution, review and run recovery |
 | `apps/api`        | Express API, access-key authentication and admin CLI              |
 | `apps/web`        | Web application boundary; UI features come in the web work pack   |
 
@@ -60,6 +60,20 @@ USD per million tokens, with an optional per-request web-search rate.
 `UsageAdminService` exposes bounded, administrator-only attempt summaries.
 `runAdmission` provides fenced user/global concurrency admission and retains a
 case lock while a run waits for input.
+
+Orchestration publishes each full task plan atomically, including adapted
+instructions, and copies retry runs with their tasks in one transaction.
+Findings, evidence and deliverable sections are committed under the run's
+fencing token. Cancellation and terminal status are resolved together when
+admission is released; cancelling a waiting run needs no execution slot.
+Workers recover abandoned cancellations and replay pending terminal events.
+
+Human-input rounds have separate question IDs and durable consumed keys.
+Resumed calls count as new attempts and retain their accepted input through a
+worker restart. Interrupted admitted attempts remain unknown-cost exposure.
+Case usage includes the complete case ledger, not the administrator's bounded
+query page. Specialist document slices include bounded table text as well as
+PDF pages.
 
 ## Environment and generated files
 

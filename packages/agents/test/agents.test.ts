@@ -5,6 +5,7 @@ import {
   PlanValidationError,
   compileTaskGraph,
   createTrivialReferencePlan,
+  createDocumentAccess,
   runDeterministicChecks,
   seedAgentDirectoryAsync,
   validateAdaptedPlan,
@@ -12,7 +13,13 @@ import {
   type ReferencePlan,
   type VerifiableFinding,
 } from "../src/index.js";
-import { newMemoryStore } from "./harness.js";
+import {
+  newMemoryStore,
+  seedAsync,
+  CASE_ID,
+  OWNER,
+  DOCUMENT_ID,
+} from "./harness.js";
 
 function finding(
   overrides: Partial<VerifiableFinding> = {},
@@ -141,6 +148,61 @@ describe("task graph validation", () => {
 });
 
 describe("plans", () => {
+  it("keeps required review dependencies, including transitive ancestors", () => {
+    const plan: ReferencePlan = {
+      ...createTrivialReferencePlan("tax-notice"),
+      tasks: [
+        {
+          key: "analysis",
+          role: "generic-analyst",
+          title: "Analysis",
+          dependsOn: [],
+          required: true,
+          instructions: "Analyze",
+        },
+        {
+          key: "review",
+          role: "independent-reviewer",
+          title: "Review",
+          dependsOn: ["analysis"],
+          required: true,
+          instructions: "Review findings",
+        },
+      ],
+    };
+    const task = (key: string, role: string, dependsOn: string[]) => ({
+      key,
+      assignedRole: role,
+      dependsOn,
+      instructions: key,
+    });
+    const available = new Set(["generic-analyst", "independent-reviewer"]);
+    expect(() =>
+      validateAdaptedPlan(
+        plan,
+        {
+          tasks: [
+            task("analysis", "generic-analyst", []),
+            task("review", "independent-reviewer", []),
+          ],
+        },
+        available,
+      ),
+    ).toThrow(PlanValidationError);
+    expect(
+      validateAdaptedPlan(
+        plan,
+        {
+          tasks: [
+            task("analysis", "generic-analyst", []),
+            task("bridge", "generic-analyst", ["analysis"]),
+            task("review", "independent-reviewer", ["bridge"]),
+          ],
+        },
+        available,
+      ),
+    ).toHaveLength(3);
+  });
   const reference: ReferencePlan = {
     ...createTrivialReferencePlan("tax-notice"),
     tasks: [
@@ -188,6 +250,49 @@ describe("plans", () => {
         instructions: "Go.",
       },
     ]);
+  });
+
+  describe("tabular document access", () => {
+    it("includes tables without pages and caps their text", async () => {
+      const store = newMemoryStore();
+      await seedAsync(store.repositories);
+      const scope = { ownerId: OWNER, caseId: CASE_ID };
+      await store.repositories.extractions.saveForDocument(
+        {
+          documentId: DOCUMENT_ID,
+          kind: "tabular",
+          method: "parse",
+          confidence: 1,
+          pages: [],
+          tables: [
+            {
+              id: "ledger-table",
+              pageIndex: null,
+              headers: ["Name", "Amount"],
+              rows: [
+                ["Acme", "100"],
+                ["Beta", "200"],
+              ],
+            },
+          ],
+          warnings: [],
+          cacheIdentity: {
+            contentHash: "content-hash",
+            extractorVersion: "tables",
+            modelVersion: null,
+          },
+        },
+        scope,
+      );
+      const access = createDocumentAccess(store.repositories, scope);
+      const slice = await access.sliceAsync(DOCUMENT_ID);
+      expect(slice?.pages).toEqual([]);
+      expect(slice?.tables?.[0]).toMatchObject({ tableId: "ledger-table" });
+      expect(slice?.tables?.[0].text).toContain("Acme");
+      const short = await access.sliceAsync(DOCUMENT_ID, { maxChars: 20 });
+      expect(short?.truncated).toBe(true);
+      expect(short?.tables?.[0].text).toHaveLength(20);
+    });
   });
 
   it("rejects missing required tasks, unknown roles and cycles", () => {

@@ -184,7 +184,6 @@ interface Execution {
   lost: boolean;
   limitReached: boolean;
   events: EventSink;
-  writeLock: Mutex;
   documents: DocumentAccess;
   deliverableId: string;
 }
@@ -249,10 +248,6 @@ class EventSink {
     );
     return events.reduce((max, event) => Math.max(max, event.sequence), 0) + 1;
   }
-}
-
-function ignoreDuplicate(error: unknown): void {
-  if (errorCode(error) !== "duplicate-record") throw error;
 }
 
 function sanitizeError(
@@ -340,9 +335,12 @@ export class Orchestrator {
     return record;
   }
 
-  private async insertRunAsync(run: RunRecord): Promise<RunRecord> {
+  private async insertRunAsync(
+    run: RunRecord,
+    tasks?: Task[],
+  ): Promise<RunRecord> {
     try {
-      await this.repos.runs.insert(run);
+      await this.repos.runs.insert(run, tasks);
     } catch (error) {
       if (errorCode(error) === "duplicate-record") {
         throw new RunConflictError(
@@ -412,24 +410,11 @@ export class Orchestrator {
     }
     const id = this.createId();
     const at = this.timestamp();
-    const run = await this.insertRunAsync({
-      ...prior,
-      id,
-      threadId: threadIdFor(caseRecord.id, id, prior.planVersion),
-      status: "queued",
-      priorRunId: prior.id,
-      leaseId: null,
-      fencingToken: 0,
-      leaseExpiresAt: null,
-      cancellationRequested: false,
-      inputRequired: false,
-      usage: emptyUsageSummary(),
-      createdAt: at,
-      updatedAt: at,
-    });
-    for (const task of priorTasks) {
+    const retryBase = { ...prior };
+    delete retryBase.terminalEvent;
+    const records: Task[] = priorTasks.map((task) => {
       const rerun = task.status === "failed" || task.status === "skipped";
-      const record: Task = {
+      return {
         ...task,
         id: taskIdFor(id, taskKeyOf(task)),
         runId: id,
@@ -440,13 +425,27 @@ export class Orchestrator {
         attemptCount: rerun ? 0 : task.attemptCount,
         lastError: rerun ? null : task.lastError,
         usage: emptyUsageSummary(),
+        resumeKeys: [],
       };
-      try {
-        await this.repos.tasks.insert(record, scope);
-      } catch (error) {
-        ignoreDuplicate(error);
-      }
-    }
+    });
+    const run = await this.insertRunAsync(
+      {
+        ...retryBase,
+        id,
+        threadId: threadIdFor(caseRecord.id, id, prior.planVersion),
+        status: "queued",
+        priorRunId: prior.id,
+        leaseId: null,
+        fencingToken: 0,
+        leaseExpiresAt: null,
+        cancellationRequested: false,
+        inputRequired: false,
+        usage: emptyUsageSummary(),
+        createdAt: at,
+        updatedAt: at,
+      },
+      records,
+    );
     await this.repos.approvals.invalidateForDeliverable(
       deliverableIdFor(prior.id),
       scope,
@@ -484,30 +483,8 @@ export class Orchestrator {
     if (!run) throw new RunNotFoundError();
     if (!ACTIVE_RUN_STATUSES.includes(run.status)) return run;
     const scope = { ownerId: run.ownerId, caseId: run.caseId };
-    if (run.status === "waiting-for-input") {
-      // A suspended run holds no lease; reacquire one to finalize it safely.
-      const at = this.now();
-      const lease = await this.repos.runAdmission.resume({
-        ownerId: run.ownerId,
-        caseId: run.caseId,
-        runId: run.id,
-        leaseId: `cancel:${this.createId()}`,
-        fencingToken: run.fencingToken,
-        at: at.toISOString(),
-        expiresAt: new Date(
-          at.getTime() + this.leaseTtlSeconds * 1_000,
-        ).toISOString(),
-        userLimit: this.userRunLimit,
-        globalLimit: this.globalRunLimit,
-      });
-      run = await this.requestCancellationAsync(run.id, input.ownerId);
-      await this.finalizeAsync(
-        { run, scope, lease },
-        { status: "cancelled", reason: input.reason ?? null },
-      );
-      return (await this.repos.runs.findOwnedById(run.id, input.ownerId))!;
-    }
     run = await this.requestCancellationAsync(run.id, input.ownerId);
+    if (!ACTIVE_RUN_STATUSES.includes(run.status)) return run;
     const local = this.active.get(run.id);
     if (local) {
       local.controller.abort(new RunCancelledError());
@@ -542,6 +519,7 @@ export class Orchestrator {
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const run = await this.repos.runs.findOwnedById(runId, ownerId);
       if (!run) throw new RunNotFoundError();
+      if (!ACTIVE_RUN_STATUSES.includes(run.status)) return run;
       if (run.cancellationRequested) return run;
       const updated: RunRecord = {
         ...run,
@@ -566,11 +544,24 @@ export class Orchestrator {
     const request = ResumeRequestSchema.parse(input.request);
     const run = await this.repos.runs.findOwnedById(input.runId, input.ownerId);
     if (!run) throw new RunNotFoundError();
+    const state = await this.graphStateAsync(run);
+    const tasks = await this.repos.tasks.listForRun(run.id, {
+      ownerId: run.ownerId,
+      caseId: run.caseId,
+    });
+    if (
+      state?.resumeKeys?.includes(request.idempotencyKey) ||
+      tasks.some((task) => task.resumeKeys?.includes(request.idempotencyKey))
+    ) {
+      return {
+        outcome:
+          run.status === "waiting-for-input"
+            ? "waiting-for-input"
+            : "finalized",
+        run,
+      };
+    }
     if (run.status !== "waiting-for-input") {
-      const state = await this.graphStateAsync(run);
-      if (state?.resumeKeys?.includes(request.idempotencyKey)) {
-        return { outcome: "finalized", run };
-      }
       throw new RunConflictError("The run is not waiting for input");
     }
     const at = this.now();
@@ -636,7 +627,6 @@ export class Orchestrator {
         lease.fencingToken,
         this.now,
       ),
-      writeLock: new Mutex(),
       documents: createDocumentAccess(this.repos, scope, {
         maxChars: this.options.maxDocumentChars,
       }),
@@ -737,7 +727,15 @@ export class Orchestrator {
   ): Promise<{ tasks: Task[]; instructions: Record<string, string> }> {
     const { run, scope, caseRecord } = execution;
     const existing = await this.repos.tasks.listForRun(run.id, scope);
-    if (existing.length) return { tasks: existing, instructions: {} };
+    if (existing.length)
+      return {
+        tasks: existing,
+        instructions: Object.fromEntries(
+          existing
+            .filter((task) => task.instructions !== undefined)
+            .map((task) => [task.id, task.instructions!]),
+        ),
+      };
     const documents = await execution.documents.listAsync();
     const plan = await planCaseAsync({
       reference: this.options.plans.get(caseRecord.useCase),
@@ -757,13 +755,9 @@ export class Orchestrator {
       run.planVersion,
       plan.tasks,
     );
-    for (const record of records) {
-      try {
-        await this.repos.tasks.insert(record, scope);
-      } catch (error) {
-        ignoreDuplicate(error);
-      }
-    }
+    await this.repos.tasks.insertPlan(records, scope, {
+      fencingToken: execution.lease.fencingToken,
+    });
     return {
       tasks: await this.repos.tasks.listForRun(run.id, scope),
       instructions: Object.fromEntries(
@@ -806,6 +800,24 @@ export class Orchestrator {
     };
     const snapshot = await graph.getState(config);
     const values = snapshot.values;
+    const interruptedTaskIds = new Set(
+      snapshot.tasks.flatMap((task) =>
+        task.interrupts.map((item) => (item.value as InterruptPayload).taskId),
+      ),
+    );
+    const accepted = planned.tasks.find(
+      (task) =>
+        interruptedTaskIds.has(task.id) &&
+        task.status !== "waiting-for-input" &&
+        task.resumeInput !== undefined &&
+        task.resumeKeys?.length,
+    );
+    const recoveredResume: ResumeRequest | undefined = accepted
+      ? {
+          idempotencyKey: accepted.resumeKeys!.at(-1)!,
+          input: accepted.resumeInput!,
+        }
+      : undefined;
     if (
       values.graphVersion !== undefined &&
       (values.graphVersion !== this.graphVersion ||
@@ -829,8 +841,11 @@ export class Orchestrator {
           },
           config,
         );
-      } else if (resume) {
-        await graph.invoke(new Command({ resume }), config);
+      } else if (resume ?? recoveredResume) {
+        await graph.invoke(
+          new Command({ resume: resume ?? recoveredResume }),
+          config,
+        );
       } else if (snapshot.next.length) {
         await graph.invoke(null, config);
       }
@@ -973,16 +988,7 @@ export class Orchestrator {
     },
   ): Promise<void> {
     const { run, scope, lease } = target;
-    const fencing = lease ? { fencingToken: lease.fencingToken } : undefined;
-    const events =
-      target.events ??
-      new EventSink(
-        this.repos.events,
-        scope,
-        run.id,
-        lease?.fencingToken ?? null,
-        this.now,
-      );
+    const fencing = { fencingToken: lease?.fencingToken ?? run.fencingToken };
     const tasks = await this.repos.tasks.listForRun(run.id, scope);
     const closing: TaskStatus =
       override.status === "cancelled"
@@ -1008,7 +1014,7 @@ export class Orchestrator {
       }
       task.status = closing;
     }
-    const status = override.status ?? this.statusFor(tasks);
+    const proposedStatus = override.status ?? this.statusFor(tasks);
     const runUsage = summarizeUsage(
       await this.repos.usageLedger.listForRun(
         scope.ownerId,
@@ -1024,13 +1030,61 @@ export class Orchestrator {
     if (deliverable) {
       const completed = tasks.filter((task) => task.status === "completed");
       const summary = `${completed.length} of ${tasks.length} tasks completed; sections await professional review.`;
-      if (deliverable.summary !== summary) {
-        await this.repos.deliverables.replaceOwned(
-          { ...deliverable, summary, updatedAt: this.timestamp() },
-          scope,
-        );
+      if (deliverable.summary !== summary && tasks[0]) {
+        if (
+          !(await this.repos.tasks.commitResult(
+            tasks[0],
+            {
+              evidence: [],
+              findings: [],
+              deliverable: {
+                ...deliverable,
+                summary,
+                updatedAt: this.timestamp(),
+              },
+            },
+            scope,
+            { fencingToken: lease?.fencingToken ?? run.fencingToken },
+          ))
+        )
+          throw new WorkerAbortedError();
       }
     }
+    const released = await this.repos.runAdmission.release({
+      ownerId: scope.ownerId,
+      caseId: scope.caseId,
+      runId: run.id,
+      leaseId: lease?.leaseId ?? null,
+      fencingToken: lease?.fencingToken ?? run.fencingToken,
+      at: this.timestamp(),
+      terminal: {
+        status: proposedStatus,
+        usage: runUsage,
+        reason: override.reason,
+        error: override.error,
+      },
+    });
+    const settled = await this.repos.runs.findOwnedById(run.id, scope.ownerId);
+    if (!released || !settled) throw new WorkerAbortedError();
+    await this.publishTerminalAsync(settled);
+  }
+
+  async publishTerminalAsync(run: RunRecord): Promise<void> {
+    if (!run.terminalEvent?.pending || ACTIVE_RUN_STATUSES.includes(run.status))
+      return;
+    const scope = { ownerId: run.ownerId, caseId: run.caseId };
+    const status = run.status;
+    const deliverable = await this.repos.deliverables.findOwnedById(
+      deliverableIdFor(run.id),
+      scope,
+    );
+    const events = new EventSink(
+      this.repos.events,
+      scope,
+      run.id,
+      run.fencingToken,
+      this.now,
+    );
     const terminalId = `${run.id}:terminal`;
     if (status === "completed" || status === "partially-completed") {
       await events.emit(terminalId, {
@@ -1040,59 +1094,29 @@ export class Orchestrator {
     } else if (status === "cancelled") {
       await events.emit(terminalId, {
         type: "run-cancelled",
-        reason: override.reason,
+        reason: run.terminalEvent.reason,
       });
     } else if (status === "limit-reached") {
       await this.markLimitReachedAsync({ run, events });
     } else {
       await events.emit(terminalId, {
         type: "run-failed",
-        error: override.error ?? {
+        error: run.terminalEvent.error ?? {
           code: "run-failed",
           message: "No task completed successfully",
         },
       });
     }
-    if (lease) {
-      const released = await this.repos.runAdmission.release({
-        ownerId: scope.ownerId,
-        caseId: scope.caseId,
-        runId: run.id,
-        leaseId: lease.leaseId,
-        fencingToken: lease.fencingToken,
-        at: this.timestamp(),
-      });
-      if (!released) {
-        const current = await this.repos.runs.findOwnedById(
-          run.id,
-          scope.ownerId,
-        );
-        if (current?.leaseId !== null) throw new WorkerAbortedError();
-      }
-    }
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const current = await this.repos.runs.findOwnedById(
-        run.id,
-        scope.ownerId,
-      );
-      if (!current) throw new RunNotFoundError();
-      if (!ACTIVE_RUN_STATUSES.includes(current.status)) return;
-      if (
-        await this.repos.runs.updateOwned(
-          {
-            ...current,
-            status,
-            usage: runUsage,
-            inputRequired: false,
-            updatedAt: this.timestamp(),
-          },
-          scope.ownerId,
-        )
-      ) {
-        return;
-      }
-    }
-    throw new RunConflictError("The run changed while finalizing");
+    if (
+      !(await this.repos.runs.updateOwned(
+        {
+          ...run,
+          terminalEvent: { ...run.terminalEvent, pending: false },
+        },
+        run.ownerId,
+      ))
+    )
+      throw new WorkerAbortedError();
   }
 
   private statusFor(tasks: readonly Task[]): RunStatus {
@@ -1113,11 +1137,7 @@ export class Orchestrator {
   }): Promise<void> {
     const { scope } = target;
     const usage = summarizeUsage(
-      await this.repos.usageLedger.list({
-        ownerId: scope.ownerId,
-        caseId: scope.caseId,
-        limit: 5_000,
-      }),
+      await this.repos.usageLedger.listForCase(scope.ownerId, scope.caseId),
     );
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const caseRecord = await this.repos.cases.findOwnedById(
@@ -1135,6 +1155,7 @@ export class Orchestrator {
         return;
       }
     }
+    throw new RunConflictError("The case changed while updating usage");
   }
 
   private async loadTaskAsync(execution: Execution, taskId: string) {
@@ -1212,10 +1233,14 @@ export class Orchestrator {
       const section = await this.findSectionAsync(execution, runId, key);
       if (section) {
         if (runId !== execution.run.id) {
-          await this.upsertSectionAsync(execution, {
-            ...section,
-            id: sectionIdFor(execution.run.id, key),
-          });
+          await this.upsertSectionAsync(
+            execution,
+            {
+              ...section,
+              id: sectionIdFor(execution.run.id, key),
+            },
+            task,
+          );
         }
         const content = SectionContentSchema.parse(section.content);
         return {
@@ -1243,56 +1268,39 @@ export class Orchestrator {
   private async upsertSectionAsync(
     execution: Execution,
     section: DeliverableSection,
+    task: Task,
+    records: { evidence: Evidence[]; findings: Finding[] } = {
+      evidence: [],
+      findings: [],
+    },
   ): Promise<void> {
-    await execution.writeLock.run(async () => {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const existing = await this.repos.deliverables.findOwnedById(
-          execution.deliverableId,
-          execution.scope,
-        );
-        const at = this.timestamp();
-        if (!existing) {
-          const plan = this.options.plans.get(execution.caseRecord.useCase);
-          const record: Deliverable = {
-            id: execution.deliverableId,
-            caseId: execution.scope.caseId,
-            runId: execution.run.id,
-            version: 1,
-            format: plan.format,
-            title: plan.title,
-            summary: "",
-            sections: [section],
-            createdAt: at,
-            updatedAt: at,
-          };
-          try {
-            await this.repos.deliverables.insert(record, execution.scope);
-            return;
-          } catch (error) {
-            ignoreDuplicate(error);
-            continue;
-          }
-        }
-        // Never overwrite a committed section; reviewers may have edited it.
-        if (existing.sections.some((item) => item.id === section.id)) return;
-        if (
-          await this.repos.deliverables.replaceOwned(
-            {
-              ...existing,
-              sections: [...existing.sections, section],
-              updatedAt: at,
-            },
-            execution.scope,
-          )
-        ) {
-          return;
-        }
-      }
-      throw new OrchestrationError(
-        "Could not save the deliverable section",
-        "deliverable-conflict",
-      );
-    });
+    const at = this.timestamp();
+    const plan = this.options.plans.get(execution.caseRecord.useCase);
+    const deliverable: Deliverable = {
+      id: execution.deliverableId,
+      caseId: execution.scope.caseId,
+      runId: execution.run.id,
+      version: 1,
+      format: plan.format,
+      title: plan.title,
+      summary: "",
+      sections: [section],
+      createdAt: at,
+      updatedAt: at,
+    };
+    if (
+      !(await this.repos.tasks.commitResult(
+        task,
+        { ...records, deliverable },
+        execution.scope,
+        {
+          fencingToken: execution.lease.fencingToken,
+        },
+      ))
+    ) {
+      execution.lost = true;
+      throw new WorkerAbortedError();
+    }
   }
 
   private ancestorsOf(task: Task, tasks: readonly Task[]): Task[] {
@@ -1353,7 +1361,14 @@ export class Orchestrator {
     });
     if (task.status === "completed") {
       const outcome = await this.materializeAsync(execution, task);
-      if (outcome) return result(outcome);
+      if (outcome) {
+        await this.emitTaskCompletedAsync(
+          execution,
+          task,
+          outcome.findings.map((finding) => finding.id),
+        );
+        return result(outcome);
+      }
       return result(
         await this.failTaskAsync(execution, task, {
           code: "result-missing",
@@ -1362,6 +1377,9 @@ export class Orchestrator {
       );
     }
     if (TERMINAL_TASK_STATUSES.includes(task.status)) {
+      if (task.status === "failed" && task.lastError) {
+        await this.emitTaskFailedAsync(execution, task, task.lastError);
+      }
       return result(this.outcomeFor(task, task.status as TaskOutcomeStatus));
     }
     if (task.status === "running") {
@@ -1376,6 +1394,13 @@ export class Orchestrator {
       }
       const charges = await this.taskUsageAsync(execution, task.id);
       if (charges.length >= task.attemptCount) {
+        await this.repos.usageLedger.markInterrupted(
+          execution.scope.ownerId,
+          execution.scope.caseId,
+          execution.run.id,
+          task.id,
+          this.timestamp(),
+        );
         // The attempt may have been billed without a durable result.
         return result(
           await this.failTaskAsync(execution, task, {
@@ -1401,16 +1426,19 @@ export class Orchestrator {
       await this.persistTaskAsync(execution, updated);
       return result(this.outcomeFor(updated, "skipped"));
     }
-    let humanInput: unknown;
+    let humanInput: unknown = task.resumeInput;
     let resumeKeys: string[] = [];
     if (task.status === "waiting-for-input") {
-      const questions = await this.inputQuestionIdsAsync(execution, task);
-      const answer = interrupt<InterruptPayload, ResumeRequest>({
-        taskId: task.id,
-        questionIds: questions,
-      });
-      humanInput = answer.input;
-      resumeKeys = [answer.idempotencyKey];
+      const rounds = await this.inputQuestionRoundsAsync(execution, task);
+      for (const questions of rounds) {
+        const answer = interrupt<InterruptPayload, ResumeRequest>({
+          taskId: task.id,
+          questionIds: questions,
+        });
+        if (task.resumeKeys?.includes(answer.idempotencyKey)) continue;
+        humanInput = answer.input;
+        resumeKeys = [answer.idempotencyKey];
+      }
     }
     if (await this.isCancelledAsync(execution)) {
       return result(await this.closeTaskAsync(execution, task, "cancelled"));
@@ -1420,19 +1448,35 @@ export class Orchestrator {
         await this.closeTaskAsync(execution, task, "limit-reached"),
       );
     }
-    const outcome = await this.semaphore.run(() =>
-      this.attemptTaskAsync(execution, task, tasks, state, humanInput),
-    );
+    const outcome = await this.semaphore.run(async () => {
+      if (await this.isCancelledAsync(execution))
+        return this.closeTaskAsync(execution, task, "cancelled");
+      if (execution.limitReached)
+        return this.closeTaskAsync(execution, task, "limit-reached");
+      return this.attemptTaskAsync(
+        execution,
+        task,
+        tasks,
+        state,
+        humanInput,
+        resumeKeys,
+      );
+    });
     return result(outcome, resumeKeys);
   }
 
-  private async inputQuestionIdsAsync(
+  private async inputQuestionRoundsAsync(
     execution: Execution,
     task: Task,
-  ): Promise<string[]> {
+  ): Promise<string[][]> {
     const findings = await this.repos.findings.listForCase(execution.scope);
-    const finding = findings.find((item) => item.id === `${task.id}:input`);
-    return finding?.openQuestions.map((question) => question.id) ?? [];
+    return findings
+      .filter((item) => item.id.startsWith(`${task.id}:input:`))
+      .sort(
+        (a, b) =>
+          Number(a.id.split(":").at(-1)) - Number(b.id.split(":").at(-1)),
+      )
+      .map((finding) => finding.openQuestions.map((question) => question.id));
   }
 
   private async closeTaskAsync(
@@ -1458,14 +1502,22 @@ export class Orchestrator {
       usage,
     };
     await this.persistTaskAsync(execution, updated);
+    await this.emitTaskFailedAsync(execution, updated, error);
+    await this.refreshCaseUsageAsync(execution);
+    return this.outcomeFor(updated, "failed");
+  }
+
+  private async emitTaskFailedAsync(
+    execution: Execution,
+    task: Task,
+    error: SanitizedError,
+  ): Promise<void> {
     await execution.events.emit(`${task.id}:failed:${task.attemptCount}`, {
       type: "task-failed",
       taskId: task.id,
       role: task.role,
       error,
     });
-    await this.refreshCaseUsageAsync(execution);
-    return this.outcomeFor(updated, "failed");
   }
 
   private async completeTaskAsync(
@@ -1473,12 +1525,6 @@ export class Orchestrator {
     task: Task,
     findingIds: readonly string[],
   ) {
-    for (const findingId of findingIds) {
-      await execution.events.emit(`${findingId}:added`, {
-        type: "finding-added",
-        findingId,
-      });
-    }
     const usage = summarizeUsage(await this.taskUsageAsync(execution, task.id));
     await this.persistTaskAsync(execution, {
       ...task,
@@ -1487,11 +1533,30 @@ export class Orchestrator {
       usage,
     });
     await this.hooks.afterTaskCommit?.(task);
+    await this.emitTaskCompletedAsync(
+      execution,
+      { ...task, usage },
+      findingIds,
+    );
+    await this.refreshCaseUsageAsync(execution);
+  }
+
+  private async emitTaskCompletedAsync(
+    execution: Execution,
+    task: Task,
+    findingIds: readonly string[],
+  ): Promise<void> {
+    for (const findingId of findingIds) {
+      await execution.events.emit(`${findingId}:added`, {
+        type: "finding-added",
+        findingId,
+      });
+    }
     await execution.events.emit(`${task.id}:completed`, {
       type: "task-completed",
       taskId: task.id,
       role: task.role,
-      usage,
+      usage: task.usage,
     });
     const runUsage = summarizeUsage(
       await this.repos.usageLedger.listForRun(
@@ -1504,7 +1569,6 @@ export class Orchestrator {
       type: "cost-updated",
       usage: runUsage,
     });
-    await this.refreshCaseUsageAsync(execution);
   }
 
   private async attemptTaskAsync(
@@ -1513,16 +1577,20 @@ export class Orchestrator {
     tasks: readonly Task[],
     state: TaskGraphStateValue,
     humanInput: unknown,
+    resumeKeys: string[] = [],
   ): Promise<TaskOutcome> {
-    const resuming = current.status === "waiting-for-input";
     const task: Task = {
       ...current,
       status: "running",
       attemptCount:
-        current.status === "running" || resuming
+        current.status === "running"
           ? Math.max(current.attemptCount, 1)
           : current.attemptCount + 1,
       lastError: null,
+      resumeKeys: [...(current.resumeKeys ?? []), ...resumeKeys],
+      ...(humanInput === undefined
+        ? {}
+        : { resumeInput: ResumeRequestSchema.shape.input.parse(humanInput) }),
     };
     await this.persistTaskAsync(execution, task);
     await execution.events.emit(`${task.id}:started:${task.attemptCount}`, {
@@ -1580,6 +1648,7 @@ export class Orchestrator {
               key,
               role: task.role,
               instructions:
+                task.instructions ??
                 state.instructions[task.id] ??
                 this.options.plans.instructionsFor(
                   execution.caseRecord.useCase,
@@ -1606,8 +1675,6 @@ export class Orchestrator {
         (output as SpecialistOutput).inputRequired!.questions,
       );
     }
-    // Fence before committing so a stale worker cannot publish results.
-    await this.persistTaskAsync(execution, task);
     const committed = isReview
       ? this.reviewRecords(execution, task, output as ReviewOutput, flags)
       : this.specialistRecords(
@@ -1616,42 +1683,33 @@ export class Orchestrator {
           (output as SpecialistOutput).findings,
           documentIds,
         );
-    for (const evidence of committed.evidence) {
-      try {
-        await this.repos.evidence.insert(evidence, execution.scope);
-      } catch (error) {
-        ignoreDuplicate(error);
-      }
-    }
-    for (const finding of committed.findings) {
-      try {
-        await this.repos.findings.insert(finding, execution.scope);
-      } catch (error) {
-        ignoreDuplicate(error);
-      }
-    }
     const summary = (output as { summary: string }).summary;
     const evidenceIds = committed.evidence.map((evidence) => evidence.id);
-    await this.upsertSectionAsync(execution, {
-      id: sectionIdFor(execution.run.id, key),
-      title:
-        this.options.plans
-          .get(execution.caseRecord.useCase)
-          .tasks.find((item) => item.key === key)?.title ?? key,
-      kind: "text",
-      content: { taskId: task.id, summary, findings: committed.outcomes },
-      reviewerContent: null,
-      reviewerId: null,
-      reviewedAt: null,
-      producingRole: task.role,
-      routingTier: agentResult.modelTier,
-      provider: agentResult.provider,
-      model: agentResult.model,
-      findingIds: committed.findings.map((finding) => finding.id),
-      evidenceIds,
-      reviewStatus: "pending",
-      reviewComment: null,
-    });
+    await this.upsertSectionAsync(
+      execution,
+      {
+        id: sectionIdFor(execution.run.id, key),
+        title:
+          this.options.plans
+            .get(execution.caseRecord.useCase)
+            .tasks.find((item) => item.key === key)?.title ?? key,
+        kind: "text",
+        content: { taskId: task.id, summary, findings: committed.outcomes },
+        reviewerContent: null,
+        reviewerId: null,
+        reviewedAt: null,
+        producingRole: task.role,
+        routingTier: agentResult.modelTier,
+        provider: agentResult.provider,
+        model: agentResult.model,
+        findingIds: committed.findings.map((finding) => finding.id),
+        evidenceIds,
+        reviewStatus: "pending",
+        reviewComment: null,
+      },
+      task,
+      committed,
+    );
     await this.hooks.afterResultCommit?.(task);
     await this.completeTaskAsync(
       execution,
@@ -1685,7 +1743,7 @@ export class Orchestrator {
     task: Task,
     questions: Array<{ text: string; severity: "high" | "medium" | "low" }>,
   ): Promise<TaskOutcome> {
-    const findingId = `${task.id}:input`;
+    const findingId = `${task.id}:input:${task.attemptCount}`;
     const finding: Finding = FindingSchema.parse({
       id: findingId,
       caseId: execution.scope.caseId,
@@ -1706,17 +1764,22 @@ export class Orchestrator {
       })),
       createdAt: this.timestamp(),
     });
-    try {
-      await this.repos.findings.insert(finding, execution.scope);
-    } catch (error) {
-      ignoreDuplicate(error);
-    }
     const waiting: Task = {
       ...task,
       status: "waiting-for-input",
       usage: summarizeUsage(await this.taskUsageAsync(execution, task.id)),
     };
-    await this.persistTaskAsync(execution, waiting);
+    if (
+      !(await this.repos.tasks.commitResult(
+        waiting,
+        { evidence: [], findings: [finding] },
+        execution.scope,
+        {
+          fencingToken: execution.lease.fencingToken,
+        },
+      ))
+    )
+      throw new WorkerAbortedError();
     // Throws a graph interrupt; the node restarts from its durable state.
     interrupt<InterruptPayload, ResumeRequest>({
       taskId: task.id,

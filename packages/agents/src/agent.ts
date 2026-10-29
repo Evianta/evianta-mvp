@@ -39,6 +39,12 @@ export interface DocumentSlice {
   documentId: string;
   name: string;
   pages: Array<{ page: number; text: string }>;
+  tables?: Array<{
+    tableId: string;
+    sheet: string | null;
+    cellRange: string | null;
+    text: string;
+  }>;
   truncated: boolean;
 }
 

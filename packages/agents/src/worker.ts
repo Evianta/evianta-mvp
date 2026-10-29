@@ -52,6 +52,17 @@ export class RunWorker {
     );
     for (const run of candidates) {
       if (this.stopping) return null;
+      if (run.terminalEvent?.pending) {
+        await this.options.orchestrator.publishTerminalAsync(run);
+        return { outcome: "finalized", run };
+      }
+      if (run.cancellationRequested) {
+        const cancelled = await this.options.orchestrator.cancelRunAsync({
+          ownerId: run.ownerId,
+          runId: run.id,
+        });
+        return { outcome: "finalized", run: cancelled };
+      }
       let lease;
       try {
         lease = await this.options.orchestrator.acquireAsync(

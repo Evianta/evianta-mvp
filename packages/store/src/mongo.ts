@@ -13,6 +13,7 @@ import {
   RunRecordSchema,
   SessionRecordSchema,
   TaskSchema,
+  TaskPlanSchema,
   UserRecordSchema,
   UsageRecordSchema,
   type AccessKeyRecord,
@@ -315,6 +316,10 @@ export class MongoStore {
         insert: (record, scope) => this.findingInsert(record, scope),
       },
       tasks: {
+        insertPlan: (tasks, scope, options) =>
+          this.taskInsertPlan(tasks, scope, options),
+        commitResult: (task, result, scope, options) =>
+          this.taskReplaceOwned(task, scope, options, result),
         listForRun: (id, scope) => this.taskListForRun(id, scope),
         insert: (record, scope) => this.taskInsert(record, scope),
         replaceOwned: (record, scope, options) =>
@@ -322,7 +327,7 @@ export class MongoStore {
       },
       runs: {
         findOwnedById: (id, ownerId) => this.runFindOwnedById(id, ownerId),
-        insert: (record) => this.runInsert(record),
+        insert: (record, tasks) => this.runInsert(record, tasks),
         updateOwned: (record, ownerId) => this.runUpdateOwned(record, ownerId),
         listClaimable: (at, limit) => this.runListClaimable(at, limit),
       },
@@ -939,6 +944,11 @@ export class MongoStore {
     task: Task,
     scope: OwnerScope,
     options?: { fencingToken: number },
+    output?: {
+      evidence: Evidence[];
+      findings: Finding[];
+      deliverable?: Deliverable;
+    },
   ): Promise<boolean> {
     const parsed = TaskSchema.parse(task);
     if (parsed.caseId !== scope.caseId || !(await this.ownsCase(scope))) {
@@ -974,26 +984,164 @@ export class MongoStore {
         { ...documentFor(parsed), ownerId: scope.ownerId },
         { session },
       );
+      if (result.matchedCount !== 1) return false;
+      if (output) {
+        const deliverable = output.deliverable
+          ? DeliverableSchema.parse(output.deliverable)
+          : undefined;
+        const evidence = output.evidence.map((item) =>
+          EvidenceSchema.parse(item),
+        );
+        const findings = output.findings.map((item) =>
+          FindingSchema.parse(item),
+        );
+        if (
+          (deliverable &&
+            (deliverable.caseId !== scope.caseId ||
+              deliverable.runId !== parsed.runId)) ||
+          [...evidence, ...findings].some(
+            (item) => item.caseId !== scope.caseId,
+          )
+        )
+          throw new CaseNotOwnedError();
+        for (const item of evidence) {
+          await this.evidence.updateOne(
+            { _id: item.id, caseId: scope.caseId, ownerId: scope.ownerId },
+            { $setOnInsert: { ...documentFor(item), ownerId: scope.ownerId } },
+            { upsert: true, session },
+          );
+        }
+        for (const item of findings) {
+          await this.findings.updateOne(
+            { _id: item.id, caseId: scope.caseId, ownerId: scope.ownerId },
+            { $setOnInsert: { ...documentFor(item), ownerId: scope.ownerId } },
+            { upsert: true, session },
+          );
+        }
+        if (deliverable) {
+          const existing = decode(
+            DeliverableSchema,
+            await this.deliverables.findOne(
+              {
+                _id: deliverable.id,
+                caseId: scope.caseId,
+                ownerId: scope.ownerId,
+                runId: parsed.runId,
+              },
+              { session },
+            ),
+          );
+          const merged = existing
+            ? {
+                ...existing,
+                summary: deliverable.summary || existing.summary,
+                sections: [
+                  ...existing.sections,
+                  ...deliverable.sections.filter(
+                    (section) =>
+                      !existing.sections.some(
+                        (prior) => prior.id === section.id,
+                      ),
+                  ),
+                ],
+                updatedAt: deliverable.updatedAt,
+              }
+            : deliverable;
+          await this.deliverables.replaceOne(
+            {
+              _id: deliverable.id,
+              caseId: scope.caseId,
+              ownerId: scope.ownerId,
+              runId: parsed.runId,
+            },
+            { ...documentFor(merged), ownerId: scope.ownerId },
+            { upsert: true, session },
+          );
+        }
+      }
       return result.matchedCount === 1;
+    });
+  }
+
+  async taskInsertPlan(
+    tasks: Task[],
+    scope: OwnerScope,
+    options: { fencingToken: number },
+  ): Promise<void> {
+    await this.requireOwnedCase(scope);
+    await this.withTransaction(async (session) => {
+      const run =
+        tasks[0] &&
+        (await this.runs.findOneAndUpdate(
+          {
+            _id: tasks[0].runId,
+            ownerId: scope.ownerId,
+            caseId: scope.caseId,
+            fencingToken: options.fencingToken,
+          },
+          { $inc: { taskWrites: 1 } },
+          { session, returnDocument: "after" },
+        ));
+      if (!run)
+        throw new StoreError(
+          "Run lease generation is stale",
+          "stale-fencing-token",
+        );
+      const plan = TaskPlanSchema.parse({
+        caseId: scope.caseId,
+        runId: run.id,
+        version: run.planVersion,
+        tasks,
+      });
+      await this.tasks.insertMany(
+        plan.tasks.map((task) => ({
+          ...documentFor(task),
+          ownerId: scope.ownerId,
+        })),
+        { session },
+      );
     });
   }
 
   async runListClaimable(at: string, limit = 50): Promise<RunRecord[]> {
     const atMs = Date.parse(TimestampSchema.parse(at));
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
+      throw new StoreError("Invalid run query limit", "invalid-query-limit");
     const records = await this.runs
-      .find({
-        status: { $in: ["queued", "running"] },
-        cancellationRequested: false,
-      })
-      .sort({ createdAt: 1, _id: 1 })
+      .aggregate([
+        {
+          $match: {
+            $or: [
+              { "terminalEvent.pending": true },
+              { status: "waiting-for-input", cancellationRequested: true },
+              {
+                status: { $in: ["queued", "running"] },
+                $expr: {
+                  $or: [
+                    { $eq: ["$leaseExpiresAt", null] },
+                    {
+                      $lte: [
+                        { $dateFromString: { dateString: "$leaseExpiresAt" } },
+                        new Date(atMs),
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+        {
+          $addFields: {
+            createdAtInstant: { $dateFromString: { dateString: "$createdAt" } },
+          },
+        },
+        { $sort: { createdAtInstant: 1, _id: 1 } },
+        { $limit: limit },
+        { $unset: "createdAtInstant" },
+      ])
       .toArray();
-    return records
-      .map((record) => decode(RunRecordSchema, record)!)
-      .filter(
-        (run) =>
-          run.leaseExpiresAt === null || Date.parse(run.leaseExpiresAt) <= atMs,
-      )
-      .slice(0, limit);
+    return records.map((record) => decode(RunRecordSchema, record)!);
   }
 
   async runFindOwnedById(
@@ -1006,7 +1154,7 @@ export class MongoStore {
     );
   }
 
-  async runInsert(run: RunRecord): Promise<void> {
+  async runInsert(run: RunRecord, tasks?: Task[]): Promise<void> {
     const parsed = RunRecordSchema.parse(run);
     const parent = await this.cases.findOne({
       _id: parsed.caseId,
@@ -1020,6 +1168,39 @@ export class MongoStore {
     )
       ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
       : {};
+    if (tasks) {
+      const plan = TaskPlanSchema.parse({
+        caseId: parsed.caseId,
+        runId: parsed.id,
+        version: parsed.planVersion,
+        tasks,
+      });
+      try {
+        await this.withTransaction(async (session) => {
+          await this.runs.insertOne(
+            { ...documentFor(parsed), ...active },
+            { session },
+          );
+          if (plan.tasks.length)
+            await this.tasks.insertMany(
+              plan.tasks.map((task) => ({
+                ...documentFor(task),
+                ownerId: parsed.ownerId,
+              })),
+              { session },
+            );
+        });
+      } catch (error) {
+        if (isDuplicateKey(error))
+          throw new StoreError(
+            "Run or task already exists",
+            "duplicate-record",
+            { cause: error },
+          );
+        throw error;
+      }
+      return;
+    }
     await insertUnique(this.runs, RunRecordSchema, {
       ...parsed,
       ...active,
