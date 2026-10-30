@@ -59,6 +59,18 @@ export const SpecialistOutputSchema = z.object({
 });
 export type SpecialistOutput = z.infer<typeof SpecialistOutputSchema>;
 
+const ModelEvidenceDraftSchema = EvidenceDraftSchema.omit({ location: true });
+const ModelFindingDraftSchema = FindingDraftSchema.extend({
+  evidence: z.array(ModelEvidenceDraftSchema),
+});
+
+export const SpecialistModelOutputSchema = z.object({
+  summary: z.string(),
+  findings: z.array(ModelFindingDraftSchema),
+  inputRequired: SpecialistOutputSchema.shape.inputRequired,
+});
+export type SpecialistModelOutput = z.infer<typeof SpecialistModelOutputSchema>;
+
 export const PriorFindingSchema = z.object({
   taskId: z.string(),
   role: z.string(),

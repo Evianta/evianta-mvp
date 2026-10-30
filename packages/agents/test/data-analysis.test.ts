@@ -1,13 +1,17 @@
 import { readFileSync } from "node:fs";
-import { createAi, MockProvider } from "@evianta/ai";
+import { createAi, inputTokenAllowance, MockProvider } from "@evianta/ai";
 import { syntheticWorkflowFixtures, type ExtractedTable } from "@evianta/core";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   analyzeSalesTables,
   createBusinessDataAnalystAgent,
 } from "../src/data-analysis.js";
 import type { AgentContext } from "../src/agent.js";
-import type { SpecialistInput } from "../src/contracts.js";
+import {
+  SpecialistModelOutputSchema,
+  type SpecialistInput,
+} from "../src/contracts.js";
 
 const table: ExtractedTable = {
   id: "sales-table",
@@ -114,10 +118,229 @@ describe("business data analyst", () => {
     );
   });
 
+  it("uses workbook column origins when locating source evidence", () => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "workbook-doc",
+        name: "workbook.xlsx",
+        table: { ...table, cellRange: "D5:F11" },
+      },
+    ]);
+
+    expect(result.sourceEvidence.location).toMatchObject({
+      cellRange: "D6:F11",
+      rowRange: { start: 6, end: 11 },
+    });
+  });
+
+  it("sorts supported year, quarter, and week labels before computing growth", () => {
+    for (const [header, labels, expectedLabels] of [
+      ["year", ["2026", "2025"], ["2025", "2026"]],
+      ["quarter", ["2026-Q2", "Q1 2026"], ["Q1 2026", "2026-Q2"]],
+      ["week", ["2026-W02", "W01 2026"], ["W01 2026", "2026-W02"]],
+    ] as const) {
+      const result = analyzeSalesTables([
+        {
+          documentId: "period-doc",
+          name: "periods.csv",
+          table: {
+            ...table,
+            headers: [header, "revenue"],
+            rows: [
+              [labels[0], "100"],
+              [labels[1], "50"],
+            ],
+          },
+        },
+      ]);
+
+      expect(result.metrics.byPeriod.map(({ label }) => label)).toEqual(
+        expectedLabels,
+      );
+      expect(result.metrics.byPeriod[1]?.growthPercent).toBe(100);
+    }
+
+    const unknownOrder = analyzeSalesTables([
+      {
+        documentId: "unknown-period-doc",
+        name: "unknown-periods.csv",
+        table: {
+          ...table,
+          headers: ["period", "revenue"],
+          rows: [
+            ["FY26", "100"],
+            ["FY25", "50"],
+          ],
+        },
+      },
+    ]);
+    expect(
+      unknownOrder.metrics.byPeriod.map(({ growthPercent }) => growthPercent),
+    ).toEqual([null, null]);
+  });
+
   it("returns report, chart spec, and source evidence after one mock narrative call", async () => {
     const provider = new MockProvider({
-      responses: [narrativeFixture],
+      responses: [narrativeFixture, narrativeFixture],
     });
+    const generate = vi.spyOn(provider, "generateStructured");
+    let tablesForAnalysis = [
+      ...sourceTables,
+      {
+        documentId: "unreferenced-document",
+        name: "unreferenced.csv",
+        table: {
+          ...table,
+          rows: [...table.rows, ...table.rows, ...table.rows],
+        },
+      },
+    ];
+    const ai = createAi({
+      provider,
+      accounting: {
+        mode: "test",
+        admit: async () => undefined,
+        record: async () => undefined,
+        cancel: async () => undefined,
+      },
+      models: {
+        provider: "mock",
+        sparkModel: "mock-spark",
+        wonderModel: "mock-wonder",
+      },
+    });
+    const context: AgentContext = {
+      ownerId: "sales-owner",
+      case: syntheticWorkflowFixtures.dataAnalysis.case,
+      runId: "sales-run",
+      taskId: "sales-task",
+      documents: {
+        listAsync: async () => [],
+        tablesAsync: async () => tablesForAnalysis,
+        sliceAsync: async () => null,
+      },
+      logger: {
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
+      signal: new AbortController().signal,
+      usage: {
+        userId: "sales-owner",
+        caseId: "sales-case",
+        runId: "sales-run",
+        leaseId: "sales-lease",
+        fencingToken: 1,
+      },
+      ai,
+    };
+    const input: SpecialistInput = {
+      case: {
+        title: "Quarterly sales",
+        description: "Review the quarterly revenue movement.",
+        useCase: "data-analysis",
+      },
+      task: {
+        id: "sales-task",
+        key: "sales-analysis",
+        role: "business-data-analyst",
+        instructions: "Compare periods and explain the relevant caveats.",
+      },
+      priorFindings: [],
+      documents: [
+        {
+          documentId: "sales-document",
+          name: "quarterly-sales.csv",
+          pages: [],
+          tables: [],
+          truncated: true,
+        },
+      ],
+      humanInput: null,
+    };
+
+    const result = await createBusinessDataAnalystAgent().run(input, context);
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(result.output.report?.metrics.total).toBe(1000);
+    expect(result.output.dashboard?.charts).toHaveLength(3);
+    expect(result.output.findings[0]?.evidence[0]?.location).toMatchObject({
+      rowRange: { start: 2, end: 7 },
+    });
+    expect(
+      result.output.findings.some(
+        (finding) => finding.title === "Revenue increased by period",
+      ),
+    ).toBe(true);
+    expect(result.output.report?.assumptions).toContain(
+      "The periods represent calendar months.",
+    );
+    expect(result.output.report?.openQuestions).toContainEqual({
+      text: "Would another period grouping be more useful?",
+      severity: "low",
+    });
+    expect(result.output.report?.metrics.rowCount).toBe(6);
+    expect(result.output.findings[0]?.evidence[0]?.documentId).toBe(
+      "sales-document",
+    );
+    const narrativeInput = generate.mock.calls[0]?.[0].input as {
+      caseContext: string;
+      analysisInstructions: string;
+    };
+    expect(narrativeInput.caseContext).toContain(
+      "Review the quarterly revenue movement.",
+    );
+    expect(narrativeInput.analysisInstructions).toContain(
+      "Compare periods and explain the relevant caveats.",
+    );
+
+    tablesForAnalysis = [
+      {
+        documentId: "sales-document",
+        name: "messy-sales.csv",
+        table: {
+          ...table,
+          rows: [
+            ["2026-01", "A", "100"],
+            ["2026-02", "B", "unknown"],
+            ["2026-03", "C", null],
+            ["2026-04", "D", "-20"],
+          ],
+        },
+      },
+    ];
+    const messyResult = await createBusinessDataAnalystAgent().run(
+      input,
+      context,
+    );
+    const evidenceRows = (title: string) =>
+      messyResult.output.findings
+        .find((finding) => finding.title === title)
+        ?.evidence.map((evidence) => evidence.location?.rowRange);
+    expect(evidenceRows("Data quality: type mismatch")).toEqual([
+      { start: 3, end: 3 },
+    ]);
+    expect(evidenceRows("Data quality: missing values")).toEqual([
+      { start: 4, end: 4 },
+    ]);
+    expect(evidenceRows("Data quality: out of range")).toEqual([
+      { start: 5, end: 5 },
+    ]);
+  });
+
+  it("keeps high-cardinality narrative inputs under the configured token budget", async () => {
+    const highCardinalityRows = Array.from({ length: 240 }, (_, index) => {
+      const year = 2020 + Math.floor(index / 12);
+      const month = String((index % 12) + 1).padStart(2, "0");
+      return [`${year}-${month}`, `segment-${index}`, String(index + 1)];
+    });
+    const highCardinalityTable: ExtractedTable = {
+      ...table,
+      headers: ["month", "product", "revenue"],
+      rows: highCardinalityRows,
+      cellRange: "A1:C241",
+    };
+    const provider = new MockProvider({ responses: [narrativeFixture] });
     const generate = vi.spyOn(provider, "generateStructured");
     const ai = createAi({
       provider,
@@ -140,7 +363,13 @@ describe("business data analyst", () => {
       taskId: "sales-task",
       documents: {
         listAsync: async () => [],
-        tablesAsync: async () => sourceTables,
+        tablesAsync: async () => [
+          {
+            documentId: "sales-document",
+            name: "high-cardinality.csv",
+            table: highCardinalityTable,
+          },
+        ],
         sliceAsync: async () => null,
       },
       logger: {
@@ -160,7 +389,7 @@ describe("business data analyst", () => {
     };
     const input: SpecialistInput = {
       case: {
-        title: "Quarterly sales",
+        title: "High cardinality",
         description: "",
         useCase: "data-analysis",
       },
@@ -168,25 +397,71 @@ describe("business data analyst", () => {
         id: "sales-task",
         key: "sales-analysis",
         role: "business-data-analyst",
-        instructions: "Analyze the source table",
+        instructions: "Summarize the data.",
       },
       priorFindings: [],
-      documents: [],
+      documents: [
+        {
+          documentId: "sales-document",
+          name: "high-cardinality.csv",
+          pages: [],
+          tables: [],
+          truncated: true,
+        },
+      ],
       humanInput: null,
     };
 
     const result = await createBusinessDataAnalystAgent().run(input, context);
 
-    expect(generate).toHaveBeenCalledOnce();
-    expect(result.output.report?.metrics.total).toBe(1000);
-    expect(result.output.dashboard?.charts).toHaveLength(3);
-    expect(result.output.findings[0]?.evidence[0]?.location).toMatchObject({
-      rowRange: { start: 2, end: 7 },
-    });
+    expect(result.output.report?.metrics.byPeriod).toHaveLength(240);
+    const request = generate.mock.calls[0]?.[0];
+    expect(request).toBeDefined();
     expect(
-      result.output.findings.some(
-        (finding) => finding.title === "Revenue increased by period",
-      ),
-    ).toBe(true);
+      inputTokenAllowance({
+        system: request!.system,
+        input: request!.input,
+        schema: request!.schema,
+      }),
+    ).toBeLessThanOrEqual(ai.inputTokenLimit("mid") - 1024);
+    const narrative = request!.input as {
+      metrics: { byPeriod: unknown[]; bySegment: unknown[] };
+      omittedPeriodCount: number;
+      omittedSegmentCount: number;
+    };
+    expect(narrative.metrics.byPeriod.length).toBeLessThan(240);
+    expect(narrative.metrics.bySegment.length).toBeLessThan(240);
+    expect(narrative.omittedPeriodCount).toBeGreaterThan(0);
+    expect(narrative.omittedSegmentCount).toBeGreaterThan(0);
+  });
+
+  it("keeps the model-facing specialist schema strict-compatible", () => {
+    const schema = z.toJSONSchema(SpecialistModelOutputSchema) as {
+      properties: Record<string, unknown>;
+    };
+    expect(schema.properties).not.toHaveProperty("report");
+    expect(schema.properties).not.toHaveProperty("dashboard");
+    const serialized = JSON.stringify(schema);
+    expect(serialized).not.toContain("location");
+    expect(serialized).not.toContain('additionalProperties":{}');
+
+    const visit = (value: unknown) => {
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
+      if (typeof value !== "object" || value === null) return;
+      const object = value as Record<string, unknown>;
+      if (object.type === "object" && typeof object.properties === "object") {
+        const properties = object.properties as Record<string, unknown>;
+        expect(object.additionalProperties).toBe(false);
+        expect(object.required).toEqual(Object.keys(properties));
+        Object.values(properties).forEach(visit);
+      }
+      for (const key of ["items", "anyOf", "allOf", "oneOf"]) {
+        if (key in object) visit(object[key]);
+      }
+    };
+    visit(schema);
   });
 });

@@ -119,12 +119,12 @@ export interface Tool {
   description: string;
 }
 
-export interface Agent<I, O> {
+export interface Agent<I, O, ModelOutput = O> {
   role: AgentRole;
   modelTier: ModelTier;
   systemPrompt: string;
   inputSchema: ZodType<I>;
-  outputSchema: ZodType<O>;
+  outputSchema: ZodType<ModelOutput>;
   tools?: Tool[];
   profile: AgentProfile;
   run(input: I, ctx: AgentContext): Promise<AgentResult<O>>;

@@ -1,3 +1,4 @@
+import { inputTokenAllowance } from "@evianta/ai";
 import {
   DataAnalysisDashboardSchema,
   DataAnalysisMetricsSchema,
@@ -13,6 +14,7 @@ import { z } from "zod";
 import { toAgentResult, type AgentContext, type AgentResult } from "./agent.js";
 import {
   SpecialistInputSchema,
+  SpecialistModelOutputSchema,
   SpecialistOutputSchema,
   type EvidenceDraft,
   type SpecialistInput,
@@ -70,10 +72,22 @@ interface DataAnalysisResult {
   sampleRows: Array<Record<string, string | null>>;
 }
 
+const NarrativeDataQualitySchema = DataQualityIssueSchema.extend({
+  omittedColumnCount: z.number().int().nonnegative(),
+  omittedRowGroupCount: z.number().int().nonnegative(),
+});
+
 const NarrativeInputSchema = z.object({
+  caseContext: z.string(),
+  analysisInstructions: z.string(),
   metrics: DataAnalysisMetricsSchema,
-  dataQuality: z.array(DataQualityIssueSchema),
+  omittedPeriodCount: z.number().int().nonnegative(),
+  omittedSegmentCount: z.number().int().nonnegative(),
+  dataQuality: z.array(NarrativeDataQualitySchema),
+  omittedQualityIssueCount: z.number().int().nonnegative(),
   sampleRows: z.array(z.record(z.string(), z.string().nullable())),
+  omittedSampleRowCount: z.number().int().nonnegative(),
+  omittedSampleColumnCount: z.number().int().nonnegative(),
 });
 
 const NarrativeOutputSchema = z.object({
@@ -93,6 +107,18 @@ const NarrativeOutputSchema = z.object({
     }),
   ),
 });
+
+interface NarrativeLimits {
+  periods: number;
+  segments: number;
+  qualityIssues: number;
+  qualityColumns: number;
+  qualityRows: number;
+  sampleRows: number;
+  sampleColumns: number;
+  sampleCellChars: number;
+  contextChars: number;
+}
 
 const monthNames = [
   "jan",
@@ -127,18 +153,69 @@ function parseNumber(value: string | null | undefined): number | null {
   return Number.isFinite(result) ? result : null;
 }
 
-function periodOrder(value: string): number | null {
+function periodOrder(value: string): { kind: string; order: number } | null {
+  const label = value.trim();
   const month = monthNames.findIndex((name) =>
-    new RegExp(`^${name}(?:[a-z]*)$`, "i").test(value.trim()),
+    new RegExp(`^${name}(?:[a-z]*)$`, "i").test(label),
   );
-  if (month >= 0) return month;
-  if (/^\d{4}-\d{1,2}$/.test(value.trim())) {
-    const [year, monthNumber] = value.trim().split("-").map(Number);
-    return year! * 12 + monthNumber! - 1;
+  if (month >= 0) return { kind: "month-name", order: month };
+
+  const year = label.match(/^(\d{4})$/);
+  if (year) return { kind: "year", order: Number(year[1]) };
+
+  const yearQuarter = label.match(/^(\d{4})\s*[- ]?\s*Q([1-4])$/i);
+  const quarterYear = label.match(/^Q([1-4])\s*(\d{4})$/i);
+  if (yearQuarter || quarterYear) {
+    const match = yearQuarter ?? quarterYear!;
+    const periodYear = Number(yearQuarter ? match[1] : match[2]);
+    const quarter = Number(yearQuarter ? match[2] : match[1]);
+    return {
+      kind: "quarter",
+      order: periodYear * 4 + quarter - 1,
+    };
   }
-  if (/^\d{4}-\d{2}-\d{2}/.test(value.trim())) {
-    const timestamp = Date.parse(value);
-    return Number.isFinite(timestamp) ? timestamp : null;
+
+  const yearWeek = label.match(/^(\d{4})-?W(\d{1,2})$/i);
+  const weekYear = label.match(/^W(\d{1,2})\s*(\d{4})$/i);
+  if (yearWeek || weekYear) {
+    const match = yearWeek ?? weekYear!;
+    const periodYear = Number(yearWeek ? match[1] : match[2]);
+    const week = Number(yearWeek ? match[2] : match[1]);
+    if (week < 1 || week > 53) return null;
+    return { kind: "week", order: periodYear * 53 + week - 1 };
+  }
+
+  const monthYear = label.match(/^(\d{4})-(\d{1,2})$/);
+  if (monthYear) {
+    const periodYear = Number(monthYear[1]);
+    const monthNumber = Number(monthYear[2]);
+    if (monthNumber < 1 || monthNumber > 12) return null;
+    return {
+      kind: "month",
+      order: periodYear * 12 + monthNumber - 1,
+    };
+  }
+
+  const isoDate = label.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|T)/);
+  if (isoDate) {
+    const timestamp = Date.parse(label);
+    return Number.isFinite(timestamp) &&
+      new Date(timestamp).toISOString().slice(0, 10) === label.slice(0, 10)
+      ? { kind: "date", order: timestamp }
+      : null;
+  }
+
+  const monthFirst = label.match(/^([a-z]+)\s+(\d{4})$/i);
+  const yearFirst = label.match(/^(\d{4})\s+([a-z]+)$/i);
+  const namedMonth = monthFirst?.[1] ?? yearFirst?.[2];
+  if (namedMonth) {
+    const index = monthNames.findIndex((name) =>
+      new RegExp(`^${name}(?:[a-z]*)$`, "i").test(namedMonth),
+    );
+    if (index >= 0) {
+      const periodYear = Number(monthFirst?.[2] ?? yearFirst?.[1]);
+      return { kind: "month", order: periodYear * 12 + index };
+    }
   }
   return null;
 }
@@ -165,19 +242,31 @@ function columnName(index: number): string {
 }
 
 function startRow(cellRange: string | undefined): number {
-  const match = cellRange?.match(/^[A-Z]+(\d+):/i);
+  const match = cellRange?.match(/^\$?[A-Z]+\$?(\d+)/i);
   return match ? Number(match[1]) : 1;
+}
+
+function startColumn(cellRange: string | undefined): number {
+  const match = cellRange?.match(/^\$?([A-Z]+)\$?\d+/i);
+  if (!match) return 0;
+  return (
+    [...match[1]!.toUpperCase()].reduce(
+      (column, letter) => column * 26 + letter.charCodeAt(0) - 64,
+      0,
+    ) - 1
+  );
 }
 
 function sourceCellRange(
   table: ExtractedTable,
-  startColumn: number,
-  endColumn: number,
+  firstColumnIndex: number,
+  lastColumnIndex: number,
   rows: { start: number; end: number },
 ): string {
   const firstTableRow = startRow(table.cellRange);
-  const first = `${columnName(startColumn)}${firstTableRow + rows.start}`;
-  const last = `${columnName(endColumn)}${firstTableRow + rows.end}`;
+  const firstTableColumn = startColumn(table.cellRange);
+  const first = `${columnName(firstTableColumn + firstColumnIndex)}${firstTableRow + rows.start}`;
+  const last = `${columnName(firstTableColumn + lastColumnIndex)}${firstTableRow + rows.end}`;
   return `${first}:${last}`;
 }
 
@@ -427,21 +516,29 @@ export function analyzeSalesTables(
     growthPercent: null as number | null,
   }));
   const orders = byPeriod.map(({ label }) => periodOrder(label));
-  if (orders.every((order): order is number => order !== null)) {
+  const periodKind = orders[0]?.kind;
+  if (
+    periodKind !== undefined &&
+    orders.every(
+      (order): order is { kind: string; order: number } =>
+        order !== null && order.kind === periodKind,
+    ) &&
+    new Set(orders.map(({ order }) => order)).size === orders.length
+  ) {
     byPeriod = byPeriod
-      .map((entry, index) => ({ entry, order: orders[index]! }))
+      .map((entry, index) => ({ entry, order: orders[index]!.order }))
       .sort((left, right) => left.order - right.order)
       .map(({ entry }) => entry);
+    byPeriod = byPeriod.map((entry, index) => ({
+      ...entry,
+      growthPercent:
+        index === 0 || byPeriod[index - 1]!.value === 0
+          ? null
+          : ((entry.value - byPeriod[index - 1]!.value) /
+              Math.abs(byPeriod[index - 1]!.value)) *
+            100,
+    }));
   }
-  byPeriod = byPeriod.map((entry, index) => ({
-    ...entry,
-    growthPercent:
-      index === 0 || byPeriod[index - 1]!.value === 0
-        ? null
-        : ((entry.value - byPeriod[index - 1]!.value) /
-            Math.abs(byPeriod[index - 1]!.value)) *
-          100,
-  }));
   const bySegment = [...bySegmentMap.entries()]
     .map(([label, value]) => ({ label, value }))
     .sort((left, right) => right.value - left.value);
@@ -589,16 +686,214 @@ function evidenceForIssue(
   result: DataAnalysisResult,
   issue: DataQualityIssue,
 ): EvidenceDraft[] {
-  const matching = result.qualityEvidence.filter((evidence) =>
-    evidence.sourceRef.includes(`:${issue.columns.join(",")}:`),
+  const matching = result.qualityEvidence.filter(
+    (evidence) =>
+      evidence.sourceRef.includes(`:${issue.columns.join(",")}:`) &&
+      issue.rows.some(
+        (rows) =>
+          evidence.location?.rowRange?.start === rows.start &&
+          evidence.location.rowRange.end === rows.end,
+      ),
   );
-  return matching.length ? matching : [result.sourceEvidence];
+  return matching;
+}
+
+function truncateText(value: string, limit: number): string {
+  return value.slice(0, limit);
+}
+
+function spread<T>(values: readonly T[], limit: number): T[] {
+  if (values.length <= limit) return [...values];
+  if (limit < 2) return values.slice(0, limit);
+  const indexes = Array.from({ length: limit }, (_, index) =>
+    Math.round((index * (values.length - 1)) / (limit - 1)),
+  );
+  return [...new Set(indexes)].map((index) => values[index]!);
+}
+
+function narrativeInput(
+  result: DataAnalysisResult,
+  specialistInput: SpecialistInput,
+  system: string,
+  context: AgentContext,
+): z.infer<typeof NarrativeInputSchema> {
+  const limits: NarrativeLimits = {
+    periods: 16,
+    segments: 16,
+    qualityIssues: 12,
+    qualityColumns: 12,
+    qualityRows: 6,
+    sampleRows: 8,
+    sampleColumns: 16,
+    sampleCellChars: 200,
+    contextChars: 2000,
+  };
+  const outputSchema = z.toJSONSchema(NarrativeOutputSchema) as Record<
+    string,
+    unknown
+  >;
+  const maxInputTokens = context.ai.inputTokenLimit("mid") - 1024;
+  const headers = Object.keys(result.sampleRows[0] ?? {});
+
+  for (;;) {
+    const selectedPeriods = spread(result.metrics.byPeriod, limits.periods);
+    const selectedSegments = result.metrics.bySegment.slice(0, limits.segments);
+    const selectedIssues = result.dataQuality
+      .slice(0, limits.qualityIssues)
+      .map((issue) => ({
+        ...issue,
+        message: truncateText(issue.message, 300),
+        columns: issue.columns
+          .slice(0, limits.qualityColumns)
+          .map((column) => truncateText(column, 120)),
+        rows: issue.rows.slice(0, limits.qualityRows),
+        omittedColumnCount: Math.max(
+          0,
+          issue.columns.length - limits.qualityColumns,
+        ),
+        omittedRowGroupCount: Math.max(
+          0,
+          issue.rows.length - limits.qualityRows,
+        ),
+      }));
+    const importantColumns = [
+      result.metrics.valueColumn,
+      result.metrics.periodColumn,
+      result.metrics.segmentColumn,
+    ].filter((column): column is string => column !== null);
+    const sampleColumns = [
+      ...new Set([
+        ...importantColumns,
+        ...headers.filter((header) => !importantColumns.includes(header)),
+      ]),
+    ].slice(0, limits.sampleColumns);
+    const payload = NarrativeInputSchema.parse({
+      caseContext: truncateText(
+        [
+          `Title: ${specialistInput.case.title}`,
+          `Use case: ${specialistInput.case.useCase}`,
+          `Description: ${specialistInput.case.description}`,
+        ].join("\n"),
+        limits.contextChars,
+      ),
+      analysisInstructions: truncateText(
+        [
+          `Task: ${specialistInput.task.key}`,
+          specialistInput.task.instructions,
+        ].join("\n"),
+        limits.contextChars,
+      ),
+      metrics: {
+        ...result.metrics,
+        valueColumn: truncateText(result.metrics.valueColumn, 120),
+        periodColumn: result.metrics.periodColumn
+          ? truncateText(result.metrics.periodColumn, 120)
+          : null,
+        segmentColumn: result.metrics.segmentColumn
+          ? truncateText(result.metrics.segmentColumn, 120)
+          : null,
+        byPeriod: selectedPeriods.map((period) => ({
+          ...period,
+          label: truncateText(period.label, 120),
+        })),
+        bySegment: selectedSegments.map((segment) => ({
+          ...segment,
+          label: truncateText(segment.label, 120),
+        })),
+        topSegment: result.metrics.topSegment
+          ? {
+              ...result.metrics.topSegment,
+              label: truncateText(result.metrics.topSegment.label, 120),
+            }
+          : null,
+      },
+      omittedPeriodCount:
+        result.metrics.byPeriod.length - selectedPeriods.length,
+      omittedSegmentCount:
+        result.metrics.bySegment.length - selectedSegments.length,
+      dataQuality: selectedIssues,
+      omittedQualityIssueCount: Math.max(
+        0,
+        result.dataQuality.length - limits.qualityIssues,
+      ),
+      sampleRows: result.sampleRows
+        .slice(0, limits.sampleRows)
+        .map((row) =>
+          Object.fromEntries(
+            sampleColumns.map((column) => [
+              truncateText(column, 120),
+              row[column] === null
+                ? null
+                : truncateText(row[column] ?? "", limits.sampleCellChars),
+            ]),
+          ),
+        ),
+      omittedSampleRowCount: Math.max(
+        0,
+        result.sampleRows.length - limits.sampleRows,
+      ),
+      omittedSampleColumnCount: Math.max(
+        0,
+        headers.length - sampleColumns.length,
+      ),
+    });
+    if (
+      inputTokenAllowance({ system, input: payload, schema: outputSchema }) <=
+      maxInputTokens
+    ) {
+      return payload;
+    }
+
+    if (limits.sampleCellChars > 32) {
+      limits.sampleCellChars = Math.max(
+        32,
+        Math.floor(limits.sampleCellChars / 2),
+      );
+    } else if (limits.sampleColumns > 3) {
+      limits.sampleColumns = Math.max(3, Math.floor(limits.sampleColumns / 2));
+    } else if (limits.sampleRows > 1) {
+      limits.sampleRows = Math.max(1, Math.floor(limits.sampleRows / 2));
+    } else if (limits.segments > 2) {
+      limits.segments = Math.max(2, Math.floor(limits.segments / 2));
+    } else if (limits.periods > 2) {
+      limits.periods = Math.max(2, Math.floor(limits.periods / 2));
+    } else if (limits.qualityColumns > 2) {
+      limits.qualityColumns = Math.max(
+        2,
+        Math.floor(limits.qualityColumns / 2),
+      );
+    } else if (limits.qualityRows > 1) {
+      limits.qualityRows = Math.max(1, Math.floor(limits.qualityRows / 2));
+    } else if (limits.qualityIssues > 2) {
+      limits.qualityIssues = Math.max(2, Math.floor(limits.qualityIssues / 2));
+    } else if (limits.contextChars > 256) {
+      limits.contextChars = Math.max(256, Math.floor(limits.contextChars / 2));
+    } else {
+      throw new Error(
+        "The data-analysis narrative context exceeds the model input budget.",
+      );
+    }
+  }
 }
 
 function analysisOutput(
   result: DataAnalysisResult,
   narrative: z.infer<typeof NarrativeOutputSchema>,
 ): SpecialistOutput {
+  const assumptions = [
+    ...new Set([
+      ...result.assumptions,
+      ...narrative.insights.flatMap((insight) => insight.assumptions),
+    ]),
+  ];
+  const openQuestions = [
+    ...new Map(
+      [
+        ...result.openQuestions,
+        ...narrative.insights.flatMap((insight) => insight.openQuestions),
+      ].map((question) => [`${question.severity}:${question.text}`, question]),
+    ).values(),
+  ];
   const periodComponents = result.metrics.byPeriod.map(({ value }) => value);
   const valueComponents =
     periodComponents.reduce((sum, value) => sum + value, 0) ===
@@ -651,8 +946,8 @@ function analysisOutput(
     interpretation: narrative.interpretation,
     metrics: result.metrics,
     dataQuality: result.dataQuality,
-    assumptions: result.assumptions,
-    openQuestions: result.openQuestions,
+    assumptions,
+    openQuestions,
   });
   return SpecialistOutputSchema.parse({
     summary: narrative.interpretation,
@@ -668,6 +963,8 @@ export function createBusinessDataAnalystAgent(): SpecialistAgent {
     "You are a careful business data analyst.",
     "The numeric metrics and data-quality checks are already computed deterministically.",
     "Interpret only the supplied metrics and sample rows; never recalculate or invent numbers.",
+    "The aggregates and sample rows may be abbreviated; use the omitted counts and do not infer from omitted data.",
+    "Use the case context and task instructions to focus the interpretation.",
     "Do not claim trends, causes, or anomalies unsupported by the supplied values.",
     "Return concise interpretation, qualitative insights, explicit assumptions, and open questions.",
   ].join("\n");
@@ -676,24 +973,25 @@ export function createBusinessDataAnalystAgent(): SpecialistAgent {
     modelTier: "mid",
     systemPrompt,
     inputSchema: SpecialistInputSchema,
-    outputSchema: SpecialistOutputSchema,
+    outputSchema: SpecialistModelOutputSchema,
     profile: businessDataAnalystProfile,
     async run(
       input: SpecialistInput,
       context: AgentContext,
     ): Promise<AgentResult<SpecialistOutput>> {
-      const sourceTables = await context.documents.tablesAsync();
+      const citationDocumentIds = new Set(
+        input.documents.map((document) => document.documentId),
+      );
+      const sourceTables = (await context.documents.tablesAsync()).filter(
+        (source) => citationDocumentIds.has(source.documentId),
+      );
       const result = analyzeSalesTables(sourceTables);
       const narrativeResult = await context.ai.runStructured({
         tier: "mid",
         inputSchema: NarrativeInputSchema,
         outputSchema: NarrativeOutputSchema,
         system: systemPrompt,
-        input: {
-          metrics: result.metrics,
-          dataQuality: result.dataQuality,
-          sampleRows: result.sampleRows,
-        },
+        input: narrativeInput(result, input, systemPrompt, context),
         usageContext: { ...context.usage, taskId: context.taskId ?? undefined },
         signal: context.signal,
       });

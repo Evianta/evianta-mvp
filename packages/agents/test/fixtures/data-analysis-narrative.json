@@ -5,8 +5,13 @@
       "title": "Revenue increased by period",
       "description": "The grouped values show a rising trend across the supplied months.",
       "severity": "low",
-      "assumptions": [],
-      "openQuestions": []
+      "assumptions": ["The periods represent calendar months."],
+      "openQuestions": [
+        {
+          "text": "Would another period grouping be more useful?",
+          "severity": "low"
+        }
+      ]
     }
   ]
 }

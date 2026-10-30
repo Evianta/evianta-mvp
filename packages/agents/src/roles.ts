@@ -1,6 +1,10 @@
 import type { AgentProfile, AgentProfileRepository } from "@evianta/core";
 import { AgentProfileSetSchema } from "@evianta/core";
-import { defineStructuredAgent, type Agent } from "./agent.js";
+import {
+  defineStructuredAgent,
+  type Agent,
+  type AgentResult,
+} from "./agent.js";
 import { businessDataAnalystProfile } from "./data-analysis.js";
 import {
   PlanningInputSchema,
@@ -8,16 +12,22 @@ import {
   ReviewInputSchema,
   ReviewOutputSchema,
   SpecialistInputSchema,
+  SpecialistModelOutputSchema,
   SpecialistOutputSchema,
   type PlanningInput,
   type PlanningOutput,
   type ReviewInput,
   type ReviewOutput,
   type SpecialistInput,
+  type SpecialistModelOutput,
   type SpecialistOutput,
 } from "./contracts.js";
 
-export type SpecialistAgent = Agent<SpecialistInput, SpecialistOutput>;
+export type SpecialistAgent = Agent<
+  SpecialistInput,
+  SpecialistOutput,
+  SpecialistModelOutput
+>;
 export type ReviewAgent = Agent<ReviewInput, ReviewOutput>;
 export type CoordinatorAgent = Agent<PlanningInput, PlanningOutput>;
 
@@ -90,12 +100,22 @@ export function createSpecialistAgent(
   profile: AgentProfile,
   systemPrompt: string,
 ): SpecialistAgent {
-  return defineStructuredAgent({
+  const structured = defineStructuredAgent({
     profile,
     systemPrompt,
     inputSchema: SpecialistInputSchema,
-    outputSchema: SpecialistOutputSchema,
+    outputSchema: SpecialistModelOutputSchema,
   });
+  return {
+    ...structured,
+    async run(input, context): Promise<AgentResult<SpecialistOutput>> {
+      const result = await structured.run(input, context);
+      return {
+        ...result,
+        output: SpecialistOutputSchema.parse(result.output),
+      };
+    },
+  };
 }
 
 export function createGenericAnalystAgent(): SpecialistAgent {
