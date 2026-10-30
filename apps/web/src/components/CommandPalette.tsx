@@ -4,12 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Command } from "cmdk";
-import {
-  ArrowRight,
-  Command as CommandIcon,
-  FilePlus2,
-  Search,
-} from "lucide-react";
+import { ArrowRight, Command as CommandIcon, Search } from "lucide-react";
 
 const commands = [
   { label: "Start a task", href: "/", keywords: "prompt composer" },
@@ -19,7 +14,6 @@ const commands = [
     keywords: "sample replay",
   },
   { label: "View your cases", href: "/cases", keywords: "private workspace" },
-  { label: "New task", href: "/cases/new", keywords: "intake upload" },
   { label: "Admin usage", href: "/admin/usage", keywords: "cost tokens" },
 ];
 
@@ -84,18 +78,14 @@ export function CommandPalette() {
                   No matching actions.
                 </Command.Empty>
                 <Command.Group heading="Navigate">
-                  {commands.map((item, index) => (
+                  {commands.map((item) => (
                     <Command.Item
                       key={item.href}
                       value={`${item.label} ${item.keywords}`}
                       onSelect={() => navigate(item.href)}
                       className="command-item"
                     >
-                      {index === 2 ? (
-                        <FilePlus2 size={17} />
-                      ) : (
-                        <ArrowRight size={17} />
-                      )}
+                      <ArrowRight size={17} />
                       <span>{item.label}</span>
                       <kbd>↵</kbd>
                     </Command.Item>

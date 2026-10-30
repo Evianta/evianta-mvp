@@ -88,28 +88,19 @@ for (const phase of ["create", "upload"] as const) {
         });
       });
 
-      await page.goto("/cases/new");
+      await page.goto("/");
       await expect(
-        page.getByRole("navigation").getByRole("link", { name: "New task" }),
+        page
+          .getByRole("navigation")
+          .getByRole("link", { name: "Start", exact: true }),
       ).toHaveAttribute("aria-current", "page");
       await expect(
         page.getByRole("link", { name: "Cases", exact: true }),
       ).not.toHaveAttribute("aria-current", "page");
       await signIn(page);
       await page
-        .getByText("Recommended documents and optional case details", {
-          exact: true,
-        })
-        .click();
-      await page
-        .getByLabel("Case title (optional)", { exact: true })
-        .fill("Private old title");
-      await page
         .getByLabel("Task prompt", { exact: true })
-        .fill("Private old notes");
-      await page
-        .getByLabel("Workflow", { exact: true })
-        .selectOption("data-analysis");
+        .fill("Private old sales notes");
       await page.locator("#case-files").setInputFiles([
         {
           name: "old.csv",
@@ -130,14 +121,6 @@ for (const phase of ["create", "upload"] as const) {
         .getByRole("button", { name: "Sign out and revoke this session" })
         .click();
       await signIn(page);
-      await page
-        .getByText("Recommended documents and optional case details", {
-          exact: true,
-        })
-        .click();
-      await expect(
-        page.getByLabel("Case title (optional)", { exact: true }),
-      ).toHaveValue("");
       await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue(
         "",
       );
@@ -145,7 +128,7 @@ for (const phase of ["create", "upload"] as const) {
         page.getByRole("list", { name: "Selected documents" }),
       ).toHaveCount(0);
       await page
-        .getByLabel("Case title (optional)", { exact: true })
+        .getByLabel("Task prompt", { exact: true })
         .fill("New session title");
 
       const response = page.waitForResponse(
@@ -163,17 +146,17 @@ for (const phase of ["create", "upload"] as const) {
           ),
       );
 
-      await expect(page).toHaveURL(/\/cases\/new$/);
-      await expect(
-        page.getByLabel("Case title (optional)", { exact: true }),
-      ).toHaveValue("New session title");
+      await expect(page).toHaveURL("/");
+      await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue(
+        "New session title",
+      );
       await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0);
       await expect(
         page.getByRole("link", { name: "Open created case" }),
       ).toHaveCount(0);
       await expect(
         page.getByRole("button", { name: "Start task", exact: true }),
-      ).toBeDisabled();
+      ).toBeEnabled();
       expect(uploadCount).toBe(phase === "create" ? 0 : 1);
     });
   }
@@ -225,12 +208,12 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
     });
   });
 
-  await page.goto("/cases/new");
+  await page.goto("/");
   await signIn(page);
   await page.getByLabel("Task prompt", { exact: true }).fill("Recovery case");
   await page
-    .getByLabel("Workflow", { exact: true })
-    .selectOption("data-analysis");
+    .getByLabel("Task prompt", { exact: true })
+    .fill("Analyze sales for recovery");
   await page.locator("#case-files").setInputFiles([
     {
       name: "first.csv",

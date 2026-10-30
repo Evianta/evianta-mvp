@@ -87,8 +87,9 @@ export function AccessKeyDialogProvider({ children }: { children: ReactNode }) {
                     id="access-key-description"
                     className="mt-1 text-sm text-muted-foreground"
                   >
-                    Exchange your access key for a short-lived session. Your key
-                    is never saved.
+                    Your key is never saved. This browser saves your session
+                    token to keep you signed in across reloads until the
+                    30-minute session expires or you sign out.
                   </Dialog.Description>
                 </div>
               </div>

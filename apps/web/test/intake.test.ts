@@ -5,9 +5,43 @@ import {
   workflowSpecs,
   intakeCaseDetails,
   starterPrompts,
+  inferIntakeWorkflow,
 } from "../src/intake.js";
 
 describe("case intake", () => {
+  it.each([
+    ["Analyze the sales spreadsheet", [], "data-analysis"],
+    ["Help with this", [{ name: "q4_sales.xlsx" }], "data-analysis"],
+    [
+      "Review this file",
+      [{ name: "records.csv", header: "month,product,revenue" }],
+      "data-analysis",
+    ],
+    ["Reply to a 143(1) intimation about TDS", [], "tax-notice"],
+    ["Review", [{ name: "income-tax-notice.pdf" }], "tax-notice"],
+    ["Reconcile my overdue invoices", [], "msme-payment"],
+    [
+      "Help",
+      [{ name: "records.csv", header: "invoice_id,amount,payment_date" }],
+      "msme-payment",
+    ],
+    ["Review this", [{ name: "records.xlsx" }], null],
+    ["Help", [], null],
+    ["Analyze sales and respond to my tax notice", [], null],
+    ["Review my tax notice", [{ name: "sales.csv" }], null],
+    ["Create a dashboard", [{ name: "invoices.csv" }], null],
+  ] as const)(
+    "infers conservatively for %s and attachment hints",
+    (prompt, attachments, expected) => {
+      expect(inferIntakeWorkflow(prompt, [...attachments])).toBe(expected);
+    },
+  );
+
+  it("recognizes each starter without a classifier or model call", () => {
+    for (const [workflow, prompt] of Object.entries(starterPrompts)) {
+      expect(inferIntakeWorkflow(prompt, [])).toBe(workflow);
+    }
+  });
   it("derives a bounded title without changing or truncating the full prompt", () => {
     const prompt = `\n  ${"a".repeat(220)}\nKeep this full context.  `;
     const result = intakeCaseDetails(prompt, "");

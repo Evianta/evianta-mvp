@@ -4,6 +4,58 @@ import { ApiError } from "../src/api/errors.js";
 import { FetchWebApiClient } from "../src/api/client.js";
 
 describe("FetchWebApiClient", () => {
+  it("finishes sign-out when the server already invalidated the session, but surfaces revocation outages", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json(
+          { error: { message: "Session expired." } },
+          { status: 401 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          { error: { message: "Revocation unavailable." } },
+          { status: 503 },
+        ),
+      );
+    const client = new FetchWebApiClient({
+      getToken: () => null,
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+    await expect(
+      client.revokeSession("expired-session"),
+    ).resolves.toBeUndefined();
+    await expect(client.revokeSession("saved-session")).rejects.toMatchObject({
+      status: 503,
+    });
+    expect(fetcher.mock.calls[0][1]?.credentials).toBe("omit");
+  });
+  it("exchanges access keys without browser cookies", async () => {
+    const token = {
+      accessToken: "restored-token",
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json(token));
+    const client = new FetchWebApiClient({
+      getToken: () => null,
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+    expect(await client.exchangeAccessKey("test-access-key")).toEqual(token);
+    expect(fetcher.mock.calls[0]).toEqual([
+      "/auth/token",
+      expect.objectContaining({
+        credentials: "omit",
+        cache: "no-store",
+        method: "POST",
+      }),
+    ]);
+  });
+
   const run: RunDto = {
     id: "run-1",
     caseId: "case-1",
@@ -249,11 +301,13 @@ describe("FetchWebApiClient", () => {
     await client.exchangeAccessKey("temporary-key");
     const [, authRequest] = fetcher.mock.calls[0];
     expect(authRequest?.cache).toBe("no-store");
+    expect(authRequest?.credentials).toBe("omit");
     expect(authRequest?.body).toBe(
       JSON.stringify({ accessKey: "temporary-key" }),
     );
     await client.revokeSession("memory-token");
     expect(fetcher.mock.calls[1][0]).toBe("/auth/logout");
+    expect(fetcher.mock.calls[1][1]?.credentials).toBe("omit");
     expect(
       new Headers(fetcher.mock.calls[1][1]?.headers).get("Authorization"),
     ).toBe("Bearer memory-token");

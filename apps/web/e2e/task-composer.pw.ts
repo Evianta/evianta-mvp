@@ -146,25 +146,31 @@ test("suggestions are static, preserve selection through sign-in and require con
   await expect(
     page.getByRole("button", { name: "Start task", exact: true }),
   ).toBeDisabled();
-  await expect(page.locator("#case-files")).toBeDisabled();
+  await expect(page.locator("#case-files")).toBeEnabled();
   expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
 });
 
-test("manual prompts require a workflow and dataset, enforce configured limits and reject oversized prompts", async ({
+test("unclear prompts ask for selection without replacing text; file limits and prompt length are enforced", async ({
   page,
 }) => {
   const calls = await setup(page);
-  await page.goto("/cases/new");
+  await page.goto("/");
   await signIn(page);
   const prompt = page.getByLabel("Task prompt", { exact: true });
   await prompt.fill("My own question");
-  await expect(page.getByLabel("Workflow", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("combobox")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Start task", exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Start task", exact: true }).click();
+  await expect(
+    page.getByRole("group", { name: "Which type of work did you mean?" }),
+  ).toBeVisible();
+  expect(calls.create).toBe(0);
   await page
-    .getByLabel("Workflow", { exact: true })
-    .selectOption("data-analysis");
+    .getByRole("button", { name: "Choose Data analysis", exact: true })
+    .click();
+  await expect(prompt).toHaveValue("My own question");
   await page.getByRole("button", { name: "Start task", exact: true }).click();
   await expect(page.getByRole("main").getByRole("alert")).toContainText(
     "Attach a CSV or Excel",
@@ -218,6 +224,128 @@ test("edited prompt starts once with Enter, not Shift+Enter or IME; Cases reopen
   await page.getByRole("link", { name: record.title, exact: true }).click();
   await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
   expect(calls.start).toBe(1);
+});
+
+test("generic message uses CSV headers without uploading or classifying via a model", async ({
+  page,
+}) => {
+  const calls = await setup(page);
+  await page.goto("/");
+  await signIn(page);
+  await page
+    .getByLabel("Task prompt", { exact: true })
+    .fill("Please review the attached records");
+  await page
+    .locator("#case-files")
+    .setInputFiles({ ...source, name: "records.csv" });
+  await expect(
+    page.getByRole("status").filter({ hasText: "Detected: Data analysis" }),
+  ).toBeVisible();
+  expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
+  await page.getByRole("button", { name: "Start task", exact: true }).click();
+  await expect(page).toHaveURL(/\/cases\/composer-case$/);
+  expect(calls.input).toMatchObject({
+    title: "Please review the attached records",
+    description: "Please review the attached records",
+    useCase: "data-analysis",
+  });
+});
+
+test("conflicting message and data ask for selection; choosing never replaces the message or files", async ({
+  page,
+}) => {
+  const calls = await setup(page);
+  await prepare(page);
+  const prompt = page.getByLabel("Task prompt", { exact: true });
+  await prompt.fill("Review the income-tax notice");
+  await page.getByRole("button", { name: "Start task", exact: true }).click();
+  await expect(
+    page.getByRole("group", { name: "Which type of work did you mean?" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Choose Data analysis", exact: true })
+    .click();
+  await expect(prompt).toHaveValue("Review the income-tax notice");
+  await expect(
+    page.getByRole("list", { name: "Selected documents" }),
+  ).toContainText("sales.csv");
+  expect(calls.create).toBe(0);
+  await prompt.fill("Review my overdue invoices");
+  await page.getByRole("button", { name: "Start task", exact: true }).click();
+  await expect(
+    page.getByRole("group", { name: "Which type of work did you mean?" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", {
+      name: "Choose MSME delayed payment - Coming next",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Start task", exact: true }),
+  ).toBeDisabled();
+  await expect(prompt).toHaveValue("Review my overdue invoices");
+  expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
+});
+
+test("clear tax and MSME messages are detected but cannot start unavailable work", async ({
+  page,
+}) => {
+  const calls = await setup(page);
+  await page.goto("/");
+  await signIn(page);
+  for (const [message, label] of [
+    ["Reply to a 143(1) intimation about TDS", "Tax notice"],
+    ["Reconcile my overdue invoices", "MSME delayed payment"],
+  ]) {
+    await page.getByLabel("Task prompt", { exact: true }).fill(message);
+    await expect(
+      page.getByRole("status").filter({ hasText: `Detected: ${label}` }),
+    ).toContainText("Coming next");
+    await expect(
+      page.getByRole("button", { name: "Start task", exact: true }),
+    ).toBeDisabled();
+  }
+  expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
+});
+
+test("Start is the only intake surface and legacy links preserve sample origin through redirects", async ({
+  page,
+}) => {
+  const calls = await setup(page);
+  await page.goto("/cases/new");
+  await expect(page).toHaveURL("/");
+  await expect(
+    page
+      .getByRole("navigation")
+      .getByRole("link", { name: "New task", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("combobox")).toHaveCount(0);
+  await expect(page.locator("details")).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Private by design", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Ready for review", exact: true }),
+  ).toBeVisible();
+  const logos = page.locator('img[src="/logo.svg"]');
+  await expect(logos).toHaveCount(2);
+  expect(
+    await logos.evaluateAll((images) =>
+      images.every(
+        (image) =>
+          image instanceof HTMLImageElement &&
+          image.complete &&
+          image.naturalWidth > 0,
+      ),
+    ),
+  ).toBe(true);
+  await page.goto("/cases/new?source=sample-sales-quarter");
+  await expect(page).toHaveURL(/\/\?source=sample-sales-quarter/);
+  await expect(
+    page.getByText("Copying a synthetic workflow", { exact: true }),
+  ).toBeVisible();
+  expect(calls.create).toBe(0);
 });
 
 test("disables duplicate submission while creation is pending", async ({
@@ -448,7 +576,7 @@ test("authenticated composer and attachment controls pass axe in mobile light/da
   page,
 }) => {
   await setup(page);
-  await prepare(page, "/cases/new");
+  await prepare(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await expect(

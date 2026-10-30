@@ -281,6 +281,7 @@ export class FetchWebApiClient implements WebApiClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ accessKey }),
       cache: "no-store",
+      credentials: "omit",
     });
     if (!response.ok) {
       throw new ApiError(
@@ -298,8 +299,10 @@ export class FetchWebApiClient implements WebApiClient {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
+      credentials: "omit",
     });
-    if (!response.ok) throw await this.errorFromResponse(response);
+    if (!response.ok && response.status !== 401)
+      throw await this.errorFromResponse(response);
   }
 
   private jsonInit(method: string, body: unknown): RequestInit {

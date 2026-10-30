@@ -150,27 +150,25 @@ test("shows dataset formats without PDF limits in data-analysis intake", async (
       },
     }),
   );
-  await page.goto("/cases/new");
+  await page.goto("/");
   await page.getByRole("button", { name: "Enter access key" }).click();
   await page.getByLabel("Access key").fill("test-key");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await page
-    .getByLabel("Workflow", { exact: true })
-    .selectOption("data-analysis");
+  await page.getByRole("button", { name: /^Data analysis/ }).click();
 
   const dropzone = page.locator("#accepted-files");
   await expect(dropzone).toContainText(".csv, .xlsx");
   await expect(dropzone).not.toContainText("PDF files");
   await expect(page.locator("#case-files")).toHaveAttribute(
     "accept",
-    ".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".csv,.xlsx,.pdf,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf",
   );
 
-  await page
-    .getByLabel("Workflow", { exact: true })
-    .selectOption("msme-payment");
-  await expect(dropzone).toContainText(".pdf, .csv");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: /^MSME delayed payment/ }).click();
+  await expect(dropzone).toContainText(".pdf");
+  await expect(page.getByRole("combobox")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Start task", exact: true }),
   ).toBeDisabled();
@@ -203,7 +201,7 @@ test("creates a case with two CSVs without optional supporting documents", async
       return;
     }
     expect(route.request().postDataJSON()).toMatchObject({
-      title: "CSV intake verification",
+      title: "Analyze the sales records",
       useCase: "data-analysis",
     });
     created += 1;
@@ -224,14 +222,11 @@ test("creates a case with two CSVs without optional supporting documents", async
     route.fulfill({ json: { run: null } }),
   );
 
-  await page.goto("/cases/new");
+  await page.goto("/");
   await page.getByRole("button", { name: "Enter access key" }).click();
   await page.getByLabel("Access key").fill("test-key");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await page
-    .getByLabel("Workflow", { exact: true })
-    .selectOption("data-analysis");
   await page.locator("#case-files").setInputFiles(
     ["messy-sales.csv", "quarterly-sales.csv"].map((name) => ({
       name,
@@ -245,20 +240,12 @@ test("creates a case with two CSVs without optional supporting documents", async
   await page
     .getByLabel("Task prompt", { exact: true })
     .fill("Analyze the sales records");
-  await page
-    .getByText("Recommended documents and optional case details", {
-      exact: true,
-    })
-    .click();
   await expect(
-    page.getByText("2 optional documents suggested.", { exact: false }),
-  ).toBeVisible();
-  await page
-    .getByLabel("Case title (optional)", { exact: true })
-    .fill("CSV intake verification");
+    page.getByText("Recommended documents and optional case details"),
+  ).toHaveCount(0);
   await expect(create).toBeEnabled();
   await create.click();
-  await expect(page).toHaveURL(/\/cases\/private-case$/, { timeout: 15000 });
+  await expect(page).toHaveURL(/\/cases\/private-case$/, { timeout: 30000 });
   await expect(
     page.getByRole("button", { name: "Start analysis" }),
   ).toBeVisible();

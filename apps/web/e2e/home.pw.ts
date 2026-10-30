@@ -54,7 +54,9 @@ test("sample pages are read-only and copying asks for a key", async ({
     "type",
     "password",
   );
-  await expect(page.getByText("Your key is never saved.")).toBeVisible();
+  await expect(
+    page.getByText("Your key is never saved.", { exact: false }),
+  ).toBeVisible();
 });
 
 test("copying asks for a session and admin access is checked by the server", async ({
@@ -88,7 +90,7 @@ test("copying asks for a session and admin access is checked by the server", asy
   await page.getByRole("button", { name: "Copy to a private case" }).click();
   await page.getByLabel("Access key").fill("fixture-test-key");
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page).toHaveURL(/\/cases\/new\?source=sample-msme-overdue/);
+  await expect(page).toHaveURL(/\/\?source=sample-msme-overdue/);
   await expect(
     page.getByRole("heading", { name: "What would you like to work on?" }),
   ).toBeVisible();

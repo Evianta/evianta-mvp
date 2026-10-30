@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
-  Activity,
   ArrowUp,
   ChartNoAxesCombined,
   FileText,
@@ -13,7 +13,6 @@ import {
   Trash2,
 } from "lucide-react";
 import {
-  UseCaseSchema,
   liveWorkflows,
   type DocumentMetadataDto,
   type IntakeConfiguration,
@@ -21,7 +20,7 @@ import {
   type UseCase,
 } from "@evianta/core";
 import {
-  deriveIntakeOpenQuestions,
+  inferIntakeWorkflow,
   formatFileSize,
   intakeCaseDetails,
   starterPrompts,
@@ -36,6 +35,7 @@ import { StatusBadge } from "./Badges";
 
 interface SelectedDocument {
   file: File;
+  header?: string;
   state: "selected" | "uploading" | DocumentMetadataDto["state"];
   retryable: boolean;
 }
@@ -92,11 +92,11 @@ function TaskComposer({
   initialSuggestion: UseCase | null;
   onPreviewSuggestion: (workflow: UseCase) => void;
 }) {
-  const { session, api } = useSession();
+  const { session, api, signOutPending } = useSession();
   const { openAccessKeyDialog } = useAccessKeyDialog();
   const router = useRouter();
-  const [useCase, setUseCase] = useState<UseCase | "">(
-    sourceSample?.case.useCase ?? initialSuggestion ?? "",
+  const [selectedWorkflow, setSelectedWorkflow] = useState<UseCase | null>(
+    sourceSample?.case.useCase ?? initialSuggestion,
   );
   const [prompt, setPrompt] = useState(
     session && sourceSample
@@ -105,10 +105,10 @@ function TaskComposer({
         ? starterPrompts[initialSuggestion]
         : "",
   );
-  const [title, setTitle] = useState(
-    session && sourceSample ? `${sourceSample.case.title} (copy)` : "",
-  );
   const [files, setFiles] = useState<SelectedDocument[]>([]);
+  const [readingFiles, setReadingFiles] = useState(false);
+  const [needsSelection, setNeedsSelection] = useState(false);
+  const [createdWorkflow, setCreatedWorkflow] = useState<UseCase | null>(null);
   const [configuration, setConfiguration] =
     useState<IntakeConfiguration | null>(null);
   const [configurationAttempt, setConfigurationAttempt] = useState(0);
@@ -122,17 +122,31 @@ function TaskComposer({
   const inFlight = useRef(false);
   const composing = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileReadInFlight = useRef(false);
+  const inferredWorkflow = inferIntakeWorkflow(
+    prompt,
+    files.map(({ file, header }) => ({ name: file.name, header })),
+  );
+  const useCase = createdWorkflow ?? selectedWorkflow ?? inferredWorkflow;
   const spec = useCase ? workflowSpecs[useCase] : null;
   const available = Boolean(
     useCase && configuration?.workflows.includes(useCase),
   );
-  const frozen = pending || Boolean(createdCaseId) || uncertain;
-  const openQuestions = useCase
-    ? deriveIntakeOpenQuestions(
-        useCase,
-        files.map(({ file }) => file.name),
-      )
-    : [];
+  const frozen = pending || readingFiles || Boolean(createdCaseId) || uncertain;
+  const acceptedExtensions = [
+    ...new Set(
+      Object.values(workflowSpecs).flatMap(
+        (workflow) => workflow.allowedExtensions,
+      ),
+    ),
+  ];
+  const acceptedMimeTypes = [
+    ...new Set(
+      Object.values(workflowSpecs).flatMap(
+        (workflow) => workflow.allowedMimeTypes,
+      ),
+    ),
+  ];
 
   useEffect(() => {
     active.current = true;
@@ -169,15 +183,24 @@ function TaskComposer({
       !window.confirm("Replace your current prompt with this suggestion?")
     )
       return;
-    setUseCase(workflow);
+    setSelectedWorkflow(workflow);
+    setNeedsSelection(false);
     setPrompt(starterPrompts[workflow]);
     setError(null);
     if (!session) onPreviewSuggestion(workflow);
     else inputRef.current?.focus();
   }
 
-  function chooseFiles(selected: File[]) {
-    if (!session || !spec || !configuration || pending || uncertain) return;
+  async function chooseFiles(selected: File[]) {
+    if (!selected.length) return;
+    if (
+      !session ||
+      !configuration ||
+      pending ||
+      uncertain ||
+      fileReadInFlight.current
+    )
+      return;
     if (files.length + selected.length > configuration.uploadMaxFiles) {
       setError(
         `Select at most ${configuration.uploadMaxFiles} files for this task.`,
@@ -185,8 +208,9 @@ function TaskComposer({
       return;
     }
     const limits = {
-      ...spec,
-      maxFileBytes: Math.min(spec.maxFileBytes, configuration.uploadMaxBytes),
+      ...workflowSpecs["data-analysis"],
+      allowedMimeTypes: acceptedMimeTypes,
+      maxFileBytes: configuration.uploadMaxBytes,
     };
     const invalid = selected
       .map((file) => validateUploadFile(file, limits))
@@ -196,23 +220,51 @@ function TaskComposer({
       return;
     }
     setError(null);
-    setFiles((current) => [
-      ...current,
-      ...selected.map(
-        (file): SelectedDocument => ({
-          file,
-          state: "selected",
-          retryable: false,
-        }),
-      ),
-    ]);
+    setReadingFiles(true);
+    fileReadInFlight.current = true;
+    try {
+      const documents = await Promise.all(
+        selected.map(
+          async (file): Promise<SelectedDocument> => ({
+            file,
+            header: file.name.toLowerCase().endsWith(".csv")
+              ? (await file.slice(0, 8192).text())
+                  .split(/\r?\n/, 1)[0]
+                  .replaceAll(/[_-]/g, " ")
+              : undefined,
+            state: "selected",
+            retryable: false,
+          }),
+        ),
+      );
+      if (!active.current) return;
+      setFiles((current) => [...current, ...documents]);
+      if (!createdCaseId) setSelectedWorkflow(null);
+      setNeedsSelection(false);
+    } catch (reason) {
+      if (active.current)
+        setError(
+          `An attachment could not be read: ${reason instanceof Error ? reason.message : "Try selecting the file again."}`,
+        );
+    } finally {
+      if (active.current) setReadingFiles(false);
+      fileReadInFlight.current = false;
+    }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session || inFlight.current || uncertain) return;
+    if (!session || inFlight.current || fileReadInFlight.current || uncertain)
+      return;
     setError(null);
-    if (!useCase || !available || !configuration || !spec) {
+    if (!useCase) {
+      setNeedsSelection(true);
+      setError(
+        "I could not identify a single workflow from this message and its attachments. Choose the type of work below.",
+      );
+      return;
+    }
+    if (!available || !configuration || !spec) {
       setError(
         useCase
           ? "This workflow is coming next and cannot start live work."
@@ -220,11 +272,9 @@ function TaskComposer({
       );
       return;
     }
-    const details = intakeCaseDetails(prompt, title);
+    const details = intakeCaseDetails(prompt, "");
     if (!prompt.trim() || !details.success) {
-      setError(
-        "Enter a task prompt of up to 5,000 characters and an optional title of up to 200 characters.",
-      );
+      setError("Enter a task prompt of up to 5,000 characters.");
       return;
     }
     if (!files.length) {
@@ -266,6 +316,7 @@ function TaskComposer({
           if (!active.current) return;
           caseId = created.id;
           setCreatedCaseId(caseId);
+          setCreatedWorkflow(useCase);
         } catch (reason) {
           if (!active.current) return;
           if (!isRejected(reason)) {
@@ -412,9 +463,14 @@ function TaskComposer({
       aria-labelledby="task-heading"
     >
       <div className="task-entry-heading">
-        <span className="brand-mark mx-auto mb-4">
-          <Activity size={23} aria-hidden="true" />
-        </span>
+        <Image
+          src="/logo.svg"
+          alt=""
+          width={44}
+          height={44}
+          className="mx-auto mb-4"
+          priority
+        />
         <h1 id="task-heading" className="page-title">
           What would you like to work on?
         </h1>
@@ -445,7 +501,7 @@ function TaskComposer({
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => {
             event.preventDefault();
-            if (available) chooseFiles(Array.from(event.dataTransfer.files));
+            void chooseFiles(Array.from(event.dataTransfer.files));
           }}
         >
           <div className="px-5 pt-4">
@@ -459,7 +515,12 @@ function TaskComposer({
               rows={3}
               value={prompt}
               disabled={!session || frozen}
-              onChange={(event) => setPrompt(event.target.value)}
+              onChange={(event) => {
+                setPrompt(event.target.value);
+                setSelectedWorkflow(null);
+                setNeedsSelection(false);
+                setError(null);
+              }}
               placeholder="Describe what you want to understand or prepare..."
               aria-describedby="prompt-help"
               onCompositionStart={() => {
@@ -483,29 +544,6 @@ function TaskComposer({
             />
           </div>
           <div className="task-composer-toolbar">
-            <div className="min-w-0 flex-1">
-              <label htmlFor="workflow" className="field-label">
-                Workflow
-              </label>
-              <select
-                id="workflow"
-                className="select-input !w-auto max-w-full !rounded-full !py-1.5 !text-xs"
-                value={useCase}
-                disabled={!session || frozen}
-                onChange={(event) => {
-                  const parsed = UseCaseSchema.safeParse(event.target.value);
-                  setUseCase(parsed.success ? parsed.data : "");
-                }}
-              >
-                <option value="">Choose a workflow</option>
-                {(Object.keys(workflowSpecs) as UseCase[]).map((workflow) => (
-                  <option key={workflow} value={workflow}>
-                    {workflowSpecs[workflow].label}
-                    {!liveWorkflows.includes(workflow) ? " - Coming next" : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
             <label className="task-attachment" htmlFor="case-files">
               <FileUp size={15} aria-hidden="true" /> Files
               <input
@@ -515,26 +553,31 @@ function TaskComposer({
                 aria-describedby="accepted-files"
                 type="file"
                 multiple
-                disabled={!session || !available || pending || uncertain}
-                accept={
-                  spec
-                    ? [
-                        ...spec.allowedExtensions,
-                        ...spec.allowedMimeTypes,
-                      ].join(",")
-                    : undefined
+                disabled={
+                  !session ||
+                  !configuration ||
+                  pending ||
+                  readingFiles ||
+                  uncertain
                 }
+                accept={[...acceptedExtensions, ...acceptedMimeTypes].join(",")}
                 onChange={(event) => {
-                  chooseFiles(Array.from(event.target.files ?? []));
+                  void chooseFiles(Array.from(event.target.files ?? []));
                   event.target.value = "";
                 }}
               />
             </label>
             <Button
               type="submit"
-              className="!rounded-full"
+              className="ml-auto !rounded-full"
               disabled={
-                !session || pending || uncertain || !available || !prompt.trim()
+                !session ||
+                pending ||
+                readingFiles ||
+                uncertain ||
+                !configuration ||
+                (Boolean(useCase) && !available) ||
+                !prompt.trim()
               }
             >
               {pending
@@ -593,11 +636,13 @@ function TaskComposer({
                         state !== "failed" &&
                         state !== "partial")
                     }
-                    onClick={() =>
+                    onClick={() => {
                       setFiles((current) =>
                         current.filter((_, position) => position !== index),
-                      )
-                    }
+                      );
+                      if (!createdCaseId) setSelectedWorkflow(null);
+                      setNeedsSelection(false);
+                    }}
                   >
                     <Trash2 size={16} aria-hidden="true" />
                   </button>
@@ -606,6 +651,34 @@ function TaskComposer({
             </ul>
           )}
         </div>
+        {needsSelection && (
+          <fieldset className="surface-card space-y-3 p-4">
+            <legend className="px-1 text-sm font-medium">
+              Which type of work did you mean?
+            </legend>
+            <p className="text-xs text-muted-foreground">
+              Your message and files will stay as they are. No case is created
+              until you choose Start task.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {(Object.keys(workflowSpecs) as UseCase[]).map((workflow) => (
+                <Button
+                  key={workflow}
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setSelectedWorkflow(workflow);
+                    setNeedsSelection(false);
+                    setError(null);
+                  }}
+                >
+                  Choose {workflowSpecs[workflow].label}
+                  {!liveWorkflows.includes(workflow) ? " - Coming next" : ""}
+                </Button>
+              ))}
+            </div>
+          </fieldset>
+        )}
         <div className="task-suggestions" aria-label="Starter suggestions">
           {(Object.keys(starterPrompts) as UseCase[]).map((workflow) => {
             const Icon =
@@ -633,9 +706,15 @@ function TaskComposer({
             );
           })}
         </div>
-        {useCase && !liveWorkflows.includes(useCase) && (
-          <p className="text-center text-xs text-warning" role="status">
-            Coming next. This workflow cannot start live work yet.
+        {useCase && (
+          <p
+            className="text-center text-xs text-muted-foreground"
+            role="status"
+          >
+            {selectedWorkflow || createdWorkflow ? "Selected" : "Detected"}:{" "}
+            {workflowSpecs[useCase].label}.
+            {!liveWorkflows.includes(useCase) &&
+              " Coming next. This workflow cannot start live work yet."}
           </p>
         )}
         <p
@@ -648,17 +727,12 @@ function TaskComposer({
           id="accepted-files"
           className="text-center text-[11px] text-muted-foreground"
         >
-          {spec
-            ? spec.allowedExtensions.join(", ")
-            : "Choose a workflow to see accepted files"}
-          {configuration && spec && (
+          {acceptedExtensions.join(", ")}
+          {configuration && (
             <>
               {" "}
-              / Up to{" "}
-              {formatFileSize(
-                Math.min(spec.maxFileBytes, configuration.uploadMaxBytes),
-              )}{" "}
-              per file; {configuration.uploadMaxFiles} files per task
+              / Up to {formatFileSize(configuration.uploadMaxBytes)} per file;{" "}
+              {configuration.uploadMaxFiles} files per task
             </>
           )}
           {spec?.allowedMimeTypes.includes("application/pdf") && (
@@ -673,41 +747,6 @@ function TaskComposer({
             </>
           )}
         </p>
-        <details>
-          <summary className="cursor-pointer text-xs font-medium">
-            Recommended documents and optional case details
-          </summary>
-          <div className="mt-4 space-y-3">
-            <label htmlFor="case-title" className="field-label">
-              Case title (optional)
-            </label>
-            <input
-              id="case-title"
-              className="text-input"
-              value={title}
-              disabled={!session || frozen}
-              onChange={(event) => setTitle(event.target.value)}
-            />
-            <p className="mx-auto max-w-xl text-center text-[11px] leading-relaxed text-muted-foreground">
-              Otherwise named from the first nonempty prompt line, up to 200
-              characters.
-            </p>
-            {spec && (
-              <p className="text-xs">
-                Required to run: {spec.requiredDocuments.join(", ")}.
-              </p>
-            )}
-            <p className="text-center text-xs text-muted-foreground">
-              {openQuestions.length} optional documents suggested. These
-              suggestions do not block starting.
-            </p>
-            <ul className="space-y-1 text-xs text-muted-foreground">
-              {openQuestions.map((question) => (
-                <li key={question.id}>{question.text}</li>
-              ))}
-            </ul>
-          </div>
-        </details>
         <p className="text-xs text-muted-foreground">
           Start task creates a private case, uploads and reads your files, and
           starts work when ready. Extraction and execution may use paid models
@@ -751,7 +790,11 @@ function TaskComposer({
         )}
         <p className="text-center text-xs text-muted-foreground" role="status">
           {phase ||
-            (session && !configuration ? "Loading task settings..." : "")}
+            (readingFiles
+              ? "Checking attachment headers..."
+              : session && !configuration
+                ? "Loading task settings..."
+                : "")}
         </p>
         <div className="flex flex-wrap justify-center gap-3">
           {session && !configuration && error && (
@@ -763,7 +806,11 @@ function TaskComposer({
             </Button>
           )}
           {!session && (
-            <Button variant="secondary" onClick={() => openAccessKeyDialog()}>
+            <Button
+              variant="secondary"
+              disabled={signOutPending}
+              onClick={() => openAccessKeyDialog()}
+            >
               Enter access key
             </Button>
           )}

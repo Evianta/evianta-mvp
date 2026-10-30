@@ -1,6 +1,6 @@
-import Link from "next/link";
-import { ArrowRight, Check, CircleHelp, LockKeyhole } from "lucide-react";
-import { publicSamples } from "../src/samples";
+import { notFound } from "next/navigation";
+import { Check, CircleHelp, ListChecks } from "lucide-react";
+import { findPublicSample, publicSamples } from "../src/samples";
 import { PublicSampleCard } from "../src/components/PublicSampleCard";
 import { CaseIntake } from "../src/components/CaseIntake";
 
@@ -18,14 +18,21 @@ const principles = [
     icon: CircleHelp,
   },
   {
-    title: "Private by design",
+    title: "Ready for review",
     description:
-      "Your session and private work never appear in public sample pages.",
-    icon: LockKeyhole,
+      "Keep progress, charts and supporting records together in one case.",
+    icon: ListChecks,
   },
 ];
 
-export default function HomePage() {
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ source?: string }>;
+}) {
+  const { source } = await searchParams;
+  const sourceSample = source ? findPublicSample(source) : undefined;
+  if (source && !sourceSample) notFound();
   const featured = publicSamples.find(
     (fixture) => fixture.case.id === "sample-msme-overdue",
   );
@@ -33,7 +40,7 @@ export default function HomePage() {
 
   return (
     <div>
-      <CaseIntake />
+      <CaseIntake sourceSample={sourceSample} />
 
       <section id="samples" aria-labelledby="sample-heading" className="mt-12">
         <div className="section-heading">
@@ -41,12 +48,6 @@ export default function HomePage() {
             <h2 id="sample-heading">Explore a synthetic replay</h2>
             <p>Read-only synthetic previews. No model calls or live records.</p>
           </div>
-          <Link
-            href="/cases/new"
-            className="inline-flex items-center gap-1 text-xs font-medium text-primary"
-          >
-            New task <ArrowRight size={14} aria-hidden="true" />
-          </Link>
         </div>
         <div className="card-grid">
           {featured && <PublicSampleCard fixture={featured} featured />}

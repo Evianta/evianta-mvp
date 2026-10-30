@@ -62,10 +62,13 @@ Compiler caches live inside each package's generated `dist` directory, so
 removing generated output also invalidates its build cache.
 
 The browser connects directly to `NEXT_PUBLIC_API_BASE_URL`, which defaults in
-the example to `http://127.0.0.1:3001`, matching the API's IPv4 loopback binding.
+the example to `http://localhost:3001`. The API binds to IPv4 loopback.
 `WEB_ORIGIN` must exactly match the web origin, including the hostname and port;
 opening the web app with `127.0.0.1` instead of `localhost` also requires updating
-`WEB_ORIGIN`. API health is available at `http://127.0.0.1:3001/healthz`.
+`WEB_ORIGIN`. Login is saved per web origin, so switching hostnames uses a
+different browser storage area. The API URL can use either loopback hostname;
+session persistence does not depend on cookies. API health is available at
+`http://127.0.0.1:3001/healthz`.
 The web commands and API/worker/admin commands load the root `.env`; exported
 environment variables take precedence. Restart development after changing
 environment values, and rebuild the web app after changing public values used
@@ -86,11 +89,16 @@ The admin command requires the API build (`pnpm dev` prepares it, or run
 Enter it in the web sign-in dialog; do not put it in a URL, source file or log.
 The worker must be running for submitted analyses to complete.
 
-To check the data-analysis flow, open `/` or `/cases/new`, sign in, and choose
-the **Data analysis** suggestion or write a prompt and select its workflow.
+To check the data-analysis flow, open **Start** at `/`, sign in, and choose
+the **Data analysis** suggestion or write your own prompt.
 Attach a `.csv` or `.xlsx` dataset and choose **Start task**. The prompt stays
-editable; the title is derived from its first nonempty line unless supplied in
-optional case details. Data dictionaries and reporting-period notes are optional.
+editable; the title is derived from its first nonempty line. There is no workflow
+dropdown or optional-details form. Local rules use the message, attachment names
+and up to 8 KB of CSV header text to detect one of the three supported task types.
+Unclear or conflicting intent asks you to choose, without changing your message
+or files and without creating a case. No model or upload is used for detection.
+PDF/Excel contents are not read for classification; ambiguous filenames/messages
+need a choice. Old `/cases/new` links redirect to Start and preserve sample origin.
 Enter submits, Shift+Enter adds a line, and IME composition does not submit.
 Starting authorizes private case creation, upload/extraction and execution under
 existing model limits. File limits and enabled workflows come from the authenticated
@@ -111,6 +119,8 @@ Private drafts/files stay in memory and clear with the session. Signed-out
 visitors can select a static suggestion but cannot enter private data or files.
 Public replay remains read-only. Sample-origin intake copies only the workflow
 setup, not synthetic files or results. Case-grounded Ask remains later work.
+The supplied Evianta logo is bundled locally from `https://evianta.com/logo.svg`;
+opening private work does not request the logo from a third-party host.
 
 From `apps/api`, the equivalent command is `pnpm admin issue-key <user-id>`.
 `issue-key` requires an existing user ID, not an email address. An optional
@@ -174,8 +184,8 @@ Next.js compilation; they are functional checks, not latency measurements.
 
 The browser suite owns port 3100 and starts a dedicated fixture-backed web server;
 it never reuses a running development server. Free that port before testing.
-Stop web development before browser tests or production builds, since Next.js
-commands in the same checkout share generated output.
+Next.js commands still share generated TypeScript entry files; avoid concurrent
+Next.js commands when validating types or production builds.
 CI runs the same quality gates and a separate Chromium browser job, retaining
 browser reports and traces on failure.
 
@@ -283,8 +293,23 @@ behind a known proxy chain. JWTs last 30 minutes and are checked against the
 current user, access key and revocable session on each request.
 The API, worker and admin commands load the repository-root `.env` automatically;
 environment variables already exported by the process take precedence.
-Clients must hold tokens in memory only and ask users to re-enter their key
-after a reload or token expiry; there are no refresh tokens.
+Access keys are never saved in the browser. For this demo, `localStorage` under
+`evianta.session` holds only the JWT and its absolute expiry. Reload restores an
+unexpired session without renewing it. API/SSE requests use bearer authorization;
+there is no authentication cookie or cookie restoration endpoint. The server
+still checks user, access-key and session revocation on every protected request.
+Logout, expiry and authentication rejection remove the saved token and clear
+private state. Logout also revokes the server session; a failed revocation is
+reported with a retry action even though the local login is already removed.
+Tabs follow changes to the saved session so signing out in one clears the others.
+Invalid saved data is removed and reported; unavailable browser storage is an
+explicit error, not a successful persistent sign-in. There are no refresh tokens.
+
+This is a demo trade-off: scripts running on the web origin, including injected
+scripts from an XSS flaw, can read localStorage tokens. Keep HTTPS and XSS
+prevention for deployment. Server rate limits, revocation and spending limits
+remain enforced independently of browser persistence. CORS still permits only
+the exact `WEB_ORIGIN`; credentialed cookie CORS is not enabled.
 
 Build and run the API with `pnpm --filter @evianta/api build` and
 `pnpm --filter @evianta/api start`. Run durable case execution in a separate

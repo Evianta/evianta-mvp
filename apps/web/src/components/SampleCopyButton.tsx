@@ -10,7 +10,7 @@ export function SampleCopyButton({ caseId }: { caseId: string }) {
   const { session } = useSession();
   const { openAccessKeyDialog } = useAccessKeyDialog();
   const router = useRouter();
-  const destination = `/cases/new?source=${encodeURIComponent(caseId)}`;
+  const destination = `/?source=${encodeURIComponent(caseId)}`;
 
   function continueToCopy() {
     if (session) {

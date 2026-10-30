@@ -130,6 +130,83 @@ describe("API access-key authentication", () => {
     });
   }
 
+  it("issues bearer tokens without setting cookies or enabling credentialed CORS", async () => {
+    const response = await exchange(accessKey.plaintext);
+    expect(response.headers.get("set-cookie")).toBeNull();
+    const issued = (await response.json()) as {
+      accessToken: string;
+      expiresAt: string;
+    };
+    now = new Date(now.getTime() + 10 * 60 * 1000);
+    const restored = await fetch(`${baseUrl}/auth/me`, {
+      headers: {
+        authorization: `Bearer ${issued.accessToken}`,
+        origin: webOrigin,
+      },
+    });
+    expect(restored.status).toBe(200);
+    expect(restored.headers.get("cache-control")).toBe("no-store");
+    expect(restored.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(restored.headers.get("set-cookie")).toBeNull();
+    expect(await restored.json()).toHaveProperty(
+      "session.expiresAt",
+      issued.expiresAt,
+    );
+    expect(
+      (
+        await fetch(`${baseUrl}/auth/me`, {
+          headers: { cookie: `evianta_session=${issued.accessToken}` },
+        })
+      ).status,
+    ).toBe(401);
+    const denied = await fetch(`${baseUrl}/auth/me`, {
+      headers: {
+        authorization: `Bearer ${issued.accessToken}`,
+        origin: "https://untrusted.example",
+      },
+    });
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get("access-control-allow-origin")).toBeNull();
+    expect((await fetch(`${baseUrl}/auth/session`)).status).toBe(404);
+  });
+
+  it.each(["expired", "key-revoked", "session-revoked"] as const)(
+    "rejects a persisted bearer token for an %s session",
+    async (state) => {
+      const response = await exchange(accessKey.plaintext);
+      const issued = (await response.json()) as { accessToken: string };
+      if (state === "expired") now = new Date(now.getTime() + 1800001);
+      if (state === "key-revoked")
+        await repositories.accessKeys.revoke(
+          accessKey.record.id,
+          now.toISOString(),
+        );
+      if (state === "session-revoked") {
+        const context = await service.authenticate(issued.accessToken);
+        await service.logout(context.session.id);
+      }
+      const restored = await me(issued.accessToken);
+      expect(restored.status).toBe(401);
+      expect(restored.headers.get("set-cookie")).toBeNull();
+      expect(await restored.json()).not.toHaveProperty("accessToken");
+    },
+  );
+
+  it("revokes the bearer session without setting a cookie when signing out", async () => {
+    const response = await exchange(accessKey.plaintext);
+    const issued = (await response.json()) as { accessToken: string };
+    const logout = await fetch(`${baseUrl}/auth/logout`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${issued.accessToken}`,
+        origin: webOrigin,
+      },
+    });
+    expect(logout.status).toBe(204);
+    expect(logout.headers.get("set-cookie")).toBeNull();
+    expect((await me(issued.accessToken)).status).toBe(401);
+  });
+
   it("exchanges a key for a short-lived token without persisting the key", async () => {
     const response = await exchange(accessKey.plaintext);
     expect(response.status).toBe(200);

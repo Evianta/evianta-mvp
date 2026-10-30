@@ -9,6 +9,35 @@ export const starterPrompts: Record<UseCase, string> = {
     "Reconcile my invoices and payments, identify overdue amounts, and prepare a follow-up case pack.",
 };
 
+export interface IntakeAttachmentHint {
+  name: string;
+  header?: string;
+}
+
+export function inferIntakeWorkflow(
+  prompt: string,
+  attachments: IntakeAttachmentHint[],
+): UseCase | null {
+  const signals: Record<UseCase, RegExp> = {
+    "data-analysis":
+      /\b(sales|revenue|dashboard|data\s+analysis|analy[sz]e.{0,30}(?:data|spreadsheet)|dataset|trends|anomalies)\b/i,
+    "tax-notice":
+      /\b(tax|tds|itr|ais|form\s*26as|intimation|assessment|143\s*\(\s*1\s*\)|income.tax)\b/i,
+    "msme-payment":
+      /\b(msme|invoice|invoices|overdue|delayed.payment|payment|payments|receivable|receivables)\b/i,
+  };
+  const text = [
+    prompt,
+    ...attachments.map(({ name, header }) =>
+      `${name} ${header ?? ""}`.replaceAll(/[_-]/g, " "),
+    ),
+  ].join("\n");
+  const matches = (Object.keys(signals) as UseCase[]).filter((workflow) =>
+    signals[workflow].test(text),
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function intakeCaseDetails(prompt: string, title: string) {
   const derivedTitle =
     prompt
