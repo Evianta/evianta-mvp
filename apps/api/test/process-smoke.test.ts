@@ -2,6 +2,7 @@ import { MongoMemoryServer } from "mongodb-memory-server";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 import { describe, expect, it } from "vitest";
@@ -81,7 +82,7 @@ describe("production process entrypoints", () => {
     const mongo = await MongoMemoryServer.create({
       instance: { ip: "127.0.0.1" },
     });
-    const storageDir = await mkdtemp(`${tmpdir()}\\evianta-api-smoke-`);
+    const storageDir = await mkdtemp(join(tmpdir(), "evianta-api-smoke-"));
     const port = await freePort();
     const appDirectory = fileURLToPath(new URL("..", import.meta.url));
     const environment: NodeJS.ProcessEnv = {
