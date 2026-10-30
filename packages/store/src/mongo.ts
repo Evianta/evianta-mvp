@@ -305,6 +305,8 @@ export class MongoStore {
       },
       cases: {
         refreshUsage: (scope, request) => this.caseRefreshUsage(scope, request),
+        requestDeletion: (id, ownerId, at) =>
+          this.caseRequestDeletion(id, ownerId, at),
         findOwnedById: (id, ownerId) => this.caseFindOwnedById(id, ownerId),
         findPublicSampleById: (id) => this.caseFindPublicSampleById(id),
         listOwned: (ownerId, cursor) => this.caseListOwned(ownerId, cursor),
@@ -634,6 +636,25 @@ export class MongoStore {
     const result = await this.cases.replaceOne(
       { _id: parsed.id, ownerId, isSample: false },
       { ...documentFor(parsed), createdAtInstant: new Date(parsed.createdAt) },
+    );
+    return result.matchedCount === 1;
+  }
+
+  async caseRequestDeletion(
+    id: string,
+    ownerId: string,
+    at: string,
+  ): Promise<boolean> {
+    const timestamp = TimestampSchema.parse(at);
+    const result = await this.cases.updateOne(
+      { _id: id, ownerId, isSample: false, status: { $ne: "deleted" } },
+      {
+        $set: {
+          status: "archived",
+          deletionRequestedAt: timestamp,
+          updatedAt: timestamp,
+        },
+      },
     );
     return result.matchedCount === 1;
   }

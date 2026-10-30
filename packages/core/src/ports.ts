@@ -42,6 +42,7 @@ export interface CaseRepository {
   listOwned(ownerId: string, cursor?: string): Promise<Case[]>;
   insert(record: Case): Promise<void>;
   replaceOwned(record: Case, ownerId: string): Promise<boolean>;
+  requestDeletion(id: string, ownerId: string, at: string): Promise<boolean>;
   refreshUsage(
     scope: OwnerScope,
     request: { runId: string; fencingToken: number; at: string },

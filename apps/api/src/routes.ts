@@ -19,6 +19,7 @@ import {
   type ExtractionRepository,
   type FindingRepository,
   type RunEventRepository,
+  type RunEvent,
   type RunRecord,
   type RunRepository,
   type TaskRepository,
@@ -271,22 +272,33 @@ function parseMultipart(
     let totalRequestBytes = 0;
     let failed = false;
     const files: UploadedFile[] = [];
-    const parser = Busboy({
-      headers: request.headers,
-      limits: {
-        files: limits.uploadMaxFiles,
-        fileSize: limits.uploadMaxBytes,
-        fields: 0,
-        parts: limits.uploadMaxFiles,
-        headerPairs: 200,
-      },
-    });
-
     const fail = (error: Error) => {
       if (failed) return;
       failed = true;
       reject(error);
     };
+
+    let parser: ReturnType<typeof Busboy>;
+    try {
+      parser = Busboy({
+        headers: request.headers,
+        limits: {
+          files: limits.uploadMaxFiles,
+          fileSize: limits.uploadMaxBytes,
+          fields: 0,
+          parts: limits.uploadMaxFiles + 1,
+          headerPairs: 200,
+        },
+      });
+    } catch (error) {
+      fail(
+        Object.assign(
+          error instanceof Error ? error : new Error("Invalid multipart body"),
+          { status: 400 },
+        ),
+      );
+      return;
+    }
 
     request.on("data", (chunk: Buffer) => {
       totalRequestBytes += chunk.length;
@@ -302,9 +314,15 @@ function parseMultipart(
       }
     });
     request.once("aborted", () =>
-      fail(new Error("Upload request was aborted")),
+      fail(
+        Object.assign(new Error("Upload request was aborted"), {
+          status: 400,
+        }),
+      ),
     );
-    parser.once("error", fail);
+    parser.once("error", (error: Error) =>
+      fail(Object.assign(error, { status: 400 })),
+    );
     parser.on("field", () => {
       fail(
         Object.assign(new Error("Unexpected multipart field"), {
@@ -321,6 +339,11 @@ function parseMultipart(
     });
     parser.on("filesLimit", () => {
       fail(Object.assign(new Error("Too many files"), { status: 413 }));
+    });
+    parser.on("partsLimit", () => {
+      fail(
+        Object.assign(new Error("Too many multipart parts"), { status: 413 }),
+      );
     });
     parser.on("file", (field, stream, info) => {
       if (field !== "files") {
@@ -339,6 +362,9 @@ function parseMultipart(
       }
       const chunks: Buffer[] = [];
       let fileBytes = 0;
+      stream.once("error", (error: Error) =>
+        fail(Object.assign(error, { status: 400 })),
+      );
       stream.on("limit", () => {
         fail(
           Object.assign(new Error("File exceeds the upload limit"), {
@@ -609,17 +635,79 @@ function registerStreamRoute(
       let closed = false;
       let cursor = cursorValue;
       let lastHeartbeat = Date.now();
-      let nextSessionCheck =
-        Date.now() + configuration.sessionRecheckSeconds * 1_000;
-      response.once("close", () => {
+      let sessionCheckTimer: ReturnType<typeof setTimeout> | undefined;
+      const blockedWrites = new Set<() => void>();
+      const clearSessionTimers = () => {
+        if (sessionCheckTimer) clearTimeout(sessionCheckTimer);
+        if (expiryTimer) clearTimeout(expiryTimer);
+      };
+      const finish = () => {
+        if (closed) return;
         closed = true;
-      });
+        clearSessionTimers();
+        for (const unblock of [...blockedWrites]) unblock();
+      };
+      const terminateForSession = () => {
+        if (closed) return;
+        const canSignal = response.writableLength === 0;
+        finish();
+        if (!response.destroyed && !response.writableEnded) {
+          if (canSignal) {
+            const writable = response.write(
+              sseFrame({ event: "reauthenticate", data: {} }),
+            );
+            if (writable) response.end();
+            else response.destroy();
+          } else {
+            response.destroy();
+          }
+        }
+      };
+      const checkSession = async () => {
+        if (closed) return;
+        if (sessionExpiresAt <= Date.now()) {
+          terminateForSession();
+          return;
+        }
+        try {
+          await service.authenticate(token);
+        } catch {
+          terminateForSession();
+          return;
+        }
+        if (closed) return;
+        sessionCheckTimer = setTimeout(
+          () => void checkSession(),
+          configuration.sessionRecheckSeconds * 1_000,
+        );
+      };
+      const expiryTimer = setTimeout(
+        terminateForSession,
+        Math.max(1, sessionExpiresAt - Date.now()),
+      );
+      response.once("close", finish);
+      response.once("finish", finish);
+      sessionCheckTimer = setTimeout(
+        () => void checkSession(),
+        configuration.sessionRecheckSeconds * 1_000,
+      );
       const write = async (frame: string): Promise<void> => {
         if (closed) return;
         if (response.write(frame)) return;
         await new Promise<void>((resolve) => {
-          response.once("drain", resolve);
-          response.once("close", resolve);
+          let settled = false;
+          const unblock = () => {
+            if (settled) return;
+            settled = true;
+            response.off("drain", unblock);
+            response.off("close", unblock);
+            blockedWrites.delete(unblock);
+            resolve();
+          };
+          blockedWrites.add(unblock);
+          response.once("drain", unblock);
+          response.once("close", unblock);
+          if (closed) unblock();
         });
       };
 
@@ -634,30 +722,11 @@ function registerStreamRoute(
               },
             }),
           );
+          finish();
           response.end();
           return;
         }
-        while (!closed) {
-          const now = Date.now();
-          if (sessionExpiresAt <= now) {
-            await write(sseFrame({ event: "reauthenticate", data: {} }));
-            break;
-          }
-          if (now >= nextSessionCheck) {
-            try {
-              await service.authenticate(token);
-            } catch {
-              await write(sseFrame({ event: "reauthenticate", data: {} }));
-              break;
-            }
-            nextSessionCheck =
-              now + configuration.sessionRecheckSeconds * 1_000;
-          }
-          const events = await services.repositories.events.listAfter(
-            caseId,
-            cursor,
-            scope,
-          );
+        const writeEvents = async (events: RunEvent[]): Promise<boolean> => {
           if (
             cursor > 0 &&
             events.length > 0 &&
@@ -672,7 +741,7 @@ function registerStreamRoute(
                 },
               }),
             );
-            break;
+            return false;
           }
           for (const event of events) {
             const parsed = RunEventSchema.parse(event);
@@ -686,12 +755,38 @@ function registerStreamRoute(
                 }),
               );
             }
+            if (closed) return true;
           }
+          return true;
+        };
+        while (!closed) {
+          const events = await services.repositories.events.listAfter(
+            caseId,
+            cursor,
+            scope,
+          );
+          if (!(await writeEvents(events))) {
+            break;
+          }
+          if (closed) break;
           const currentRun = await services.repositories.runs.findOwnedById(
             runId,
             principal.userId,
           );
-          if (!currentRun || terminalStatuses.has(currentRun.status)) break;
+          if (!currentRun) break;
+          if (terminalStatuses.has(currentRun.status)) {
+            if (currentRun.terminalEvent?.pending) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              continue;
+            }
+            const finalEvents = await services.repositories.events.listAfter(
+              caseId,
+              cursor,
+              scope,
+            );
+            if (!(await writeEvents(finalEvents))) break;
+            break;
+          }
           if (Date.now() - lastHeartbeat >= 15_000) {
             await write(": heartbeat\n\n");
             lastHeartbeat = Date.now();
@@ -710,6 +805,7 @@ function registerStreamRoute(
         if (!response.destroyed) response.destroy();
         return;
       }
+      finish();
       if (!response.destroyed) response.end();
     },
   );
@@ -991,7 +1087,21 @@ export function registerCaseApiRoutes(
       try {
         files = await parseMultipart(request, services.uploads);
       } catch (error) {
-        next(error);
+        const status =
+          typeof error === "object" &&
+          error !== null &&
+          "status" in error &&
+          (error.status === 413 || error.status === 400)
+            ? error.status
+            : 400;
+        sendApiError(
+          response,
+          status,
+          status === 413 ? "limit-reached" : "validation-failed",
+          status === 413
+            ? "Upload exceeds configured limits"
+            : "Invalid multipart upload",
+        );
         return;
       }
       const scope = { ownerId: principal.userId, caseId: record.id };
@@ -1025,6 +1135,8 @@ export function registerCaseApiRoutes(
           next(error);
           return;
         }
+      }
+      for (const file of files) {
         const contentHash = hash(file.bytes);
         let objectKey: string | undefined;
         let metadataInserted = false;
@@ -1189,13 +1301,13 @@ export function registerCaseApiRoutes(
       const record = requestCase(request);
       if (!principal || !record) return;
       const at = new Date().toISOString();
-      const pending = CaseSchema.parse({
-        ...record,
-        status: "archived",
-        deletionRequestedAt: at,
-        updatedAt: at,
-      });
-      if (!(await repositories.cases.replaceOwned(pending, principal.userId))) {
+      if (
+        !(await repositories.cases.requestDeletion(
+          record.id,
+          principal.userId,
+          at,
+        ))
+      ) {
         sendApiError(response, 404, "not-found", "Resource not found");
         return;
       }

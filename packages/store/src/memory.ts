@@ -292,6 +292,28 @@ export class InMemoryStore {
           this.cases.set(record.id, record);
           return true;
         },
+        requestDeletion: async (id, ownerId, at) => {
+          const timestamp = TimestampSchema.parse(at);
+          const record = this.cases.get(id);
+          if (
+            !record ||
+            record.ownerId !== ownerId ||
+            record.isSample ||
+            record.status === "deleted"
+          ) {
+            return false;
+          }
+          this.cases.set(
+            id,
+            parse(CaseSchema, {
+              ...record,
+              status: "archived",
+              deletionRequestedAt: timestamp,
+              updatedAt: timestamp,
+            }),
+          );
+          return true;
+        },
       },
       users: {
         findById: async (id) => {

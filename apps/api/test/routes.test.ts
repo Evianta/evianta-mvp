@@ -312,6 +312,13 @@ describe("case API routes", () => {
     ).toMatchObject({ status: "queued" });
 
     await worker.runOnceAsync();
+    const listAfter = repositories.events.listAfter.bind(repositories.events);
+    let eventReads = 0;
+    repositories.events.listAfter = async (...args) => {
+      eventReads += 1;
+      if (eventReads <= 2) return [];
+      return listAfter(...args);
+    };
     const stream = await fetch(
       `${baseUrl}/cases/${created.case.id}/stream?runId=${run.id}`,
       { headers: authHeaders() },
@@ -322,6 +329,7 @@ describe("case API routes", () => {
     expect(frames).toContain("event: run-started");
     expect(frames).toContain("event: run-completed");
     expect(frames).toMatch(/id: \d+/);
+    repositories.events.listAfter = listAfter;
 
     const futureCursor = await fetch(
       `${baseUrl}/cases/${created.case.id}/stream?runId=${run.id}&cursor=999999`,
@@ -344,6 +352,64 @@ describe("case API routes", () => {
       },
     );
     expect(oversized.status).toBe(413);
+
+    const invalidBatch = new FormData();
+    invalidBatch.append(
+      "files",
+      new Blob(["Valid first file"], { type: "text/plain" }),
+      "valid.txt",
+    );
+    invalidBatch.append(
+      "files",
+      new Blob([Uint8Array.of(0, 1, 2)], { type: "image/png" }),
+      "unsupported.png",
+    );
+    const rejectedBatch = await fetch(
+      `${baseUrl}/cases/${created.case.id}/documents`,
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: invalidBatch,
+      },
+    );
+    expect(rejectedBatch.status).toBe(400);
+    expect(
+      await repositories.documents.listOwned({
+        ownerId: user.id,
+        caseId: created.case.id,
+      }),
+    ).toHaveLength(1);
+
+    const tooManyFiles = new FormData();
+    for (let index = 0; index < 6; index += 1) {
+      tooManyFiles.append(
+        "files",
+        new Blob(["x"], { type: "text/plain" }),
+        `file-${index}.txt`,
+      );
+    }
+    const tooMany = await fetch(
+      `${baseUrl}/cases/${created.case.id}/documents`,
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: tooManyFiles,
+      },
+    );
+    expect(tooMany.status).toBe(413);
+
+    const malformedMultipart = await fetch(
+      `${baseUrl}/cases/${created.case.id}/documents`,
+      {
+        method: "POST",
+        headers: {
+          ...authHeaders(),
+          "content-type": "multipart/form-data",
+        },
+        body: "malformed multipart request",
+      },
+    );
+    expect(malformedMultipart.status).toBe(400);
 
     const session = (await authenticationService.authenticate(token)).session;
     let authenticationChecks = 0;
@@ -377,6 +443,100 @@ describe("case API routes", () => {
     await expect(authenticationService.authenticate(token)).rejects.toThrow();
     expect(authenticationChecks).toBeGreaterThanOrEqual(3);
     expect(await protectedDownload.text()).toBe("");
+  });
+
+  it("requests case deletion without overwriting concurrent usage updates", async () => {
+    const created = await createCase();
+    const findOwnedById = repositories.cases.findOwnedById.bind(
+      repositories.cases,
+    );
+    let concurrentUpdate = false;
+    repositories.cases.findOwnedById = async (id, ownerId) => {
+      const current = await findOwnedById(id, ownerId);
+      if (current && !concurrentUpdate) {
+        concurrentUpdate = true;
+        await repositories.cases.replaceOwned(
+          {
+            ...current,
+            usage: {
+              ...current.usage,
+              reservedUsd: current.usage.reservedUsd + 1,
+            },
+          },
+          ownerId,
+        );
+      }
+      return current;
+    };
+
+    const response = await fetch(`${baseUrl}/cases/${created.case.id}`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      caseId: created.case.id,
+      status: "deletion-pending",
+    });
+    expect(
+      await repositories.cases.findOwnedById(created.case.id, user.id),
+    ).toMatchObject({
+      status: "archived",
+      usage: { reservedUsd: 1 },
+    });
+  });
+
+  it("ends an event stream when its session is revoked during an event read", async () => {
+    const created = await createCase();
+    const runResponse = await fetch(`${baseUrl}/cases/${created.case.id}/run`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    expect(runResponse.status).toBe(202);
+    const { run } = (await runResponse.json()) as { run: { id: string } };
+
+    const listAfter = repositories.events.listAfter.bind(repositories.events);
+    let eventReads = 0;
+    let releaseRead!: () => void;
+    const blockedRead = new Promise<Awaited<ReturnType<typeof listAfter>>>(
+      (resolve) => {
+        releaseRead = () => resolve([]);
+      },
+    );
+    repositories.events.listAfter = (...args) => {
+      eventReads += 1;
+      return eventReads === 2 ? blockedRead : listAfter(...args);
+    };
+
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      const response = await fetch(
+        `${baseUrl}/cases/${created.case.id}/stream?runId=${run.id}`,
+        { headers: authHeaders() },
+      );
+      expect(response.status).toBe(200);
+      if (!response.body) throw new Error("The event stream has no body");
+      reader = response.body.getReader();
+      const session = (await authenticationService.authenticate(token)).session;
+      await authenticationService.logout(session.id);
+
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
+      ]);
+      expect(result).not.toBeNull();
+      expect(new TextDecoder().decode(result?.value)).toContain(
+        "event: reauthenticate",
+      );
+    } finally {
+      releaseRead();
+      repositories.events.listAfter = listAfter;
+      await reader?.cancel().catch(() => undefined);
+    }
   });
 
   it("restricts administrator usage reports to administrator sessions", async () => {

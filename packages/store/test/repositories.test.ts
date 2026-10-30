@@ -208,6 +208,51 @@ function repositoryContract(
       ).toBe(false);
     });
 
+    it("requests deletion without replacing current case usage or metadata", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const stale = (await repositories.cases.findOwnedById(
+        "case-1",
+        "owner-1",
+      ))!;
+      const latestUsage = {
+        ...stale.usage,
+        reservedUsd: stale.usage.reservedUsd + 1,
+      };
+      await repositories.cases.replaceOwned(
+        {
+          ...stale,
+          title: "Latest title",
+          usage: latestUsage,
+          updatedAt: "2026-01-15T00:00:01.000Z",
+        },
+        "owner-1",
+      );
+
+      expect(
+        await repositories.cases.requestDeletion(
+          "case-1",
+          "owner-1",
+          "2026-01-15T00:00:02.000Z",
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.cases.findOwnedById("case-1", "owner-1"),
+      ).toMatchObject({
+        title: "Latest title",
+        usage: latestUsage,
+        status: "archived",
+        deletionRequestedAt: "2026-01-15T00:00:02.000Z",
+        updatedAt: "2026-01-15T00:00:02.000Z",
+      });
+      expect(
+        await repositories.cases.requestDeletion(
+          "case-1",
+          "owner-2",
+          "2026-01-15T00:00:03.000Z",
+        ),
+      ).toBe(false);
+    });
+
     it("refreshes only case usage under the current run generation", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
