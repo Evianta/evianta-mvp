@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { RunRepository } from "@evianta/core";
+import type { RunRecord, RunRepository } from "@evianta/core";
 import { silentLogger, type AgentLogger } from "./agent.js";
 import { errorCode } from "./errors.js";
 import type { ExecutionResult, Orchestrator } from "./orchestrator.js";
@@ -37,6 +37,7 @@ export class RunWorker {
   private loop: Promise<void> | null = null;
   private current: Promise<unknown> | null = null;
   private wake: (() => void) | null = null;
+  private cursor: Pick<RunRecord, "createdAt" | "id"> | undefined;
 
   constructor(private readonly options: RunWorkerOptions) {
     this.workerId = options.workerId ?? `worker:${randomUUID()}`;
@@ -49,9 +50,12 @@ export class RunWorker {
     const candidates = await this.options.runs.listClaimable(
       this.now().toISOString(),
       this.options.batchSize ?? 10,
+      this.cursor,
     );
+    if (!candidates.length) this.cursor = undefined;
     for (const run of candidates) {
       if (this.stopping) return null;
+      this.cursor = { createdAt: run.createdAt, id: run.id };
       if (run.terminalEvent?.pending) {
         await this.options.orchestrator.publishTerminalAsync(run);
         return { outcome: "finalized", run };
@@ -80,6 +84,7 @@ export class RunWorker {
       );
       this.current = execution;
       try {
+        this.cursor = undefined;
         return await execution;
       } finally {
         this.current = null;

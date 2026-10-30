@@ -41,6 +41,10 @@ export interface CaseRepository {
   listOwned(ownerId: string, cursor?: string): Promise<Case[]>;
   insert(record: Case): Promise<void>;
   replaceOwned(record: Case, ownerId: string): Promise<boolean>;
+  refreshUsage(
+    scope: OwnerScope,
+    request: { runId: string; fencingToken: number; at: string },
+  ): Promise<boolean>;
 }
 
 export interface EvidenceRepository {
@@ -134,7 +138,11 @@ export interface RunRepository {
    * Lists queued or running runs whose lease is absent or expired at `at`,
    * oldest first, so a worker can claim new or abandoned work.
    */
-  listClaimable(at: string, limit?: number): Promise<RunRecord[]>;
+  listClaimable(
+    at: string,
+    limit?: number,
+    after?: Pick<RunRecord, "createdAt" | "id">,
+  ): Promise<RunRecord[]>;
 }
 
 export interface DeliverableRepository {
@@ -271,7 +279,7 @@ export interface UsageLedgerRepository {
     ownerId: string,
     caseId: string,
     runId: string,
-    taskId: string,
+    taskId: string | null,
     at: string,
   ): Promise<void>;
   listForRun(

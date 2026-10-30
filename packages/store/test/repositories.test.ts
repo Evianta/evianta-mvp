@@ -208,6 +208,106 @@ function repositoryContract(
       ).toBe(false);
     });
 
+    it("refreshes only case usage under the current run generation", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.usagePrices.insert(makeUsagePrice());
+      const request = {
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:01:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      };
+      const first = await repositories.runAdmission.acquire(request);
+      await repositories.usageAdmission.reserve({
+        ...makeReservationRequest("usage-refresh", 0.1),
+        leaseId: first.leaseId,
+        fencingToken: first.fencingToken,
+      });
+      const second = await repositories.runAdmission.acquire({
+        ...request,
+        leaseId: "recovery-lease",
+        at: "2026-01-15T00:02:00.000Z",
+        expiresAt: "2026-01-15T00:03:00.000Z",
+      });
+      const current = (await repositories.cases.findOwnedById(
+        "case-1",
+        "owner-1",
+      ))!;
+      await repositories.cases.replaceOwned(
+        { ...current, title: "Updated by user" },
+        "owner-1",
+      );
+      expect(
+        await repositories.cases.refreshUsage(ownerScope, {
+          runId: "run-1",
+          fencingToken: first.fencingToken,
+          at: request.at,
+        }),
+      ).toBe(false);
+      expect(
+        await repositories.cases.refreshUsage(ownerScope, {
+          runId: "run-1",
+          fencingToken: second.fencingToken,
+          at: "2026-01-15T00:02:00.000Z",
+        }),
+      ).toBe(true);
+      expect(
+        await repositories.cases.findOwnedById("case-1", "owner-1"),
+      ).toMatchObject({
+        title: "Updated by user",
+        usage: { costStatus: "unknown", costUsd: null, reservedUsd: 0.100002 },
+      });
+      expect(
+        await repositories.cases.refreshUsage(
+          {
+            ...ownerScope,
+            ownerId: "owner-2",
+          },
+          {
+            runId: "run-1",
+            fencingToken: second.fencingToken,
+            at: timestamp,
+          },
+        ),
+      ).toBe(false);
+    });
+
+    it("paginates claimable runs by timestamp instant and ID without omissions", async () => {
+      for (const [id, createdAt] of [
+        ["A", "2026-01-15T01:00:00+02:00"],
+        ["a", "2026-01-14T23:00:00Z"],
+        ["B", "2026-01-15T00:00:00Z"],
+      ]) {
+        await repositories.cases.insert(makeCase(`case-${id}`, "owner-1"));
+        await repositories.runs.insert({
+          ...makeRun(id, `case-${id}`, "owner-1"),
+          createdAt,
+          leaseExpiresAt: null,
+        });
+      }
+      const first = await repositories.runs.listClaimable(timestamp, 1);
+      const second = await repositories.runs.listClaimable(
+        timestamp,
+        1,
+        first[0],
+      );
+      const third = await repositories.runs.listClaimable(
+        timestamp,
+        1,
+        second[0],
+      );
+      expect([...first, ...second, ...third].map((run) => run.id)).toEqual([
+        "A",
+        "a",
+        "B",
+      ]);
+    });
+
     it("compares session expiry timestamps as instants", async () => {
       await repositories.sessions.insert({
         id: "session-expired",

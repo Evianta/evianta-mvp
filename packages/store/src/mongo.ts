@@ -13,6 +13,8 @@ import {
   RunRecordSchema,
   SessionRecordSchema,
   TaskSchema,
+  summarizeUsage,
+  UsageLedgerEntrySchema,
   TaskPlanSchema,
   UserRecordSchema,
   UsageRecordSchema,
@@ -270,6 +272,7 @@ export class MongoStore {
         upsert: (profile) => this.agentUpsert(profile),
       },
       cases: {
+        refreshUsage: (scope, request) => this.caseRefreshUsage(scope, request),
         findOwnedById: (id, ownerId) => this.caseFindOwnedById(id, ownerId),
         findPublicSampleById: (id) => this.caseFindPublicSampleById(id),
         listOwned: (ownerId, cursor) => this.caseListOwned(ownerId, cursor),
@@ -329,7 +332,8 @@ export class MongoStore {
         findOwnedById: (id, ownerId) => this.runFindOwnedById(id, ownerId),
         insert: (record, tasks) => this.runInsert(record, tasks),
         updateOwned: (record, ownerId) => this.runUpdateOwned(record, ownerId),
-        listClaimable: (at, limit) => this.runListClaimable(at, limit),
+        listClaimable: (at, limit, after) =>
+          this.runListClaimable(at, limit, after),
       },
       deliverables: {
         findOwnedById: (id, scope) => this.deliverableFindOwnedById(id, scope),
@@ -587,6 +591,45 @@ export class MongoStore {
       { ...documentFor(parsed), createdAtInstant: new Date(parsed.createdAt) },
     );
     return result.matchedCount === 1;
+  }
+
+  async caseRefreshUsage(
+    scope: OwnerScope,
+    request: { runId: string; fencingToken: number; at: string },
+  ): Promise<boolean> {
+    const at = TimestampSchema.parse(request.at);
+    return this.withTransaction(async (session) => {
+      const fenced = await this.runs.updateOne(
+        {
+          _id: request.runId,
+          caseId: scope.caseId,
+          ownerId: scope.ownerId,
+          fencingToken: request.fencingToken,
+          status: { $in: ["queued", "running", "waiting-for-input"] },
+        },
+        { $inc: { usageWrites: 1 } },
+        { session },
+      );
+      if (fenced.matchedCount !== 1) return false;
+      const entries = await this.options.db
+        .collection("usageLedger")
+        .find({ ownerId: scope.ownerId, caseId: scope.caseId }, { session })
+        .toArray();
+      const usage = summarizeUsage(
+        entries.map((entry) => decode(UsageLedgerEntrySchema, entry)!),
+      );
+      const updated = await this.cases.updateOne(
+        {
+          _id: scope.caseId,
+          ownerId: scope.ownerId,
+          isSample: false,
+          status: { $ne: "deleted" },
+        },
+        { $set: { usage, updatedAt: at } },
+        { session },
+      );
+      return updated.matchedCount === 1;
+    });
   }
 
   async userFindById(id: string): Promise<UserRecord | null> {
@@ -1103,7 +1146,11 @@ export class MongoStore {
     });
   }
 
-  async runListClaimable(at: string, limit = 50): Promise<RunRecord[]> {
+  async runListClaimable(
+    at: string,
+    limit = 50,
+    after?: Pick<RunRecord, "createdAt" | "id">,
+  ): Promise<RunRecord[]> {
     const atMs = Date.parse(TimestampSchema.parse(at));
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
       throw new StoreError("Invalid run query limit", "invalid-query-limit");
@@ -1136,6 +1183,25 @@ export class MongoStore {
             createdAtInstant: { $dateFromString: { dateString: "$createdAt" } },
           },
         },
+        ...(after
+          ? [
+              {
+                $match: {
+                  $or: [
+                    {
+                      createdAtInstant: {
+                        $gt: new Date(TimestampSchema.parse(after.createdAt)),
+                      },
+                    },
+                    {
+                      createdAtInstant: new Date(after.createdAt),
+                      _id: { $gt: after.id },
+                    },
+                  ],
+                },
+              },
+            ]
+          : []),
         { $sort: { createdAtInstant: 1, _id: 1 } },
         { $limit: limit },
         { $unset: "createdAtInstant" },

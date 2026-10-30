@@ -364,6 +364,7 @@ export const TaskSchema = z.object({
   instructions: z.string().optional(),
   resumeKeys: z.array(z.string()).optional(),
   resumeInput: z.record(z.string(), z.unknown()).optional(),
+  usageEntryCount: NonNegativeIntegerSchema.optional(),
   status: TaskStatusSchema,
   attemptCount: NonNegativeIntegerSchema,
   lastError: SanitizedErrorSchema.nullable(),

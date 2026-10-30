@@ -5,7 +5,7 @@ import {
   isGraphBubbleUp,
   type BaseCheckpointSaver,
 } from "@langchain/langgraph";
-import type { AiClient } from "@evianta/ai";
+import { inputTokenAllowance, type AiClient } from "@evianta/ai";
 import type {
   ApprovalRepository,
   Case,
@@ -49,6 +49,7 @@ import {
   type FindingDraft,
   type PriorFinding,
   type ReviewOutput,
+  type SpecialistInput,
   type SpecialistOutput,
 } from "./contracts.js";
 import { createDocumentAccess } from "./documents.js";
@@ -426,6 +427,7 @@ export class Orchestrator {
         lastError: rerun ? null : task.lastError,
         usage: emptyUsageSummary(),
         resumeKeys: [],
+        usageEntryCount: 0,
       };
     });
     const run = await this.insertRunAsync(
@@ -736,9 +738,36 @@ export class Orchestrator {
             .map((task) => [task.id, task.instructions!]),
         ),
       };
+    const reference = this.options.plans.get(caseRecord.useCase);
+    if (reference.version !== run.planVersion) {
+      throw new OrchestrationError(
+        "The registered reference plan does not match the queued run version",
+        "plan-version-mismatch",
+      );
+    }
+    const planningUsage = (
+      await this.repos.usageLedger.listForRun(
+        scope.ownerId,
+        scope.caseId,
+        run.id,
+      )
+    ).filter((entry) => entry.taskId === null);
+    if (planningUsage.some((entry) => entry.reservationStatus !== "released")) {
+      await this.repos.usageLedger.markInterrupted(
+        scope.ownerId,
+        scope.caseId,
+        run.id,
+        null,
+        this.timestamp(),
+      );
+      throw new OrchestrationError(
+        "Planning was dispatched without a durable plan; an explicit retry is required",
+        "planning-interrupted",
+      );
+    }
     const documents = await execution.documents.listAsync();
     const plan = await planCaseAsync({
-      reference: this.options.plans.get(caseRecord.useCase),
+      reference,
       caseRecord,
       documents: documents.map(({ id, name, mimeType }) => ({
         id,
@@ -780,6 +809,9 @@ export class Orchestrator {
     } catch (error) {
       return this.handleRunErrorAsync(execution, error, "planning-failed");
     }
+    execution.limitReached = planned.tasks.some(
+      (task) => task.status === "limit-reached",
+    );
     await execution.events.emit(`${run.id}:run-started`, {
       type: "run-started",
       planVersion: run.planVersion,
@@ -812,12 +844,35 @@ export class Orchestrator {
         task.resumeInput !== undefined &&
         task.resumeKeys?.length,
     );
-    const recoveredResume: ResumeRequest | undefined = accepted
-      ? {
-          idempotencyKey: accepted.resumeKeys!.at(-1)!,
-          input: accepted.resumeInput!,
-        }
+    const pending = accepted
+      ? await this.options.checkpointer.getTuple(config)
       : undefined;
+    const resumePersisted = pending?.pendingWrites?.some(
+      ([taskId, channel, value]) =>
+        snapshot.tasks.some(
+          (task) =>
+            task.id === taskId &&
+            task.interrupts.some(
+              (item) =>
+                (item.value as InterruptPayload).taskId === accepted?.id,
+            ),
+        ) &&
+        channel === "__resume__" &&
+        (Array.isArray(value) ? value : [value]).some((item) => {
+          const parsed = ResumeRequestSchema.safeParse(item);
+          return (
+            parsed.success &&
+            parsed.data.idempotencyKey === accepted?.resumeKeys?.at(-1)
+          );
+        }),
+    );
+    const recoveredResume: ResumeRequest | undefined =
+      accepted && !resumePersisted
+        ? {
+            idempotencyKey: accepted.resumeKeys!.at(-1)!,
+            input: accepted.resumeInput!,
+          }
+        : undefined;
     if (
       values.graphVersion !== undefined &&
       (values.graphVersion !== this.graphVersion ||
@@ -842,11 +897,24 @@ export class Orchestrator {
           config,
         );
       } else if (resume ?? recoveredResume) {
+        const answer = resume ?? recoveredResume;
+        const target = snapshot.tasks
+          .flatMap((task) => task.interrupts)
+          .find((item) => {
+            const task = planned.tasks.find(
+              (task) => task.id === (item.value as InterruptPayload).taskId,
+            );
+            return (
+              task?.status === "waiting-for-input" || task?.id === accepted?.id
+            );
+          });
         await graph.invoke(
-          new Command({ resume: resume ?? recoveredResume }),
+          new Command({
+            resume: target?.id ? { [target.id]: answer } : answer,
+          }),
           config,
         );
-      } else if (snapshot.next.length) {
+      } else if (resumePersisted || snapshot.next.length) {
         await graph.invoke(null, config);
       }
     } catch (error) {
@@ -1135,27 +1203,15 @@ export class Orchestrator {
     run: RunRecord;
     scope: OwnerScope;
   }): Promise<void> {
-    const { scope } = target;
-    const usage = summarizeUsage(
-      await this.repos.usageLedger.listForCase(scope.ownerId, scope.caseId),
-    );
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const caseRecord = await this.repos.cases.findOwnedById(
-        scope.caseId,
-        scope.ownerId,
-      );
-      if (!caseRecord) return;
-      if (JSON.stringify(caseRecord.usage) === JSON.stringify(usage)) return;
-      if (
-        await this.repos.cases.replaceOwned(
-          { ...caseRecord, usage, updatedAt: this.timestamp() },
-          scope.ownerId,
-        )
-      ) {
-        return;
-      }
-    }
-    throw new RunConflictError("The case changed while updating usage");
+    const { run, scope } = target;
+    if (
+      !(await this.repos.cases.refreshUsage(scope, {
+        runId: run.id,
+        fencingToken: run.fencingToken,
+        at: this.timestamp(),
+      }))
+    )
+      throw new WorkerAbortedError();
   }
 
   private async loadTaskAsync(execution: Execution, taskId: string) {
@@ -1338,14 +1394,77 @@ export class Orchestrator {
 
   private async documentSlicesAsync(
     execution: Execution,
+    agent: SpecialistAgent,
+    input: SpecialistInput,
   ): Promise<z.infer<typeof DocumentSliceSchema>[]> {
     const documents = await execution.documents.listAsync();
-    const slices = await Promise.all(
+    const candidates = await Promise.all(
       documents
         .slice(0, 10)
         .map((document) => execution.documents.sliceAsync(document.id)),
     );
-    return slices.filter((slice) => slice !== null);
+    const slices: z.infer<typeof DocumentSliceSchema>[] = [];
+    const schema = z.toJSONSchema(agent.outputSchema);
+    // Reserve room for the AI client's output-correction prompt.
+    const limit = this.options.ai.inputTokenLimit(agent.modelTier) - 256;
+    const allowance = (documents: typeof slices) =>
+      inputTokenAllowance({
+        system: agent.systemPrompt,
+        input: { ...input, documents },
+        schema,
+      });
+    const available = candidates.filter((slice) => slice !== null);
+    for (const [index, original] of available.entries()) {
+      const base = allowance(slices);
+      const share = Math.floor((limit - base) / (available.length - index));
+      const ceiling = Math.min(limit, base + share);
+      const trim = (maxChars: number) => {
+        let remaining = maxChars;
+        const text = (value: string) => {
+          const result = value.slice(0, Math.max(0, remaining));
+          remaining -= result.length;
+          return result;
+        };
+        const pages = original.pages.map((page) => ({
+          ...page,
+          text: text(page.text),
+        }));
+        const tables = original.tables?.map((table) => ({
+          ...table,
+          text: text(table.text),
+        }));
+        const total =
+          original.pages.reduce((sum, page) => sum + page.text.length, 0) +
+          (original.tables ?? []).reduce(
+            (sum, table) => sum + table.text.length,
+            0,
+          );
+        return {
+          ...original,
+          pages,
+          tables,
+          truncated: original.truncated || total > maxChars,
+        };
+      };
+      if (allowance([...slices, trim(0)]) > ceiling) {
+        if (slices.length) slices[slices.length - 1].truncated = true;
+        continue;
+      }
+      let low = 0;
+      let high =
+        original.pages.reduce((sum, page) => sum + page.text.length, 0) +
+        (original.tables ?? []).reduce(
+          (sum, table) => sum + table.text.length,
+          0,
+        );
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (allowance([...slices, trim(mid)]) <= ceiling) low = mid;
+        else high = mid - 1;
+      }
+      slices.push(trim(low));
+    }
+    return slices;
   }
 
   /** One graph node: reconcile durable state, then attempt the task once. */
@@ -1393,7 +1512,7 @@ export class Orchestrator {
         return result((await this.materializeAsync(execution, task))!);
       }
       const charges = await this.taskUsageAsync(execution, task.id);
-      if (charges.length >= task.attemptCount) {
+      if (charges.length > (task.usageEntryCount ?? task.attemptCount - 1)) {
         await this.repos.usageLedger.markInterrupted(
           execution.scope.ownerId,
           execution.scope.caseId,
@@ -1426,9 +1545,12 @@ export class Orchestrator {
       await this.persistTaskAsync(execution, updated);
       return result(this.outcomeFor(updated, "skipped"));
     }
-    let humanInput: unknown = task.resumeInput;
+    let humanInput = task.resumeInput;
     let resumeKeys: string[] = [];
-    if (task.status === "waiting-for-input") {
+    if (
+      task.status === "waiting-for-input" ||
+      (task.status === "running" && task.resumeInput !== undefined)
+    ) {
       const rounds = await this.inputQuestionRoundsAsync(execution, task);
       for (const questions of rounds) {
         const answer = interrupt<InterruptPayload, ResumeRequest>({
@@ -1436,7 +1558,7 @@ export class Orchestrator {
           questionIds: questions,
         });
         if (task.resumeKeys?.includes(answer.idempotencyKey)) continue;
-        humanInput = answer.input;
+        humanInput = { ...humanInput, ...answer.input };
         resumeKeys = [answer.idempotencyKey];
       }
     }
@@ -1586,6 +1708,10 @@ export class Orchestrator {
         current.status === "running"
           ? Math.max(current.attemptCount, 1)
           : current.attemptCount + 1,
+      usageEntryCount:
+        current.status === "running"
+          ? current.usageEntryCount
+          : (await this.taskUsageAsync(execution, current.id)).length,
       lastError: null,
       resumeKeys: [...(current.resumeKeys ?? []), ...resumeKeys],
       ...(humanInput === undefined
@@ -1629,6 +1755,7 @@ export class Orchestrator {
         agentResult = await this.options.reviewer!.run(
           {
             case: this.caseInput(execution),
+            instructions: this.instructionsFor(execution, task, state),
             findings,
             deterministicFlags: flags,
           },
@@ -1638,30 +1765,25 @@ export class Orchestrator {
         const sources = tasks.filter((item) =>
           task.dependencyIds.includes(item.id),
         );
-        const documents = await this.documentSlicesAsync(execution);
-        documentIds = new Set(documents.map((document) => document.documentId));
-        agentResult = await specialist!.run(
-          {
-            case: this.caseInput(execution),
-            task: {
-              id: task.id,
-              key,
-              role: task.role,
-              instructions:
-                task.instructions ??
-                state.instructions[task.id] ??
-                this.options.plans.instructionsFor(
-                  execution.caseRecord.useCase,
-                  key,
-                ) ??
-                "Analyse the case documents and report cited findings.",
-            },
-            priorFindings: this.priorFindings(sources, state),
-            documents,
-            humanInput: humanInput ?? null,
+        const input: SpecialistInput = {
+          case: this.caseInput(execution),
+          task: {
+            id: task.id,
+            key,
+            role: task.role,
+            instructions: this.instructionsFor(execution, task, state),
           },
-          context,
+          priorFindings: this.priorFindings(sources, state),
+          documents: [],
+          humanInput: humanInput ?? null,
+        };
+        const documents = await this.documentSlicesAsync(
+          execution,
+          specialist!,
+          input,
         );
+        documentIds = new Set(documents.map((document) => document.documentId));
+        agentResult = await specialist!.run({ ...input, documents }, context);
       }
     } catch (error) {
       return this.handleTaskErrorAsync(execution, task, error);
@@ -1736,6 +1858,22 @@ export class Orchestrator {
       description: execution.caseRecord.description,
       useCase: execution.caseRecord.useCase,
     };
+  }
+
+  private instructionsFor(
+    execution: Execution,
+    task: Task,
+    state: TaskGraphStateValue,
+  ): string {
+    return (
+      task.instructions ??
+      state.instructions[task.id] ??
+      this.options.plans.instructionsFor(
+        execution.caseRecord.useCase,
+        taskKeyOf(task),
+      ) ??
+      "Analyse the case documents and report cited findings."
+    );
   }
 
   private async requestInputAsync(

@@ -5,6 +5,7 @@ import {
   UsageUnitsSchema,
   estimateUsageAllowance,
   estimateUsageCost,
+  summarizeUsage,
   type Case,
   type RunRecord,
   type UsageAdmissionPort,
@@ -576,11 +577,19 @@ export class InMemoryUsageRepository
       .map((entry) => structuredClone(entry));
   }
 
+  summarizeForCase(ownerId: string, caseId: string) {
+    return summarizeUsage(
+      [...this.ledger.values()].filter(
+        (entry) => entry.ownerId === ownerId && entry.caseId === caseId,
+      ),
+    );
+  }
+
   async markInterrupted(
     ownerId: string,
     caseId: string,
     runId: string,
-    taskId: string,
+    taskId: string | null,
     at: string,
   ): Promise<void> {
     const timestamp = new Date(at).toISOString();

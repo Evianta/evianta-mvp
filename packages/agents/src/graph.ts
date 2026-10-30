@@ -80,7 +80,11 @@ export interface CompiledTaskGraph {
   getState(config: { configurable: { thread_id: string } }): Promise<{
     values: Partial<TaskGraphStateValue>;
     next: string[];
-    tasks: Array<{ name: string; interrupts: Array<{ value?: unknown }> }>;
+    tasks: Array<{
+      id: string;
+      name: string;
+      interrupts: Array<{ id?: string; value?: unknown }>;
+    }>;
     config?: { configurable?: Record<string, unknown> };
   }>;
 }

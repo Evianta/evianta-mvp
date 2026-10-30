@@ -67,13 +67,19 @@ Findings, evidence and deliverable sections are committed under the run's
 fencing token. Cancellation and terminal status are resolved together when
 admission is released; cancelling a waiting run needs no execution slot.
 Workers recover abandoned cancellations and replay pending terminal events.
+Recovery rejects changed plan versions, preserves spend-limit stops, and does
+not repeat a paid coordinator call whose result was lost. Worker polling advances
+past owners at capacity so later eligible runs can start.
 
 Human-input rounds have separate question IDs and durable consumed keys.
-Resumed calls count as new attempts and retain their accepted input through a
-worker restart. Interrupted admitted attempts remain unknown-cost exposure.
+Answers accumulate across rounds. Resumed calls count as new attempts and retain
+their accepted input through a worker restart, including after output correction.
+Interrupted admitted attempts remain unknown-cost exposure.
 Case usage includes the complete case ledger, not the administrator's bounded
-query page. Specialist document slices include bounded table text as well as
-PDF pages.
+query page, and refreshes are fenced without replacing other case fields.
+Specialist document slices include bounded table text as well as PDF pages and
+share the configured input budget with the rest of the request. Reviewers receive
+the persisted task instructions.
 
 ## Environment and generated files
 

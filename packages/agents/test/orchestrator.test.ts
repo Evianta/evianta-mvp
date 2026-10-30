@@ -7,6 +7,7 @@ import {
   deliverableIdFor,
   summarizeUsage,
   WorkerAbortedError,
+  toTaskRecords,
   type OrchestratorHooks,
 } from "../src/index.js";
 import {
@@ -88,6 +89,135 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
+  it("rejects a changed reference version before planning or dispatch", async () => {
+    const provider = new ScriptedProvider(routes("a"));
+    const plan = planOf([{ key: "a" }]);
+    const h = harness({ provider, plan, reviewer: false });
+    const run = await h.orchestrator.createRunAsync({
+      ownerId: OWNER,
+      caseId: CASE_ID,
+    });
+    h.plans.register({ ...plan, version: 2 });
+    expect((await h.worker.runOnceAsync())?.run?.status).toBe("failed");
+    expect(provider.calls).toEqual([]);
+    expect(await tasksOf(run.id)).toEqual({});
+    expect((await eventsOf(run.id)).at(-1)?.payload).toMatchObject({
+      type: "run-failed",
+      error: { code: "plan-version-mismatch" },
+    });
+  });
+
+  it("restores a persisted spend stop before starting pending branches", async () => {
+    const provider = new ScriptedProvider(routes("a", "b"));
+    const plan = planOf([{ key: "a" }, { key: "b" }]);
+    const h = harness({ provider, plan, reviewer: false });
+    const run = await h.orchestrator.createRunAsync({
+      ownerId: OWNER,
+      caseId: CASE_ID,
+    });
+    const lease = await h.orchestrator.acquireAsync(run, "first-worker");
+    const records = toTaskRecords(CASE_ID, run.id, 1, plan.tasks);
+    records[0].status = "limit-reached";
+    await store.repositories.tasks.insertPlan(records, scope, lease);
+    h.clock.advance(LEASE_TTL_SECONDS + 1);
+
+    expect((await h.worker.runOnceAsync())?.run?.status).toBe("limit-reached");
+    expect(provider.calls).toEqual([]);
+    expect((await tasksOf(run.id)).b.status).toBe("limit-reached");
+  });
+
+  it("does not repeat paid planning after losing its uncommitted result", async () => {
+    const plan = planOf([{ key: "a" }, { key: "b" }]);
+    const provider = new ScriptedProvider({
+      ...routes("a", "b"),
+      coordinator: () => ({
+        tasks: plan.tasks.map((task) => ({
+          ...task,
+          assignedRole: task.role,
+        })),
+      }),
+    });
+    const h = harness({ provider, plan, coordinator: true, reviewer: false });
+    const insert = vi
+      .spyOn(store.repositories.tasks, "insertPlan")
+      .mockRejectedValueOnce(new WorkerAbortedError());
+    const run = await h.orchestrator.createRunAsync({
+      ownerId: OWNER,
+      caseId: CASE_ID,
+    });
+    expect((await h.worker.runOnceAsync())?.outcome).toBe("aborted");
+    insert.mockRestore();
+    h.clock.advance(LEASE_TTL_SECONDS + 1);
+
+    expect((await h.worker.runOnceAsync())?.run?.status).toBe("failed");
+    expect(provider.calls).toEqual(["coordinator"]);
+    expect((await eventsOf(run.id)).at(-1)?.payload).toMatchObject({
+      type: "run-failed",
+      error: { code: "planning-interrupted" },
+    });
+  });
+
+  it("shares the model input budget across full document slices", async () => {
+    const documents = store.repositories.documents;
+    const original = (await documents.findOwned("document-1", scope))!;
+    const extraction = (await store.repositories.extractions.findForDocument(
+      original.id,
+      scope,
+    ))!;
+    for (const id of ["document-1", "document-2"]) {
+      if (id !== original.id) {
+        await documents.insert({ ...original, id, name: `${id}.pdf` }, scope);
+      }
+      await store.repositories.extractions.saveForDocument(
+        {
+          ...extraction,
+          documentId: id,
+          pages: [{ ...extraction.pages[0], text: "x".repeat(20000) }],
+        },
+        scope,
+      );
+    }
+    const provider = new ScriptedProvider(routes("a"));
+    const h = harness({ provider, plan: planOf([{ key: "a" }]) });
+    expect((await startRunAsync(h)).result?.run?.status).toBe("completed");
+    const slices = provider.inputs.get("a")![0].documents as Array<{
+      pages: Array<{ text: string }>;
+      truncated: boolean;
+    }>;
+    expect(slices).toHaveLength(2);
+    expect(slices.every((slice) => slice.truncated)).toBe(true);
+    expect(slices.every((slice) => slice.pages[0].text.length > 0)).toBe(true);
+    expect(provider.count("a")).toBe(1);
+  });
+
+  it("advances past an admission-blocked batch to another eligible owner", async () => {
+    const provider = new ScriptedProvider(routes("a"));
+    const h = harness({ provider, plan: planOf([{ key: "a" }]) });
+    for (let index = 0; index < 12; index += 1) {
+      const id = `busy-case-${index}`;
+      await store.repositories.cases.insert(makeCase(id));
+      const run = await h.orchestrator.createRunAsync({
+        ownerId: OWNER,
+        caseId: id,
+      });
+      if (index < 2) await h.orchestrator.acquireAsync(run, `lease-${index}`);
+      h.clock.advance(1);
+    }
+    await store.repositories.cases.insert(
+      makeCase("eligible-case", { ownerId: "other-owner" }),
+    );
+    const eligible = await h.orchestrator.createRunAsync({
+      ownerId: "other-owner",
+      caseId: "eligible-case",
+    });
+    expect(await h.worker.runOnceAsync()).toBeNull();
+    expect((await h.worker.runOnceAsync())?.run).toMatchObject({
+      id: eligible.id,
+      status: "completed",
+    });
+    expect(provider.calls).toEqual(["a"]);
+  });
+
   it("runs a linear plan to completion with findings, evidence and usage", async () => {
     const provider = new ScriptedProvider(routes("a", "b"));
     const h = harness({
@@ -200,7 +330,9 @@ describe("orchestrator", () => {
     const reviewInput = provider.inputs.get("review")![0] as {
       findings: Array<{ taskId: string }>;
       deterministicFlags: Array<{ code: string }>;
+      instructions: string;
     };
+    expect(reviewInput.instructions).toBe("Do review");
     expect(new Set(reviewInput.findings.map((item) => item.taskId))).toEqual(
       new Set([`${run.id}:a`, `${run.id}:b`]),
     );
@@ -1059,6 +1191,76 @@ describe("orchestrator", () => {
   });
 
   describe("human input", () => {
+    it("recovers before dispatch after output correction and asks the next question", async () => {
+      let first = true;
+      const provider = new ScriptedProvider({
+        a: (input) => {
+          if (first) {
+            first = false;
+            return { invalid: true };
+          }
+          const answer = input.humanInput as Record<string, unknown> | null;
+          if (answer?.currency) return specialistOutput("a");
+          return {
+            ...specialistOutput("a"),
+            inputRequired: {
+              questions: [
+                {
+                  text: answer?.year ? "Currency?" : "Year?",
+                  severity: "high",
+                },
+              ],
+            },
+          };
+        },
+      });
+      const plan = planOf([{ key: "a" }]);
+      const h = harness({
+        provider,
+        plan,
+        reviewer: false,
+        hooks: {
+          beforeAgentCall: (task) => {
+            if (task.attemptCount === 2) throw new Error("worker died");
+          },
+        },
+      });
+      const { run } = await startRunAsync(h);
+      expect(provider.count("a")).toBe(2);
+      await expect(
+        h.orchestrator.resumeRunAsync({
+          ownerId: OWNER,
+          runId: run.id,
+          request: { idempotencyKey: "year-answer", input: { year: 2026 } },
+        }),
+      ).rejects.toThrow("worker died");
+      h.clock.advance(LEASE_TTL_SECONDS + 1);
+      const recovered = harness({
+        provider,
+        plan,
+        reviewer: false,
+        clock: h.clock,
+        checkpointer: h.checkpointer,
+      });
+      const resumed = await recovered.worker.runOnceAsync();
+      expect((await tasksOf(run.id)).a.lastError).toBeNull();
+      expect(resumed?.run?.status).toBe("waiting-for-input");
+      expect(provider.count("a")).toBe(3);
+      const done = await recovered.orchestrator.resumeRunAsync({
+        ownerId: OWNER,
+        runId: run.id,
+        request: {
+          idempotencyKey: "currency-answer",
+          input: { currency: "INR" },
+        },
+      });
+      expect(done.run?.status).toBe("completed");
+      expect(provider.inputs.get("a")!.at(-1)!.humanInput).toEqual({
+        year: 2026,
+        currency: "INR",
+      });
+    });
+
     it("recovers a resumed call that crashed before dispatch with its saved answer", async () => {
       const clock = new Clock();
       const provider = new ScriptedProvider({
@@ -1200,6 +1402,10 @@ describe("orchestrator", () => {
       expect(done.run?.status).toBe("completed");
       expect(provider.count("a")).toBe(3);
       expect((await tasksOf(run.id)).a.attemptCount).toBe(3);
+      expect(provider.inputs.get("a")!.at(-1)!.humanInput).toEqual({
+        fiscalYear: 2025,
+        currency: "INR",
+      });
     });
 
     it("does not apply an earlier key to a later waiting task", async () => {

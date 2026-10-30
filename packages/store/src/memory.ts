@@ -188,6 +188,32 @@ export class InMemoryStore {
         },
       },
       cases: {
+        refreshUsage: async (scope, request) => {
+          const run = this.runs.get(request.runId);
+          const record = this.cases.get(scope.caseId);
+          if (
+            !record ||
+            !this.ownsCase(scope) ||
+            !run ||
+            run.ownerId !== scope.ownerId ||
+            run.caseId !== scope.caseId ||
+            run.fencingToken !== request.fencingToken ||
+            !["queued", "running", "waiting-for-input"].includes(run.status)
+          )
+            return false;
+          this.cases.set(
+            record.id,
+            parse(CaseSchema, {
+              ...record,
+              usage: this.usageAccounting.summarizeForCase(
+                scope.ownerId,
+                scope.caseId,
+              ),
+              updatedAt: request.at,
+            }),
+          );
+          return true;
+        },
         findOwnedById: async (id, ownerId) => {
           const record = this.cases.get(id);
           return record &&
@@ -706,7 +732,7 @@ export class InMemoryStore {
           this.runs.set(record.id, record);
           return true;
         },
-        listClaimable: async (at, limit = 50) => {
+        listClaimable: async (at, limit = 50, after) => {
           const atMs = Date.parse(TimestampSchema.parse(at));
           if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
             throw new StoreError(
@@ -716,6 +742,10 @@ export class InMemoryStore {
           return [...this.runs.values()]
             .filter(
               (run) =>
+                (!after ||
+                  Date.parse(run.createdAt) > Date.parse(after.createdAt) ||
+                  (Date.parse(run.createdAt) === Date.parse(after.createdAt) &&
+                    run.id > after.id)) &&
                 (["queued", "running"].includes(run.status) ||
                   (run.status === "waiting-for-input" &&
                     run.cancellationRequested) ||
@@ -726,7 +756,7 @@ export class InMemoryStore {
             .sort(
               (a, b) =>
                 Date.parse(a.createdAt) - Date.parse(b.createdAt) ||
-                a.id.localeCompare(b.id),
+                (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
             )
             .slice(0, limit)
             .map((run) => parse(RunRecordSchema, run));

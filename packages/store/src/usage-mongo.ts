@@ -818,7 +818,7 @@ export class MongoUsageRepository
     ownerId: string,
     caseId: string,
     runId: string,
-    taskId: string,
+    taskId: string | null,
     at: string,
   ): Promise<void> {
     const timestamp = canonicalTimestamp(at);
