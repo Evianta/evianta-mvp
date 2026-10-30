@@ -411,13 +411,31 @@ describe("case API routes", () => {
     );
     expect(malformedMultipart.status).toBe(400);
 
-    const session = (await authenticationService.authenticate(token)).session;
+    const authenticated = await authenticationService.authenticate(token);
     let authenticationChecks = 0;
     const authenticate = authenticationService.authenticate.bind(
       authenticationService,
     );
+    let releaseAuthentication: (() => void) | undefined;
+    let signalRecheckStarted: (() => void) | undefined;
+    const recheckStarted = new Promise<void>((resolve) => {
+      signalRecheckStarted = resolve;
+    });
     authenticationService.authenticate = async (value) => {
       authenticationChecks += 1;
+      if (authenticationChecks === 1) {
+        return {
+          ...authenticated,
+          session: {
+            ...authenticated.session,
+            expiresAt: new Date(Date.now() + 1_500).toISOString(),
+          },
+        };
+      }
+      signalRecheckStarted?.();
+      await new Promise<void>((resolve) => {
+        releaseAuthentication = resolve;
+      });
       return authenticate(value);
     };
     const readStoredObject = services.storage.readStreamAsync.bind(
@@ -426,12 +444,11 @@ describe("case API routes", () => {
     services.storage.readStreamAsync = async (key) => {
       const object = await readStoredObject(key);
       if (!object) return null;
-      await authenticationService.logout(session.id);
       return {
         ...object,
         body: (async function* () {
-          await new Promise((resolve) => setTimeout(resolve, 1_500));
-          yield Buffer.from("revoked now");
+          const chunk = Buffer.alloc(1024 * 1024);
+          while (true) yield chunk;
         })(),
       };
     };
@@ -440,9 +457,11 @@ describe("case API routes", () => {
       { headers: authHeaders() },
     );
     expect(protectedDownload.status).toBe(200);
-    await expect(authenticationService.authenticate(token)).rejects.toThrow();
-    expect(authenticationChecks).toBeGreaterThanOrEqual(3);
-    expect(await protectedDownload.text()).toBe("");
+    await recheckStarted;
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    await expect(protectedDownload.arrayBuffer()).rejects.toThrow();
+    expect(authenticationChecks).toBe(2);
+    releaseAuthentication?.();
   });
 
   it("requests case deletion without overwriting concurrent usage updates", async () => {

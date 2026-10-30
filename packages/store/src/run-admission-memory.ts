@@ -5,7 +5,7 @@ import type {
   RunAdmissionRequest,
   RunRecord,
 } from "@evianta/core";
-import { StoreError } from "./errors.js";
+import { CaseNotActiveError, StoreError } from "./errors.js";
 
 type RunLock = {
   ownerId: string;
@@ -50,12 +50,8 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
     this.validateRequest(request);
     this.reapExpired(request.at);
     const parent = this.findOwnedCase(request.caseId, request.ownerId);
-    if (!parent || parent.isSample || parent.status === "deleted") {
-      throw new StoreError(
-        "The case does not exist in the requested owner scope",
-        "case-not-owned",
-      );
-    }
+    if (!parent || parent.isSample || parent.status !== "active")
+      throw new CaseNotActiveError();
     const run = this.findOwnedRun(
       request.runId,
       request.caseId,
@@ -271,12 +267,8 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
       );
     }
     const parent = this.findOwnedCase(request.caseId, request.ownerId);
-    if (!parent || parent.isSample || parent.status === "deleted") {
-      throw new StoreError(
-        "The case does not exist in the requested owner scope",
-        "case-not-owned",
-      );
-    }
+    if (!parent || parent.isSample || parent.status !== "active")
+      throw new CaseNotActiveError();
     const run = this.findOwnedRun(
       request.runId,
       request.caseId,

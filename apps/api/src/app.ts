@@ -293,6 +293,7 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
                 : errorCode === "run-conflict" ||
                     errorCode === "duplicate-record" ||
                     errorCode === "run-case-active" ||
+                    errorCode === "case-not-active" ||
                     errorCode === "invalid-run-admission" ||
                     errorCode === "run-admission-counter-conflict"
                   ? 409

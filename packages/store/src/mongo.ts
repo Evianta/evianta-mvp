@@ -75,6 +75,7 @@ import { MongoUsageRepository } from "./usage-mongo.js";
 import { MongoRunAdmissionRepository } from "./run-admission-mongo.js";
 import { UsageAdminService } from "./usage-admin.js";
 import {
+  CaseNotActiveError,
   CaseNotOwnedError,
   InvalidCursorError,
   SequenceConflictError,
@@ -82,6 +83,7 @@ import {
 } from "./errors.js";
 
 export {
+  CaseNotActiveError,
   CaseNotOwnedError,
   InvalidCursorError,
   SequenceConflictError,
@@ -654,6 +656,7 @@ export class MongoStore {
           deletionRequestedAt: timestamp,
           updatedAt: timestamp,
         },
+        $inc: { runAdmissionFence: 1 },
       },
     );
     return result.matchedCount === 1;
@@ -1512,55 +1515,52 @@ export class MongoStore {
 
   async runInsert(run: RunRecord, tasks?: Task[]): Promise<void> {
     const parsed = RunRecordSchema.parse(run);
-    const parent = await this.cases.findOne({
-      _id: parsed.caseId,
-      ownerId: parsed.ownerId,
-      isSample: false,
-      status: { $ne: "deleted" },
-    });
-    if (!parent) throw new CaseNotOwnedError();
     const active = ["queued", "running", "waiting-for-input"].includes(
       parsed.status,
     )
       ? { activeCaseKey: activeCaseKey(parsed.ownerId, parsed.caseId) }
       : {};
-    if (tasks) {
-      const plan = TaskPlanSchema.parse({
-        caseId: parsed.caseId,
-        runId: parsed.id,
-        version: parsed.planVersion,
-        tasks,
-      });
-      try {
-        await this.withTransaction(async (session) => {
-          await this.runs.insertOne(
-            { ...documentFor(parsed), ...active },
+    const plan = tasks
+      ? TaskPlanSchema.parse({
+          caseId: parsed.caseId,
+          runId: parsed.id,
+          version: parsed.planVersion,
+          tasks,
+        })
+      : undefined;
+    try {
+      await this.withTransaction(async (session) => {
+        const fencedCase = await this.cases.updateOne(
+          {
+            _id: parsed.caseId,
+            ownerId: parsed.ownerId,
+            isSample: false,
+            status: "active",
+          },
+          { $inc: { runAdmissionFence: 1 } },
+          { session },
+        );
+        if (fencedCase.matchedCount !== 1) throw new CaseNotActiveError();
+        await this.runs.insertOne(
+          { ...documentFor(parsed), ...active },
+          { session },
+        );
+        if (plan?.tasks.length)
+          await this.tasks.insertMany(
+            plan.tasks.map((task) => ({
+              ...documentFor(task),
+              ownerId: parsed.ownerId,
+            })),
             { session },
           );
-          if (plan.tasks.length)
-            await this.tasks.insertMany(
-              plan.tasks.map((task) => ({
-                ...documentFor(task),
-                ownerId: parsed.ownerId,
-              })),
-              { session },
-            );
+      });
+    } catch (error) {
+      if (isDuplicateKey(error))
+        throw new StoreError("Run or task already exists", "duplicate-record", {
+          cause: error,
         });
-      } catch (error) {
-        if (isDuplicateKey(error))
-          throw new StoreError(
-            "Run or task already exists",
-            "duplicate-record",
-            { cause: error },
-          );
-        throw error;
-      }
-      return;
+      throw error;
     }
-    await insertUnique(this.runs, RunRecordSchema, {
-      ...parsed,
-      ...active,
-    } as RunRecord);
   }
 
   async runUpdateOwned(run: RunRecord, ownerId: string): Promise<boolean> {

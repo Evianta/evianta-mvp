@@ -437,12 +437,15 @@ function pipeSessionProtectedDownload(input: {
   const stop = () => {
     closed = true;
     if (timer) clearTimeout(timer);
+    if (expiryTimer) clearTimeout(expiryTimer);
     stream.destroy();
   };
   const terminate = () => {
     stream.unpipe(input.response);
     stop();
-    if (!input.response.destroyed) input.response.end();
+    if (input.response.destroyed) return;
+    if (input.response.writableLength > 0) input.response.destroy();
+    else input.response.end();
   };
   const checkSession = async () => {
     if (closed) return;
@@ -469,7 +472,12 @@ function pipeSessionProtectedDownload(input: {
     );
   };
 
+  const expiryTimer = setTimeout(
+    terminate,
+    Math.max(1, input.sessionExpiresAt - Date.now()),
+  );
   input.response.once("close", stop);
+  input.response.once("finish", stop);
   stream.once("error", () => {
     stop();
     input.response.destroy();

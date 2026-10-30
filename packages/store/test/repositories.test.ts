@@ -253,6 +253,65 @@ function repositoryContract(
       ).toBe(false);
     });
 
+    it("rejects run creation and admission after case deletion", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.cases.requestDeletion("case-1", "owner-1", timestamp);
+      await expect(
+        repositories.runs.insert(
+          makeRun("run-after-delete", "case-1", "owner-1"),
+        ),
+      ).rejects.toMatchObject({ code: "case-not-active" });
+
+      await repositories.cases.insert(makeCase("case-2", "owner-1"));
+      await repositories.runs.insert({
+        ...makeRun("run-before-delete", "case-2", "owner-1"),
+        status: "queued",
+      });
+      await repositories.cases.requestDeletion("case-2", "owner-1", timestamp);
+      await expect(
+        repositories.runAdmission.acquire({
+          ownerId: "owner-1",
+          caseId: "case-2",
+          runId: "run-before-delete",
+          leaseId: "lease-after-delete",
+          at: timestamp,
+          expiresAt: "2026-01-15T00:01:00.000Z",
+          userLimit: 1,
+          globalLimit: 1,
+        }),
+      ).rejects.toMatchObject({ code: "case-not-active" });
+
+      await repositories.cases.insert(makeCase("case-3", "owner-1"));
+      await repositories.runs.insert(
+        makeRun("run-waiting", "case-3", "owner-1"),
+      );
+      const request = {
+        ownerId: "owner-1",
+        caseId: "case-3",
+        runId: "run-waiting",
+        leaseId: "lease-before-delete",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:01:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      };
+      const lease = await repositories.runAdmission.acquire(request);
+      const waitingFence = await repositories.runAdmission.waitForInput({
+        ...request,
+        fencingToken: lease.fencingToken,
+      });
+      expect(waitingFence).not.toBeNull();
+      if (waitingFence === null)
+        throw new Error("Run did not enter the waiting state");
+      await repositories.cases.requestDeletion("case-3", "owner-1", timestamp);
+      await expect(
+        repositories.runAdmission.resume({
+          ...request,
+          fencingToken: waitingFence,
+        }),
+      ).rejects.toMatchObject({ code: "case-not-active" });
+    });
+
     it("refreshes only case usage under the current run generation", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));

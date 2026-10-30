@@ -56,7 +56,12 @@ import {
   type RateLimitRequest,
   type RateLimitResult,
 } from "@evianta/core";
-import { CaseNotOwnedError, InvalidCursorError, StoreError } from "./errors.js";
+import {
+  CaseNotActiveError,
+  CaseNotOwnedError,
+  InvalidCursorError,
+  StoreError,
+} from "./errors.js";
 import { InMemoryUsageRepository } from "./usage-memory.js";
 import { InMemoryRunAdmissionRepository } from "./run-admission-memory.js";
 import { UsageAdminService } from "./usage-admin.js";
@@ -142,7 +147,7 @@ export class InMemoryStore {
       return record &&
         record.ownerId === ownerId &&
         !record.isSample &&
-        record.status !== "deleted"
+        record.status === "active"
         ? parse(CaseSchema, record)
         : null;
     };
@@ -856,6 +861,8 @@ export class InMemoryStore {
           ) {
             throw new CaseNotOwnedError();
           }
+          const parent = this.cases.get(record.caseId);
+          if (parent?.status !== "active") throw new CaseNotActiveError();
           if (
             ["queued", "running", "waiting-for-input"].includes(
               record.status,

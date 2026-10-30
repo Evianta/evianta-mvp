@@ -10,6 +10,7 @@ const SKIPPABLE_ADMISSION_CODES = new Set([
   "run-not-owned",
   "stale-run-admission",
   "invalid-run-admission",
+  "case-not-active",
   "case-not-owned",
   "run-admission-counter-conflict",
 ]);
