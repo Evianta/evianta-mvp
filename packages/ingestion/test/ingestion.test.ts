@@ -17,6 +17,9 @@ import { createInMemoryStore, InMemoryDocumentStore } from "@evianta/store";
 import { describe, expect, it, vi } from "vitest";
 import { degrees, PDFDocument, StandardFonts } from "pdf-lib";
 import * as XLSX from "xlsx";
+import UTIF from "utif2";
+import { imageFrames } from "../src/image.js";
+import { resolveIngestionSettings } from "../src/config.js";
 import {
   createDocumentIngestion,
   createMuseOcrBackend,
@@ -184,6 +187,37 @@ const ingestRequest = (documentId: string) => ({
 });
 
 describe("deterministic extraction", () => {
+  it("does not infer exponent-like identifiers as numbers", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(
+      Buffer.from("id,amount\ne123,.5e2\n-e4,-12e-2\n"),
+      mimeTypes.csv,
+      "identifiers.csv",
+    );
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+    expect(result.extraction!.tables[0].columnTypes).toEqual([
+      "string",
+      "number",
+    ]);
+  });
+
+  it("does not invent JSON field values from the prototype", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(
+      Buffer.from('[{"__proto__":"source value"},{"ordinary":"second row"}]'),
+      mimeTypes.json,
+      "rows.json",
+    );
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+    expect(result.extraction!.tables[0]).toMatchObject({
+      headers: ["__proto__", "ordinary"],
+      rows: [
+        ["source value", null],
+        [null, "second row"],
+      ],
+    });
+  });
+
   it("parses CSV into typed tables without model calls", async () => {
     const h = await setup();
     const doc = await h.addDocument(csvFixture(), mimeTypes.csv, "ledger.csv");
@@ -386,9 +420,153 @@ describe("OCR extraction", () => {
     expect(image.mimeType).toBe("image/png");
     expect(pngSize(image.bytes)).toEqual({ width: 40, height: 20 });
   });
+
+  it("releases decoded TIFF buffers after conversion and decode errors", async () => {
+    const decodeImage = UTIF.decodeImage;
+    const directories: UTIF.IFD[] = [];
+    const spy = vi
+      .spyOn(UTIF, "decodeImage")
+      .mockImplementation((buffer, directory) => {
+        directories.push(directory);
+        decodeImage(buffer, directory);
+      });
+    try {
+      const { limits } = resolveIngestionSettings();
+      const frames = imageFrames(tiffFixture(), "tiff", limits);
+      await frames[0].load();
+      expect(directories[0].data).toBeUndefined();
+      await frames[0].load();
+      expect(directories[1].data).toBeUndefined();
+      spy.mockImplementation((_buffer, directory) => {
+        directories.push(directory);
+        directory.data = new Uint8Array(100);
+        throw new Error("Decode failed");
+      });
+      await expect(frames[0].load()).rejects.toMatchObject({
+        code: "parse-failed",
+      });
+      expect(directories[2].data).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not cache oversized PDF images as successfully extracted blank pages", async () => {
+    const h = await setup({
+      ingestion: { limits: { maxImagePixels: 1000 } },
+    });
+    const doc = await h.addDocument(
+      await scannedPdf(),
+      mimeTypes.pdf,
+      "large.pdf",
+    );
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+    expect(result.status).toBe("partial");
+    expect(isIncomplete(result.extraction!)).toBe(true);
+    expect(h.generate).not.toHaveBeenCalled();
+  });
 });
 
 describe("caching and claims", () => {
+  it("recovers a short lease after non-yielding parsing without another holder", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const h = await setup({ ingestion: { claimTtlSeconds: 1 } });
+      const doc = await h.addDocument(csvFixture(), mimeTypes.csv, "rows.csv");
+      const repository = h.store.repositories.documents;
+      const replace = repository.replaceOwned.bind(repository);
+      vi.spyOn(repository, "replaceOwned").mockImplementation(
+        async (...args) => {
+          const result = await replace(...args);
+          if (args[0].state === "processing") {
+            vi.setSystemTime(Date.now() + 1500);
+          }
+          return result;
+        },
+      );
+      const result = await h.ingestion.ingest(ingestRequest(doc.id));
+      expect(result.status).toBe("ready");
+      expect(await h.stateOf(doc.id)).toBe("ready");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("invalidates cached text when the detected format changes", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(
+      Buffer.from("name\tvalue\ninvoice\t42\n"),
+      "text/plain",
+      "rows.txt",
+    );
+    const first = await h.ingestion.ingest(ingestRequest(doc.id));
+    expect(first.extraction!.kind).toBe("text");
+    const current = await h.store.repositories.documents.findOwned(
+      doc.id,
+      ownerScope,
+    );
+    await h.store.repositories.documents.replaceOwned(
+      { ...current!, name: "rows.tsv" },
+      ownerScope,
+    );
+    const second = await h.ingestion.ingest(ingestRequest(doc.id));
+    expect(second.cached).toBe(false);
+    expect(second.extraction!.kind).toBe("tabular");
+    expect(second.extraction!.cacheIdentity.extractorVersion).not.toBe(
+      first.extraction!.cacheIdentity.extractorVersion,
+    );
+  });
+
+  it("does not overwrite a successful worker after losing the claim during cache lookup", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(plainImage(), mimeTypes.png, "scan.png");
+    const repository = h.store.repositories.extractions;
+    const find = repository.findCached.bind(repository);
+    let reads = 0;
+    vi.spyOn(repository, "findCached").mockImplementation(async (...args) => {
+      if (++reads === 2) {
+        await repository.releaseClaim(
+          {
+            documentId: doc.id,
+            cacheIdentity: args[1],
+            holderId: "stale-worker",
+          },
+          ownerScope,
+        );
+        await h.store.repositories.documents.replaceOwned(
+          { ...doc, state: "ready", processedAt: new Date().toISOString() },
+          ownerScope,
+        );
+      }
+      return find(...args);
+    });
+    const result = await h.ingestion.ingest({
+      ...ingestRequest(doc.id),
+      holderId: "stale-worker",
+    });
+    expect(result.stopReason).toBe("claim-lost");
+    expect(await h.stateOf(doc.id)).toBe("ready");
+    expect(h.generate).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite a successful state after a delayed pre-claim read failure", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(plainImage(), mimeTypes.png, "scan.png");
+    vi.spyOn(h.storage, "readBufferAsync").mockImplementation(async () => {
+      await h.store.repositories.documents.replaceOwned(
+        { ...doc, state: "ready", processedAt: new Date().toISOString() },
+        ownerScope,
+      );
+      throw new Error("Delayed read failure");
+    });
+    await expect(
+      h.ingestion.ingest(ingestRequest(doc.id)),
+    ).rejects.toMatchObject({
+      code: "document-bytes-missing",
+    });
+    expect(await h.stateOf(doc.id)).toBe("ready");
+  });
+
   it("refreshes the cache after acquiring a claim", async () => {
     const h = await setup();
     const doc = await h.addDocument(plainImage(), mimeTypes.png, "scan.png");
@@ -565,7 +743,7 @@ describe("caching and claims", () => {
         documentId: doc.id,
         cacheIdentity: {
           contentHash: doc.contentHash,
-          extractorVersion: h.ingestion.extractorVersion,
+          extractorVersion: `${h.ingestion.extractorVersion}:pdf`,
           modelVersion: createMuseOcrBackend({
             ai: {} as never,
             modelVersion: "mock-spark",

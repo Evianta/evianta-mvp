@@ -25,6 +25,7 @@ import {
   type Deliverable,
   type DocumentMetadataDto,
   type DocumentMetadataRecord,
+  type ExpectedDocumentSource,
   type Evidence,
   type ExtractedDocument,
   type ExtractionCacheIdentity,
@@ -328,8 +329,8 @@ export class MongoStore {
         findOwned: (id, scope) => this.documentFindOwned(id, scope),
         listOwned: (scope) => this.documentListOwned(scope),
         insert: (record, scope) => this.documentInsert(record, scope),
-        replaceOwned: (record, scope, expectedSource) =>
-          this.documentReplaceOwned(record, scope, expectedSource),
+        replaceOwned: (record, scope, expectedSource, claim) =>
+          this.documentReplaceOwned(record, scope, expectedSource, claim),
       },
       extractions: {
         findForDocument: (id, scope) =>
@@ -342,8 +343,8 @@ export class MongoStore {
         findCached: (id, identity, scope) =>
           this.extractionFindCached(id, identity, scope),
         claim: (request, scope) => this.extractionClaim(request, scope),
-        renewClaim: (request, scope) =>
-          this.extractionRenewClaim(request, scope),
+        renewClaim: (request, scope, options) =>
+          this.extractionRenewClaim(request, scope, options),
         releaseClaim: (request, scope) =>
           this.extractionReleaseClaim(request, scope),
         deleteForCase: (scope) => this.extractionDeleteForCase(scope),
@@ -872,27 +873,60 @@ export class MongoStore {
   async documentReplaceOwned(
     record: DocumentMetadataRecord,
     scope: OwnerScope,
-    expectedSource?: Pick<DocumentMetadataRecord, "objectKey" | "contentHash">,
+    expectedSource?: ExpectedDocumentSource,
+    claim?: Omit<ExtractionClaimRequest, "expiresAt">,
   ): Promise<boolean> {
     const parsed = DocumentMetadataRecordSchema.parse(record);
     if (parsed.caseId !== scope.caseId || !(await this.ownsCase(scope))) {
       return false;
     }
-    const result = await this.documents.replaceOne(
-      {
-        _id: parsed.id,
-        caseId: scope.caseId,
-        ownerId: scope.ownerId,
-        ...(expectedSource
-          ? {
-              objectKey: expectedSource.objectKey,
-              contentHash: expectedSource.contentHash,
-            }
-          : {}),
-      },
-      { ...documentFor(parsed), ownerId: scope.ownerId },
-    );
-    return result.matchedCount === 1;
+    const replace = async (session?: ClientSession): Promise<boolean> => {
+      if (claim) {
+        if (claim.documentId !== parsed.id) return false;
+        const at = new Date(TimestampSchema.parse(claim.at));
+        const owned = await this.extractionClaims.updateOne(
+          {
+            _id: extractionCacheId(claim),
+            caseId: scope.caseId,
+            ownerId: scope.ownerId,
+            holderId: claim.holderId,
+            expiresAt: { $gt: at },
+          },
+          { $set: { committedAt: at } },
+          { session },
+        );
+        if (owned.matchedCount === 0) return false;
+      }
+      const result = await this.documents.replaceOne(
+        {
+          _id: parsed.id,
+          caseId: scope.caseId,
+          ownerId: scope.ownerId,
+          ...(expectedSource
+            ? {
+                objectKey: expectedSource.objectKey,
+                contentHash: expectedSource.contentHash,
+                ...(expectedSource.state !== undefined
+                  ? { state: expectedSource.state }
+                  : {}),
+                ...(expectedSource.processedAt !== undefined
+                  ? { processedAt: expectedSource.processedAt }
+                  : {}),
+                ...(expectedSource.name !== undefined
+                  ? { name: expectedSource.name }
+                  : {}),
+                ...(expectedSource.mimeType !== undefined
+                  ? { mimeType: expectedSource.mimeType }
+                  : {}),
+              }
+            : {}),
+        },
+        { ...documentFor(parsed), ownerId: scope.ownerId },
+        { session },
+      );
+      return result.matchedCount === 1;
+    };
+    return claim ? this.withTransaction(replace) : replace();
   }
 
   async extractionFindForDocument(
@@ -959,6 +993,8 @@ export class MongoStore {
             ownerId: scope.ownerId,
             objectKey: next.objectKey,
             contentHash: next.contentHash,
+            name: next.name,
+            mimeType: next.mimeType,
           },
           { ...documentFor(next), ownerId: scope.ownerId },
           { session },
@@ -1063,6 +1099,7 @@ export class MongoStore {
   async extractionRenewClaim(
     request: ExtractionClaimRequest,
     scope: OwnerScope,
+    options?: { recoverExpired?: boolean },
   ): Promise<boolean> {
     await this.requireOwnedCase(scope);
     const at = new Date(TimestampSchema.parse(request.at));
@@ -1079,7 +1116,7 @@ export class MongoStore {
         caseId: scope.caseId,
         ownerId: scope.ownerId,
         holderId: request.holderId,
-        expiresAt: { $gt: at },
+        ...(options?.recoverExpired ? {} : { expiresAt: { $gt: at } }),
       },
       { $set: { expiresAt } },
     );
@@ -1115,19 +1152,20 @@ export class MongoStore {
         { caseId: scope.caseId },
         { session },
       );
-      await Promise.all([
-        this.extractionClaims.deleteMany({ caseId: scope.caseId }, { session }),
-        this.extractionCounters.deleteMany(
-          {
-            _id: {
-              $in: documentIds.map((documentId) =>
-                JSON.stringify([scope.caseId, documentId]),
-              ),
-            },
+      await this.extractionClaims.deleteMany(
+        { caseId: scope.caseId },
+        { session },
+      );
+      await this.extractionCounters.deleteMany(
+        {
+          _id: {
+            $in: documentIds.map((documentId) =>
+              JSON.stringify([scope.caseId, documentId]),
+            ),
           },
-          { session },
-        ),
-      ]);
+        },
+        { session },
+      );
       return result.deletedCount;
     });
   }

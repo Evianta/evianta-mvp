@@ -62,9 +62,17 @@ USD per million tokens, with an optional per-request web-search rate.
 `runAdmission` provides fenced user/global concurrency admission and retains a
 case lock while a run waits for input.
 
-Document ingestion renews its extraction claim during parsing and OCR. Saving
+Document ingestion renews its extraction claim during parsing and OCR. Processing
+and failure transitions are fenced by the live claim and the document snapshot;
+failures before claiming compare the original state before updating it. Saving
 the extraction and final document state is conditional on a live claim in one
-transaction. ZIP spreadsheets are checked against actual bounded inflation;
+transaction. After synchronous parsing, an expired lease can be extended only
+if its stored holder is unchanged; a replaced or deleted claim cannot be recovered.
+Cache identities include the detected format, so renaming text
+as TSV triggers table parsing. TIFF decode buffers are released after each frame.
+PDF pages with no renderable content within the image limits remain partial
+instead of caching a blank OCR result as complete.
+ZIP spreadsheets are checked against actual bounded inflation;
 row limits reject truncated sheets. Extracted output is limited to 12 MiB of
 BSON by default (`maxExtractedBytes`, configurable up to 15 MiB), below MongoDB's
 16 MiB record limit. Larger output fails explicitly rather than remaining in

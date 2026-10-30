@@ -435,18 +435,32 @@ export class InMemoryStore {
           if (this.documents.has(record.id)) duplicate();
           this.documents.set(record.id, record);
         },
-        replaceOwned: async (document, scope, expectedSource) => {
+        replaceOwned: async (document, scope, expectedSource, claim) => {
           const record = parse(DocumentMetadataRecordSchema, document);
           if (!this.ownsCase(scope) || record.caseId !== scope.caseId) {
             return false;
           }
           const current = this.documents.get(record.id);
+          if (claim) {
+            const held = this.extractionClaims.get(this.extractionKey(claim));
+            const at = TimestampSchema.parse(claim.at);
+            if (
+              claim.documentId !== record.id ||
+              !held ||
+              held.caseId !== scope.caseId ||
+              held.holderId !== claim.holderId ||
+              Date.parse(held.expiresAt) <= Date.parse(at)
+            )
+              return false;
+          }
           if (
             !current ||
             current.caseId !== scope.caseId ||
             (expectedSource &&
-              (current.objectKey !== expectedSource.objectKey ||
-                current.contentHash !== expectedSource.contentHash))
+              Object.entries(expectedSource).some(
+                ([key, value]) =>
+                  current[key as keyof DocumentMetadataRecord] !== value,
+              ))
           )
             return false;
           this.documents.set(record.id, record);
@@ -497,6 +511,8 @@ export class InMemoryStore {
             stored.caseId !== scope.caseId ||
             stored.objectKey !== next.objectKey ||
             stored.contentHash !== next.contentHash ||
+            stored.name !== next.name ||
+            stored.mimeType !== next.mimeType ||
             next.id !== stored.id ||
             next.caseId !== stored.caseId ||
             !current ||
@@ -555,7 +571,7 @@ export class InMemoryStore {
           });
           return true;
         },
-        renewClaim: async (request, scope) => {
+        renewClaim: async (request, scope, options) => {
           this.requireScope(scope.caseId, scope);
           const at = TimestampSchema.parse(request.at);
           const expiresAt = TimestampSchema.parse(request.expiresAt);
@@ -572,7 +588,8 @@ export class InMemoryStore {
             !current ||
             current.caseId !== scope.caseId ||
             current.holderId !== request.holderId ||
-            Date.parse(current.expiresAt) <= Date.parse(at)
+            (!options?.recoverExpired &&
+              Date.parse(current.expiresAt) <= Date.parse(at))
           )
             return false;
           current.expiresAt = expiresAt;

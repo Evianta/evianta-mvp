@@ -73,6 +73,14 @@ export interface SessionRepository {
   revoke(id: string, revokedAt: string): Promise<boolean>;
 }
 
+export type ExpectedDocumentSource = Pick<
+  DocumentMetadataRecord,
+  "objectKey" | "contentHash"
+> &
+  Partial<
+    Pick<DocumentMetadataRecord, "state" | "processedAt" | "name" | "mimeType">
+  >;
+
 export interface DocumentRepository {
   findOwned(
     id: string,
@@ -83,7 +91,8 @@ export interface DocumentRepository {
   replaceOwned(
     record: DocumentMetadataRecord,
     scope: OwnerScope,
-    expectedSource?: Pick<DocumentMetadataRecord, "objectKey" | "contentHash">,
+    expectedSource?: ExpectedDocumentSource,
+    claim?: Omit<ExtractionClaimRequest, "expiresAt">,
   ): Promise<boolean>;
 }
 
@@ -121,10 +130,11 @@ export interface ExtractionRepository {
    * repeat paid OCR. Returns false while another unexpired holder owns it.
    */
   claim(request: ExtractionClaimRequest, scope: OwnerScope): Promise<boolean>;
-  /** Renews only an existing, unexpired claim; never reacquires a lost lease. */
+  /** Recovery may extend an expired claim only while its holder is unchanged. */
   renewClaim(
     request: ExtractionClaimRequest,
     scope: OwnerScope,
+    options?: { recoverExpired?: boolean },
   ): Promise<boolean>;
   releaseClaim(
     request: Omit<ExtractionClaimRequest, "at" | "expiresAt">,

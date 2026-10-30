@@ -247,6 +247,8 @@ function tiffFrames(bytes: Uint8Array, limits: IngestionLimits): ImageFrame[] {
             "parse-failed",
             { cause: error },
           );
+        } finally {
+          Reflect.deleteProperty(directory, "data");
         }
         const source = createCanvas(size.width, size.height);
         const context = source.getContext("2d");

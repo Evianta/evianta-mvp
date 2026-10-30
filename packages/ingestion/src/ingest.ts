@@ -10,6 +10,7 @@ import {
   type ExtractedDocument,
   type ExtractedPage,
   type ExtractionCacheIdentity,
+  type ExtractionClaimRequest,
   type ExtractionMethod,
   type ExtractionRepository,
   type ExtractionWarning,
@@ -341,8 +342,11 @@ export function createDocumentIngestion(
         );
       }
 
+      const stateClaim: {
+        request?: () => Omit<ExtractionClaimRequest, "expiresAt">;
+      } = {};
       const setState = async (state: DocumentState): Promise<boolean> => {
-        if (!record || record.state === state) return true;
+        if (!record) return false;
         const source = record;
         const next: DocumentMetadataRecord = {
           ...source,
@@ -351,10 +355,19 @@ export function createDocumentIngestion(
             state === "processing" ? source.processedAt : now().toISOString(),
         };
         if (
-          await dependencies.documents.replaceOwned(next, scope, {
-            objectKey: source.objectKey,
-            contentHash: source.contentHash,
-          })
+          await dependencies.documents.replaceOwned(
+            next,
+            scope,
+            {
+              objectKey: source.objectKey,
+              contentHash: source.contentHash,
+              name: source.name,
+              mimeType: source.mimeType,
+              state: source.state,
+              processedAt: source.processedAt,
+            },
+            stateClaim.request?.(),
+          )
         ) {
           record = next;
           return true;
@@ -379,7 +392,7 @@ export function createDocumentIngestion(
 
       const cacheIdentity: ExtractionCacheIdentity = {
         contentHash: record.contentHash.toLowerCase(),
-        extractorVersion,
+        extractorVersion: `${extractorVersion}:${format}`,
         modelVersion: mayNeedOcr(format)
           ? (dependencies.ocr?.version ?? "none")
           : null,
@@ -411,6 +424,7 @@ export function createDocumentIngestion(
           stopReason: null,
         };
       }
+      stateClaim.request = claimRequest;
 
       const controller = new AbortController();
       const signal = request.signal
@@ -419,12 +433,12 @@ export function createDocumentIngestion(
       let claimLost = false;
       let heartbeatError: unknown;
       let renewal: Promise<boolean> | undefined;
-      const renewClaim = (): Promise<boolean> => {
+      const renewClaim = (recoverExpired = false): Promise<boolean> => {
         if (claimLost) return Promise.resolve(false);
         if (heartbeatError) return Promise.reject(heartbeatError);
         if (renewal) return renewal;
         renewal = dependencies.extractions
-          .renewClaim(claimRequest(), scope)
+          .renewClaim(claimRequest(), scope, { recoverExpired })
           .then((owned) => {
             if (!owned) {
               claimLost = true;
@@ -437,7 +451,7 @@ export function createDocumentIngestion(
           });
         return renewal;
       };
-      ownership.verify = renewClaim;
+      ownership.verify = () => renewClaim(true);
       const heartbeat = setInterval(
         () => {
           void renewClaim().catch((error: unknown) => {
@@ -478,7 +492,7 @@ export function createDocumentIngestion(
             ),
           );
         }
-        if (!(await renewClaim())) return false;
+        if (!(await renewClaim(true))) return false;
         const at = now().toISOString();
         return dependencies.extractions.saveClaimed(
           extraction,
@@ -505,10 +519,7 @@ export function createDocumentIngestion(
           };
         }
         if (!(await setState("processing"))) {
-          throw new IngestionError(
-            "Document changed during ingestion",
-            "document-changed",
-          );
+          return lostResult([]);
         }
         const parsed = (() => {
           try {

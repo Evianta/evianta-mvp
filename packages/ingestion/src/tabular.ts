@@ -15,7 +15,7 @@ export interface ParsedTables {
 }
 
 const numberPattern =
-  /^[-+]?(?:\d{1,3}(?:,\d{2,3})+|\d+)?(?:\.\d+)?(?:e[-+]?\d+)?$/i;
+  /^[-+]?(?:(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d+)?|\.\d+)(?:e[-+]?\d+)?$/i;
 const isoDatePattern =
   /^\d{4}-\d{2}-\d{2}(?:[t ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?$/i;
 const dayMonthYearPattern = /^\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}$/;
@@ -292,7 +292,11 @@ export function parseJson(text: string, limits: IngestionLimits): ParsedJson {
     assertCellLimit(value.length + 1, headers.length, limits.maxTableCells);
     const grid = [
       headers,
-      ...value.map((row) => headers.map((header) => cellValue(row[header]))),
+      ...value.map((row) =>
+        headers.map((header) =>
+          Object.hasOwn(row, header) ? cellValue(row[header]) : null,
+        ),
+      ),
     ];
     const table = buildTable("table-1", grid, limits, {
       cellReferences: false,

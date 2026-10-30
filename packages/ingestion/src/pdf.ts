@@ -87,7 +87,7 @@ export async function openPdf(
     enableXfa: false,
     disableFontFace: true,
     useSystemFonts: false,
-    stopAtErrors: false,
+    stopAtErrors: true,
     maxImageSize: limits.maxImagePixels,
     standardFontDataUrl,
     verbosity: 0,
@@ -147,6 +147,18 @@ export async function openPdf(
         text,
         spans,
         load: async () => {
+          const operators = await withTimeout(
+            page.getOperatorList(),
+            limits.parserTimeoutMs,
+          );
+          // PDF.js can resolve an empty operator list after a strict image-size
+          // error. Never send that blank raster to OCR as complete content.
+          if (operators.fnArray.length === 0) {
+            throw new IngestionError(
+              "PDF page has no renderable content within the image limits",
+              "image-limit-exceeded",
+            );
+          }
           const scale = boundedScale(viewport, limits, 2);
           const scaled = page.getViewport({ scale });
           const canvas = createCanvas(
