@@ -11,7 +11,7 @@ import {
   type UsageReservationRequest,
 } from "@evianta/core";
 import { randomUUID } from "node:crypto";
-import { MongoClient } from "mongodb";
+import { MongoClient, type Document } from "mongodb";
 import { MongoMemoryReplSet } from "mongodb-memory-server";
 import {
   afterAll,
@@ -26,6 +26,7 @@ import { createInMemoryStore } from "../src/memory.js";
 import { MongoStore } from "../src/mongo.js";
 
 const timestamp = "2026-01-15T00:00:00.000Z";
+type StoredDocument = Document & { _id: string };
 const usageSummary = syntheticWorkflowFixtures.dataAnalysis.case.usage;
 const ownerScope: OwnerScope = { ownerId: "owner-1", caseId: "case-1" };
 
@@ -2549,7 +2550,6 @@ describe("MongoDB repositories", () => {
           await harness.store.cases.insertOne(
             {
               _id: "transaction-case",
-              id: "transaction-case",
               ...makeCase("transaction-case", "owner-1"),
             },
             { session },
@@ -2862,7 +2862,7 @@ describe("MongoDB repositories", () => {
       expect(
         await harness.client
           .db(harness.dbName)
-          .collection("runAdmissions")
+          .collection<StoredDocument>("runAdmissions")
           .findOne({
             _id: JSON.stringify(["owner-1", "case-live"]),
           }),
@@ -2875,7 +2875,7 @@ describe("MongoDB repositories", () => {
       expect(
         await harness.client
           .db(harness.dbName)
-          .collection("runAdmissionCounters")
+          .collection<StoredDocument>("runAdmissionCounters")
           .findOne({ _id: "global" }),
       ).toMatchObject({ activeRuns: 1 });
       await expect(
@@ -2926,7 +2926,7 @@ describe("MongoDB repositories", () => {
       await harness.store.repositories.usagePrices.insert(laterPrice);
       await harness.client
         .db(harness.dbName)
-        .collection("usagePrices")
+        .collection<StoredDocument>("usagePrices")
         .updateOne(
           { _id: laterPrice.id },
           { $set: { effectiveAt: laterPrice.effectiveAt } },
@@ -2951,7 +2951,7 @@ describe("MongoDB repositories", () => {
       // Stored and requested snapshots use different offsets for one instant.
       await harness.client
         .db(harness.dbName)
-        .collection("usagePrices")
+        .collection<StoredDocument>("usagePrices")
         .updateOne(
           { _id: price.id },
           { $set: { effectiveAt: "2025-12-31T19:00:00-05:00" } },
@@ -2966,7 +2966,7 @@ describe("MongoDB repositories", () => {
         });
       const ledgerIndexes = await harness.client
         .db(harness.dbName)
-        .collection("usageLedger")
+        .collection<StoredDocument>("usageLedger")
         .listIndexes()
         .toArray();
       expect(
@@ -2979,7 +2979,7 @@ describe("MongoDB repositories", () => {
       ).toBe(true);
       await harness.client
         .db(harness.dbName)
-        .collection("usageLedger")
+        .collection<StoredDocument>("usageLedger")
         .updateOne(
           { _id: reservation.attemptId },
           {
@@ -3051,7 +3051,7 @@ describe("MongoDB repositories", () => {
       });
       await harness.client
         .db(harness.dbName)
-        .collection("usageLedger")
+        .collection<StoredDocument>("usageLedger")
         .insertMany(extra);
 
       expect(
@@ -3093,11 +3093,15 @@ describe("MongoDB repositories", () => {
           updatedAt: timestamp,
         };
       });
-      await database.collection("runAdmissions").insertMany(locks);
-      await database.collection("runAdmissionCounters").insertMany([
-        { _id: "user:owner-1", activeRuns: locks.length },
-        { _id: "global", activeRuns: locks.length },
-      ]);
+      await database
+        .collection<StoredDocument>("runAdmissions")
+        .insertMany(locks);
+      await database
+        .collection<StoredDocument>("runAdmissionCounters")
+        .insertMany([
+          { _id: "user:owner-1", activeRuns: locks.length },
+          { _id: "global", activeRuns: locks.length },
+        ]);
 
       const lease = await harness.store.repositories.runAdmission.acquire({
         ownerId: "owner-1",
@@ -3113,7 +3117,7 @@ describe("MongoDB repositories", () => {
       expect(lease.fencingToken).toBe(1);
       expect(
         await database
-          .collection("runAdmissionCounters")
+          .collection<StoredDocument>("runAdmissionCounters")
           .findOne({ _id: "global" }),
       ).toMatchObject({ activeRuns: 1 });
     } finally {

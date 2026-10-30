@@ -18,11 +18,13 @@
     "zod": "4.4.3"
   },
   "scripts": {
+    "watch": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "build": "tsc -p tsconfig.build.json"
   },
   "devDependencies": {
+    "@smithy/util-stream": "4.8.2",
     "aws-sdk-client-mock": "^4.1.0",
     "mongodb-memory-server": "^11.3.0"
   }

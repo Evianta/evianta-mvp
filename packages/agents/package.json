@@ -21,6 +21,7 @@
     "zod": "4.4.3"
   },
   "scripts": {
+    "watch": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "pretypecheck": "pnpm --filter @evianta/core build && pnpm --filter @evianta/env build && pnpm --filter @evianta/ai build && pnpm --filter @evianta/store build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",

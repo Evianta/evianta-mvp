@@ -5,13 +5,34 @@ import { createUserAccessKey } from "./auth.js";
 
 function usage(): never {
   throw new Error(
-    "Usage: admin <create-user|disable-user|issue-key|revoke-key> <arguments>",
+    "Usage: admin create-user <email> <display-name> [user|admin] | disable-user <user-id> | issue-key <user-id> [expiry-ISO] | revoke-key <key-id>",
   );
 }
 
 async function main(args: string[]): Promise<void> {
   const [command, ...values] = args;
-  if (!command) usage();
+  switch (command) {
+    case "create-user":
+      if (
+        !values[0]?.trim() ||
+        !values[1]?.trim() ||
+        values.length > 3 ||
+        (values[2] !== undefined &&
+          values[2] !== "user" &&
+          values[2] !== "admin")
+      )
+        usage();
+      break;
+    case "issue-key":
+      if (!values[0]?.trim() || values.length > 2) usage();
+      break;
+    case "disable-user":
+    case "revoke-key":
+      if (!values[0]?.trim() || values.length !== 1) usage();
+      break;
+    default:
+      usage();
+  }
   const store = await connectMongoStore();
   try {
     const { users, accessKeys } = store.repositories;

@@ -10,6 +10,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { mockClient } from "aws-sdk-client-mock";
+import { sdkStreamMixin } from "@smithy/util-stream";
 import type { BoundedStream, DocumentStore } from "@evianta/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DocumentStoreError } from "../src/document-errors.js";
@@ -266,7 +267,7 @@ describe("S3 document store", () => {
 
   it("streams S3 reads and returns null for a missing object", async () => {
     s3Mock.on(GetObjectCommand).resolves({
-      Body: Readable.from([payload]),
+      Body: sdkStreamMixin(Readable.from([payload])),
       ContentLength: payload.byteLength,
       ContentType: "text/plain",
       Metadata: { "content-sha256": contentHash },
@@ -303,7 +304,7 @@ describe("S3 document store", () => {
     const invalidMetadataBody = Readable.from([payload]);
     const destroyInvalidMetadataBody = vi.spyOn(invalidMetadataBody, "destroy");
     s3Mock.on(GetObjectCommand).resolves({
-      Body: invalidMetadataBody,
+      Body: sdkStreamMixin(invalidMetadataBody),
       ContentLength: payload.byteLength,
       ContentType: "text/plain",
       Metadata: {},
@@ -317,7 +318,7 @@ describe("S3 document store", () => {
     const invalidLimitBody = Readable.from([payload]);
     const destroyInvalidLimitBody = vi.spyOn(invalidLimitBody, "destroy");
     s3Mock.on(GetObjectCommand).resolves({
-      Body: invalidLimitBody,
+      Body: sdkStreamMixin(invalidLimitBody),
       ContentLength: payload.byteLength,
       ContentType: "text/plain",
       Metadata: { "content-sha256": contentHash },

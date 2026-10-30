@@ -1,13 +1,118 @@
 # Evianta MVP
 
-The repository is a pnpm TypeScript monorepo. It currently provides the build,
-test and package boundaries for the implementation roadmap; workflow features
-are added in their respective work packages.
+The repository is a pnpm TypeScript monorepo with a Next.js web app, an Express
+API and a separate background worker.
 
 ## Requirements
 
 - Node.js `24.3.0` (see `.node-version`)
 - pnpm `10.18.3` (pinned by the root `package.json`)
+- MongoDB 7+ running as a replica set for local application use (transactions
+  are required). API, worker and admin connections reject standalone MongoDB
+  before initializing repositories or background recovery.
+
+## Local development
+
+```sh
+corepack enable
+pnpm install --frozen-lockfile
+```
+
+Copy `.env.example` to `.env` in the repository root (`Copy-Item .env.example .env`
+in PowerShell). Generate a signing key and put it in `JWT_SIGNING_KEY`:
+
+```sh
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
+
+Keep the key private. The example supplies local rate limits and uses the mock
+model provider, so no model credentials or paid requests are needed. Never use
+the local settings or test usage mode for a live deployment.
+
+For a local MongoDB installation, create a dedicated data directory first, then
+start a single-node replica set in a separate terminal:
+
+```sh
+mongod --replSet rs0 --bind_ip 127.0.0.1 --port 27017 --dbpath <absolute-data-directory>
+mongosh --eval "rs.initiate({_id:'rs0',members:[{_id:0,host:'127.0.0.1:27017'}]})"
+```
+
+Run the initialization command once, after the server is listening. Set
+`MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0` in `.env`, or use an
+existing transaction-capable development database. Do not initialize or
+reconfigure a shared database.
+
+If API or worker output reports `mongodb-transactions-required`, stop
+`pnpm dev` and configure the database as above. Adding `replicaSet=rs0` to a
+URI alone does not turn a standalone server into a replica set. If an existing
+MongoDB service already owns port 27017, do not start a second server on that
+port; use a separate development port/data directory and update `MONGODB_URI`.
+Restart `pnpm dev` after the replica set is ready.
+
+```sh
+pnpm dev
+```
+
+This builds the API dependency graph, then starts compiler watchers, the web app
+at `http://localhost:3000`, API at `http://127.0.0.1:3001`, and the worker.
+App and shared-package edits rebuild/reload automatically. Stop the group with
+Ctrl+C. Initial build errors prevent launch; compiler errors during watch are
+shown in the terminal and must be fixed before relying on the running app.
+Compiler caches live inside each package's generated `dist` directory, so
+removing generated output also invalidates its build cache.
+
+The browser connects directly to `NEXT_PUBLIC_API_BASE_URL`, which defaults in
+the example to `http://127.0.0.1:3001`, matching the API's IPv4 loopback binding.
+`WEB_ORIGIN` must exactly match the web origin, including the hostname and port;
+opening the web app with `127.0.0.1` instead of `localhost` also requires updating
+`WEB_ORIGIN`. API health is available at `http://127.0.0.1:3001/healthz`.
+The web commands and API/worker/admin commands load the root `.env`; exported
+environment variables take precedence. Restart development after changing
+environment values, and rebuild the web app after changing public values used
+in a production build. Web build/start commands explicitly use production mode,
+even when the local `.env` sets development mode. Only `NEXT_PUBLIC_*` values
+are exposed to the browser.
+
+Create a local user and issue a key, using the user ID printed by the first
+command:
+
+```sh
+pnpm --filter @evianta/api admin create-user developer@example.test "Local Developer"
+pnpm --filter @evianta/api admin issue-key <user-id>
+```
+
+The admin command requires the API build (`pnpm dev` prepares it, or run
+`pnpm --filter @evianta/api... build`). The issued key is printed only once.
+Enter it in the web sign-in dialog; do not put it in a URL, source file or log.
+The worker must be running for submitted analyses to complete.
+
+From `apps/api`, the equivalent command is `pnpm admin issue-key <user-id>`.
+`issue-key` requires an existing user ID, not an email address. An optional
+second argument sets the key expiry as an ISO timestamp. Without one, the key
+remains valid until revoked. Missing arguments are rejected before connecting
+to MongoDB.
+
+| Command             | Purpose                                      |
+| ------------------- | -------------------------------------------- |
+| `pnpm dev`          | Web, API, worker and shared-package watchers |
+| `pnpm dev:web`      | Web and core watcher only                    |
+| `pnpm dev:api`      | API and dependency watchers only             |
+| `pnpm dev:worker`   | Worker and dependency watchers only          |
+| `pnpm build`        | Production workspace builds                  |
+| `pnpm typecheck`    | Application, test and tooling types          |
+| `pnpm lint`         | ESLint plus formatting check                 |
+| `pnpm lint:fix`     | Apply ESLint fixes                           |
+| `pnpm format:check` | Check formatting without writing             |
+| `pnpm format`       | Apply Prettier formatting                    |
+| `pnpm test`         | Build all workspaces, then run Vitest        |
+| `pnpm test:e2e`     | Run mocked Playwright browser tests          |
+
+Use the full `pnpm dev` group when running API and worker together; do not run
+both focused backend commands simultaneously, since each owns compiler
+watchers. The focused commands also prepare their dependencies from a fresh
+checkout.
+
+## Quality checks
 
 Install dependencies and run the repository gates:
 
@@ -20,9 +125,29 @@ pnpm test
 pnpm build
 ```
 
-`pnpm test` builds workspace packages first so tests also verify imports through
-their public package entry points. Tests use local fixtures and do not contact
-cloud services or model providers.
+`pnpm test` includes `pnpm build`, so a separate build is optional when running
+all gates. Tests use local fixtures and do not contact cloud services or model
+providers. MongoDB tests download a local test binary on first use; no
+application database is required. ESLint includes Next.js and React Hooks
+rules. Prettier and EditorConfig use two-space indentation and LF line endings;
+Git preserves LF on checkout, including Windows. CSV byte fixtures retain their
+original bytes. Vitest and Playwright each use at most two workers to avoid
+oversubscribing local databases and the Next.js development server. There are
+no Git hooks.
+
+Install Chromium once before running browser tests:
+
+```sh
+pnpm --filter @evianta/web exec playwright install chromium
+pnpm test:e2e
+```
+
+The browser suite owns port 3100 and starts a dedicated fixture-backed web server;
+it never reuses a running development server. Free that port before testing.
+Stop web development before browser tests or production builds, since Next.js
+commands in the same checkout share generated output.
+CI runs the same quality gates and a separate Chromium browser job, retaining
+browser reports and traces on failure.
 
 ## Workspace responsibilities
 
@@ -109,7 +234,10 @@ the persisted task instructions.
 `.env.example` contains only non-secret local defaults. Copy it to `.env` when
 local configuration is needed; `.env` files (except the example) and generated
 build/test output are ignored by Git. Local document bytes are stored under
-`.data/documents`; production must use a private S3 bucket configured with
+`apps/api/.data/documents` when using the example with the API package commands
+(relative paths resolve from `apps/api`). API, worker and admin share that
+working directory. Use an absolute `LOCAL_STORAGE_DIR` to choose another
+location. Production must use a private S3 bucket configured with
 `AWS_REGION`, `S3_BUCKET`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
 S3 download URLs are short-lived and capped at one hour. Add settings to the
 example alongside the work package that introduces them. Secrets must be read

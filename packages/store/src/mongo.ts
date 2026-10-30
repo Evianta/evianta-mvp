@@ -2052,6 +2052,13 @@ export async function connectMongoStore(
   await client.connect();
   const store = new MongoStore({ client, db: client.db(config.dbName) });
   try {
+    const topology = await client.db(config.dbName).command({ hello: 1 });
+    if (typeof topology.setName !== "string" && topology.msg !== "isdbgrid") {
+      throw new StoreError(
+        "MongoDB transactions require a replica set or mongos; standalone MongoDB is not supported. Start a local replica set with --replSet rs0, initialize it with rs.initiate(), and set MONGODB_URI with ?replicaSet=rs0. See README.md local development setup.",
+        "mongodb-transactions-required",
+      );
+    }
     await store.initialize();
     return store;
   } catch (error) {

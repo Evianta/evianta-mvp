@@ -92,6 +92,8 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   const [loading, setLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState(false);
   const lastSequence = useRef(0);
+  const runId = run?.id;
+  const runStatus = run?.status;
 
   useEffect(() => {
     let active = true;
@@ -132,12 +134,12 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   }, [api, caseId, session]);
 
   useEffect(() => {
-    if (!run || !session) return;
-    const replayOnly = terminalStatuses.has(run.status);
+    if (!runId || !runStatus || !session) return;
+    const replayOnly = terminalStatuses.has(runStatus);
     if (replayOnly && lastSequence.current > 0) return;
     const controller = new AbortController();
     void api
-      .streamRunEvents(run.id, {
+      .streamRunEvents(runId, {
         afterSequence: lastSequence.current,
         caseId,
         replayOnly,
@@ -230,7 +232,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
         }
       });
     return () => controller.abort();
-  }, [api, run?.id, run?.status, session]);
+  }, [api, caseId, runId, runStatus, session]);
 
   async function startRun() {
     if (!record) return;

@@ -23,7 +23,11 @@ import {
   getUsageEnvironment,
 } from "@evianta/env/server";
 import { createDocumentIngestion } from "@evianta/ingestion";
-import { connectMongoStore, createDocumentStore } from "@evianta/store";
+import {
+  connectMongoStore,
+  createDocumentStore,
+  StoreError,
+} from "@evianta/store";
 import type { CaseApiServices } from "./routes.js";
 
 export interface ApiRuntime {
@@ -38,7 +42,18 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
   const documentStoreConfig = getDocumentStoreConfig();
   const aiEnvironment = getAiEnvironment();
   const usage = getUsageEnvironment();
-  const store = await connectMongoStore();
+  const store = await connectMongoStore().catch((error: unknown) => {
+    if (
+      error instanceof StoreError &&
+      error.code === "mongodb-transactions-required"
+    ) {
+      console.error("Database configuration invalid", {
+        code: error.code,
+        message: error.message,
+      });
+    }
+    throw error;
+  });
   try {
     const storage = createDocumentStore(documentStoreConfig);
     const checkpointer = await createMongoCheckpointerAsync({

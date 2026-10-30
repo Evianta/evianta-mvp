@@ -22,7 +22,8 @@
   },
   "scripts": {
     "predev": "pnpm --filter @evianta/core build",
-    "dev": "next dev",
+    "dev": "concurrently --kill-others --names core,web \"pnpm --filter @evianta/core watch\" \"pnpm dev:server\"",
+    "dev:server": "node --env-file-if-exists=../../.env node_modules/next/dist/bin/next dev",
     "pretypecheck": "pnpm --filter @evianta/core build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "pretest": "pnpm --filter @evianta/core build",
@@ -30,8 +31,8 @@
     "pretest:e2e": "pnpm --filter @evianta/core build",
     "test:e2e": "playwright test",
     "prebuild": "pnpm --filter @evianta/core build",
-    "build": "next build",
-    "start": "next start"
+    "build": "cross-env NODE_ENV=production node --env-file-if-exists=../../.env node_modules/next/dist/bin/next build",
+    "start": "cross-env NODE_ENV=production node --env-file-if-exists=../../.env node_modules/next/dist/bin/next start"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",

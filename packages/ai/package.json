@@ -14,6 +14,7 @@
     "zod": "4.4.3"
   },
   "scripts": {
+    "watch": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "build": "tsc -p tsconfig.build.json"
