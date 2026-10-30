@@ -26,15 +26,16 @@ cloud services or model providers.
 
 ## Workspace responsibilities
 
-| Path              | Current boundary and planned ownership                            |
-| ----------------- | ----------------------------------------------------------------- |
-| `packages/core`   | Shared domain schemas, ports and synthetic workflow fixtures      |
-| `packages/env`    | Server-side environment and storage configuration validation      |
-| `packages/store`  | MongoDB repositories and private document storage adapters        |
-| `packages/ai`     | Muse/mock provider adapters, structured output and usage boundary |
-| `packages/agents` | LangGraph planning, specialist execution, review and run recovery |
-| `apps/api`        | Express API, access-key authentication and admin CLI              |
-| `apps/web`        | Web application boundary; UI features come in the web work pack   |
+| Path                 | Current boundary and planned ownership                                |
+| -------------------- | --------------------------------------------------------------------- |
+| `packages/core`      | Shared domain schemas, ports and synthetic workflow fixtures          |
+| `packages/env`       | Server-side environment and storage configuration validation          |
+| `packages/store`     | MongoDB repositories and private document storage adapters            |
+| `packages/ai`        | Muse/mock provider adapters, structured output and usage boundary     |
+| `packages/agents`    | LangGraph planning, specialist execution, review and run recovery     |
+| `packages/ingestion` | Document parsing, text-layer and admitted OCR extraction with caching |
+| `apps/api`           | Express API, access-key authentication and admin CLI                  |
+| `apps/web`           | Web application boundary; UI features come in the web work pack       |
 
 Keep shared types in `core`, environment reads in `env`, persistence in
 `store`, and provider access in `ai`. Use `workspace:*` for internal
@@ -60,6 +61,28 @@ USD per million tokens, with an optional per-request web-search rate.
 `UsageAdminService` exposes bounded, administrator-only attempt summaries.
 `runAdmission` provides fenced user/global concurrency admission and retains a
 case lock while a run waits for input.
+
+Document ingestion renews its extraction claim during parsing and OCR. Processing
+and failure transitions are fenced by the live claim and the document snapshot;
+failures before claiming compare the original state before updating it. Saving
+the extraction and final document state is conditional on a live claim in one
+transaction. After synchronous parsing, an expired lease can be extended only
+if its stored holder is unchanged; a replaced or deleted claim cannot be recovered.
+Cache identities include the detected format, so renaming text
+as TSV triggers table parsing. TIFF decode buffers are released after each frame.
+PDF pages with no renderable content within the image limits remain partial
+instead of caching a blank OCR result as complete.
+ZIP spreadsheets are checked against actual bounded inflation;
+row limits reject truncated sheets. Extracted output is limited to 12 MiB of
+BSON by default (`maxExtractedBytes`, configurable up to 15 MiB), below MongoDB's
+16 MiB record limit. Larger output fails explicitly rather than remaining in
+`processing`.
+
+Live Muse image requests remain disabled with `unbounded-usage-capability`
+until the provider's image usage can be bounded for spending admission. Scanned
+documents therefore remain `partial` with `ocr-unsupported` under Muse; mock
+OCR and deterministic parsing are available. Do not remove the spending guard
+to enable OCR.
 
 Orchestration publishes each full task plan atomically, including adapted
 instructions, and copies retry runs with their tasks in one transaction.

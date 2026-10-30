@@ -7,6 +7,7 @@ import type {
   DocumentMetadataDto,
   Deliverable,
   ExtractedDocument,
+  ExtractionCacheIdentity,
   Evidence,
   Finding,
   RunEvent,
@@ -72,6 +73,14 @@ export interface SessionRepository {
   revoke(id: string, revokedAt: string): Promise<boolean>;
 }
 
+export type ExpectedDocumentSource = Pick<
+  DocumentMetadataRecord,
+  "objectKey" | "contentHash"
+> &
+  Partial<
+    Pick<DocumentMetadataRecord, "state" | "processedAt" | "name" | "mimeType">
+  >;
+
 export interface DocumentRepository {
   findOwned(
     id: string,
@@ -82,7 +91,17 @@ export interface DocumentRepository {
   replaceOwned(
     record: DocumentMetadataRecord,
     scope: OwnerScope,
+    expectedSource?: ExpectedDocumentSource,
+    claim?: Omit<ExtractionClaimRequest, "expiresAt">,
   ): Promise<boolean>;
+}
+
+export interface ExtractionClaimRequest {
+  documentId: string;
+  cacheIdentity: ExtractionCacheIdentity;
+  holderId: string;
+  at: string;
+  expiresAt: string;
 }
 
 export interface ExtractionRepository {
@@ -90,10 +109,39 @@ export interface ExtractionRepository {
     documentId: string,
     scope: OwnerScope,
   ): Promise<ExtractedDocument | null>;
+  findCached(
+    documentId: string,
+    cacheIdentity: ExtractionCacheIdentity,
+    scope: OwnerScope,
+  ): Promise<ExtractedDocument | null>;
   saveForDocument(
     extraction: ExtractedDocument,
     scope: OwnerScope,
   ): Promise<void>;
+  /** Atomically saves output and document state only for a live claim holder. */
+  saveClaimed(
+    extraction: ExtractedDocument,
+    document: DocumentMetadataRecord,
+    claim: { holderId: string; at: string },
+    scope: OwnerScope,
+  ): Promise<boolean>;
+  /**
+   * Claims one extraction cache identity so concurrent ingestions do not
+   * repeat paid OCR. Returns false while another unexpired holder owns it.
+   */
+  claim(request: ExtractionClaimRequest, scope: OwnerScope): Promise<boolean>;
+  /** Recovery may extend an expired claim only while its holder is unchanged. */
+  renewClaim(
+    request: ExtractionClaimRequest,
+    scope: OwnerScope,
+    options?: { recoverExpired?: boolean },
+  ): Promise<boolean>;
+  releaseClaim(
+    request: Omit<ExtractionClaimRequest, "at" | "expiresAt">,
+    scope: OwnerScope,
+  ): Promise<void>;
+  /** Removes cached extracts and claims as part of case deletion/retention. */
+  deleteForCase(scope: OwnerScope): Promise<number>;
 }
 
 export interface FindingRepository {

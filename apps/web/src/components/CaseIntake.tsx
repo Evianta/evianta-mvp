@@ -51,6 +51,7 @@ const documentStateLabels: Record<SelectedDocument["state"], string> = {
   uploaded: "Uploaded",
   processing: "Reading",
   ready: "Ready",
+  partial: "Partly read",
   failed: "Failed",
 };
 

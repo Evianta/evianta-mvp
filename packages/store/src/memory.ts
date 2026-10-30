@@ -24,6 +24,7 @@ import {
   type DocumentMetadataRecord,
   type Evidence,
   type ExtractedDocument,
+  type ExtractionCacheIdentity,
   type Finding,
   type OwnerScope,
   type RunEvent,
@@ -87,6 +88,10 @@ export class InMemoryStore {
     { record: ExtractedDocument; caseId: string; revision: number }
   >();
   private extractionRevision = 0;
+  private readonly extractionClaims = new Map<
+    string,
+    { holderId: string; caseId: string; expiresAt: string }
+  >();
   private readonly tasks: DataMap<Task> = new Map();
   private readonly findings: DataMap<Finding> = new Map();
   private readonly evidence: DataMap<Evidence> = new Map();
@@ -430,13 +435,34 @@ export class InMemoryStore {
           if (this.documents.has(record.id)) duplicate();
           this.documents.set(record.id, record);
         },
-        replaceOwned: async (document, scope) => {
+        replaceOwned: async (document, scope, expectedSource, claim) => {
           const record = parse(DocumentMetadataRecordSchema, document);
           if (!this.ownsCase(scope) || record.caseId !== scope.caseId) {
             return false;
           }
           const current = this.documents.get(record.id);
-          if (!current || current.caseId !== scope.caseId) return false;
+          if (claim) {
+            const held = this.extractionClaims.get(this.extractionKey(claim));
+            const at = TimestampSchema.parse(claim.at);
+            if (
+              claim.documentId !== record.id ||
+              !held ||
+              held.caseId !== scope.caseId ||
+              held.holderId !== claim.holderId ||
+              Date.parse(held.expiresAt) <= Date.parse(at)
+            )
+              return false;
+          }
+          if (
+            !current ||
+            current.caseId !== scope.caseId ||
+            (expectedSource &&
+              Object.entries(expectedSource).some(
+                ([key, value]) =>
+                  current[key as keyof DocumentMetadataRecord] !== value,
+              ))
+          )
+            return false;
           this.documents.set(record.id, record);
           return true;
         },
@@ -471,6 +497,132 @@ export class InMemoryStore {
             caseId: scope.caseId,
             revision: ++this.extractionRevision,
           });
+        },
+        saveClaimed: async (extraction, document, claim, scope) => {
+          this.requireScope(scope.caseId, scope);
+          const record = parse(ExtractedDocumentSchema, extraction);
+          const next = parse(DocumentMetadataRecordSchema, document);
+          const stored = this.documents.get(record.documentId);
+          const key = this.extractionKey(record);
+          const current = this.extractionClaims.get(key);
+          const at = TimestampSchema.parse(claim.at);
+          if (
+            !stored ||
+            stored.caseId !== scope.caseId ||
+            stored.objectKey !== next.objectKey ||
+            stored.contentHash !== next.contentHash ||
+            stored.name !== next.name ||
+            stored.mimeType !== next.mimeType ||
+            next.id !== stored.id ||
+            next.caseId !== stored.caseId ||
+            !current ||
+            current.caseId !== scope.caseId ||
+            current.holderId !== claim.holderId ||
+            Date.parse(current.expiresAt) <= Date.parse(at)
+          )
+            return false;
+          this.extractions.set(key, {
+            record,
+            caseId: scope.caseId,
+            revision: ++this.extractionRevision,
+          });
+          this.documents.set(next.id, next);
+          return true;
+        },
+        findCached: async (documentId, cacheIdentity, scope) => {
+          if (!this.ownsCase(scope)) return null;
+          const item = this.extractions.get(
+            this.extractionKey({ documentId, cacheIdentity }),
+          );
+          return item && item.caseId === scope.caseId
+            ? parse(ExtractedDocumentSchema, item.record)
+            : null;
+        },
+        claim: async (request, scope) => {
+          const at = TimestampSchema.parse(request.at);
+          const expiresAt = TimestampSchema.parse(request.expiresAt);
+          if (Date.parse(expiresAt) <= Date.parse(at)) {
+            throw new StoreError(
+              "Extraction claim expiry must be after the claim time",
+              "invalid-extraction-claim",
+            );
+          }
+          this.requireScope(scope.caseId, scope);
+          const document = this.documents.get(request.documentId);
+          if (!document || document.caseId !== scope.caseId) {
+            throw new StoreError(
+              "Document does not belong to this case",
+              "document-not-owned",
+            );
+          }
+          const key = this.extractionKey(request);
+          const current = this.extractionClaims.get(key);
+          if (
+            current &&
+            current.holderId !== request.holderId &&
+            Date.parse(current.expiresAt) > Date.parse(at)
+          ) {
+            return false;
+          }
+          this.extractionClaims.set(key, {
+            holderId: request.holderId,
+            caseId: scope.caseId,
+            expiresAt,
+          });
+          return true;
+        },
+        renewClaim: async (request, scope, options) => {
+          this.requireScope(scope.caseId, scope);
+          const at = TimestampSchema.parse(request.at);
+          const expiresAt = TimestampSchema.parse(request.expiresAt);
+          if (Date.parse(expiresAt) <= Date.parse(at)) {
+            throw new StoreError(
+              "Extraction claim expiry must be after the claim time",
+              "invalid-extraction-claim",
+            );
+          }
+          const current = this.extractionClaims.get(
+            this.extractionKey(request),
+          );
+          if (
+            !current ||
+            current.caseId !== scope.caseId ||
+            current.holderId !== request.holderId ||
+            (!options?.recoverExpired &&
+              Date.parse(current.expiresAt) <= Date.parse(at))
+          )
+            return false;
+          current.expiresAt = expiresAt;
+          return true;
+        },
+        releaseClaim: async (request, scope) => {
+          if (!this.ownsCase(scope)) return;
+          const key = this.extractionKey(request);
+          const current = this.extractionClaims.get(key);
+          if (
+            current &&
+            current.caseId === scope.caseId &&
+            current.holderId === request.holderId
+          ) {
+            this.extractionClaims.delete(key);
+          }
+        },
+        deleteForCase: async (scope) => {
+          const record = this.cases.get(scope.caseId);
+          if (!record || record.ownerId !== scope.ownerId || record.isSample) {
+            throw new CaseNotOwnedError();
+          }
+          let deleted = 0;
+          for (const [key, item] of this.extractions) {
+            if (item.caseId !== scope.caseId) continue;
+            this.extractions.delete(key);
+            deleted += 1;
+          }
+          for (const [key, claim] of this.extractionClaims) {
+            if (claim.caseId === scope.caseId)
+              this.extractionClaims.delete(key);
+          }
+          return deleted;
         },
       },
       evidence: {
@@ -1082,7 +1234,10 @@ export class InMemoryStore {
     records.set(record.id, record);
   }
 
-  private extractionKey(record: ExtractedDocument): string {
+  private extractionKey(record: {
+    documentId: string;
+    cacheIdentity: ExtractionCacheIdentity;
+  }): string {
     return [
       record.documentId,
       record.cacheIdentity.contentHash,

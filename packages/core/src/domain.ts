@@ -447,6 +447,7 @@ export const DocumentStateSchema = z.enum([
   "uploaded",
   "processing",
   "ready",
+  "partial",
   "failed",
 ]);
 export type DocumentState = z.infer<typeof DocumentStateSchema>;
@@ -517,11 +518,23 @@ export const ExtractedPageSchema = z.object({
 });
 export type ExtractedPage = z.infer<typeof ExtractedPageSchema>;
 
+export const ExtractedColumnTypeSchema = z.enum([
+  "string",
+  "number",
+  "boolean",
+  "date",
+  "empty",
+]);
+export type ExtractedColumnType = z.infer<typeof ExtractedColumnTypeSchema>;
+
 export const ExtractedTableSchema = z.object({
   id: IdSchema,
   pageIndex: NonNegativeIntegerSchema.nullable(),
   headers: z.array(z.string()),
   rows: z.array(z.array(z.string().nullable())),
+  columnTypes: z.array(ExtractedColumnTypeSchema).optional(),
+  sheet: z.string().min(1).optional(),
+  cellRange: z.string().min(1).optional(),
 });
 export type ExtractedTable = z.infer<typeof ExtractedTableSchema>;
 
@@ -547,6 +560,7 @@ export const ExtractedDocumentSchema = z.object({
   }),
 });
 export type ExtractedDocument = z.infer<typeof ExtractedDocumentSchema>;
+export type ExtractionCacheIdentity = ExtractedDocument["cacheIdentity"];
 
 export const EvidenceConfidenceSchema = z.enum([
   "high",

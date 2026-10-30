@@ -1,0 +1,32 @@
+{
+  "name": "@evianta/ingestion",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@evianta/ai": "workspace:*",
+    "@evianta/core": "workspace:*",
+    "@napi-rs/canvas": "1.0.13",
+    "bson": "7.3.3",
+    "papaparse": "5.7.0",
+    "pdfjs-dist": "6.4.299",
+    "utif2": "4.1.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@evianta/store": "workspace:*",
+    "@types/papaparse": "5.5.2",
+    "pdf-lib": "1.17.1"
+  }
+}

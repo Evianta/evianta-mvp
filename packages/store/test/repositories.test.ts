@@ -562,6 +562,50 @@ function repositoryContract(
       ).toBeNull();
     });
 
+    it("does not restore document state after its source has been replaced", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document-source",
+        caseId: "case-1",
+        name: "source.csv",
+        mimeType: "text/csv",
+        sizeBytes: 16,
+        state: "uploaded" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "original-object",
+        contentHash: "original-hash",
+      };
+      await repositories.documents.insert(document, ownerScope);
+
+      const replacement = {
+        ...document,
+        objectKey: "replacement-object",
+        contentHash: "replacement-hash",
+      };
+      expect(
+        await repositories.documents.replaceOwned(replacement, ownerScope),
+      ).toBe(true);
+
+      expect(
+        await repositories.documents.replaceOwned(
+          { ...document, state: "processing" },
+          ownerScope,
+          {
+            objectKey: document.objectKey,
+            contentHash: document.contentHash,
+          },
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.documents.findOwned(document.id, ownerScope),
+      ).toMatchObject({
+        objectKey: "replacement-object",
+        contentHash: "replacement-hash",
+        state: "uploaded",
+      });
+    });
+
     it("finds cached extractions for encoded document IDs", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       const document = {
@@ -636,6 +680,379 @@ function repositoryContract(
       expect(
         await repositories.extractions.findForDocument(document.id, ownerScope),
       ).toMatchObject({ method: "ocr" });
+    });
+
+    it("finds extractions by cache identity, claims them exclusively and deletes them with the case", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document-claim",
+        caseId: "case-1",
+        name: "scan.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        state: "uploaded" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "object-key",
+        contentHash: "hash-a",
+      };
+      await repositories.documents.insert(document, ownerScope);
+      const cacheIdentity = {
+        contentHash: "hash-a",
+        extractorVersion: "ingestion-1",
+        modelVersion: "mock-spark",
+      };
+      const extraction: ExtractedDocument = {
+        documentId: document.id,
+        kind: "text",
+        method: "ocr",
+        confidence: 0.9,
+        pages: [],
+        tables: [],
+        warnings: [],
+        cacheIdentity,
+      };
+      await repositories.extractions.saveForDocument(extraction, ownerScope);
+
+      expect(
+        await repositories.extractions.findCached(
+          document.id,
+          cacheIdentity,
+          ownerScope,
+        ),
+      ).toEqual(extraction);
+      expect(
+        await repositories.extractions.findCached(
+          document.id,
+          { ...cacheIdentity, contentHash: "hash-b" },
+          ownerScope,
+        ),
+      ).toBeNull();
+      expect(
+        await repositories.extractions.findCached(document.id, cacheIdentity, {
+          ownerId: "owner-2",
+          caseId: "case-1",
+        }),
+      ).toBeNull();
+
+      const claim = {
+        documentId: document.id,
+        cacheIdentity,
+        holderId: "holder-1",
+        at: "2026-01-15T00:00:00.000Z",
+        expiresAt: "2026-01-15T00:05:00.000Z",
+      };
+      expect(await repositories.extractions.claim(claim, ownerScope)).toBe(
+        true,
+      );
+      expect(
+        await repositories.documents.replaceOwned(
+          { ...document, state: "processing" },
+          ownerScope,
+          document,
+          { ...claim, holderId: "other-worker" },
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.documents.replaceOwned(
+          { ...document, state: "processing" },
+          ownerScope,
+          document,
+          { ...claim, at: claim.expiresAt },
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.documents.replaceOwned(
+          { ...document, state: "processing" },
+          ownerScope,
+          document,
+          claim,
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.documents.replaceOwned(
+          { ...document, state: "failed" },
+          ownerScope,
+          {
+            objectKey: document.objectKey,
+            contentHash: document.contentHash,
+            state: "uploaded",
+            processedAt: null,
+          },
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.documents.findOwned(document.id, ownerScope),
+      ).toMatchObject({ state: "processing" });
+      expect(await repositories.extractions.renewClaim(claim, ownerScope)).toBe(
+        true,
+      );
+      expect(
+        await repositories.extractions.renewClaim(
+          {
+            ...claim,
+            at: claim.expiresAt,
+            expiresAt: "2026-01-15T00:06:00.000Z",
+          },
+          ownerScope,
+        ),
+      ).toBe(false);
+      await repositories.extractions.releaseClaim(claim, {
+        ...ownerScope,
+        ownerId: "owner-2",
+      });
+      expect(
+        await repositories.extractions.claim(
+          { ...claim, holderId: "holder-2" },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.saveClaimed(
+          extraction,
+          { ...document, state: "ready" },
+          { holderId: "holder-2", at: claim.at },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.saveClaimed(
+          extraction,
+          { ...document, state: "ready" },
+          { holderId: claim.holderId, at: claim.expiresAt },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.saveClaimed(
+          extraction,
+          { ...document, state: "ready" },
+          { holderId: claim.holderId, at: claim.at },
+          ownerScope,
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.extractions.claim(
+          { ...claim, holderId: "holder-2" },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.claim(
+          {
+            ...claim,
+            holderId: "holder-2",
+            at: "2026-01-15T00:06:00.000Z",
+            expiresAt: "2026-01-15T00:10:00.000Z",
+          },
+          ownerScope,
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.extractions.saveClaimed(
+          { ...extraction, confidence: 0.1 },
+          { ...document, state: "ready" },
+          { holderId: "holder-1", at: "2026-01-15T00:07:00.000Z" },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.findCached(
+          document.id,
+          cacheIdentity,
+          ownerScope,
+        ),
+      ).toEqual(extraction);
+      expect(
+        (await repositories.documents.findOwned(document.id, ownerScope))
+          ?.state,
+      ).toBe("ready");
+      await repositories.extractions.releaseClaim(
+        { documentId: document.id, cacheIdentity, holderId: "holder-1" },
+        ownerScope,
+      );
+      expect(
+        await repositories.extractions.claim(
+          {
+            ...claim,
+            at: "2026-01-15T00:07:00.000Z",
+            expiresAt: "2026-01-15T00:12:00.000Z",
+          },
+          ownerScope,
+        ),
+      ).toBe(false);
+      await repositories.extractions.releaseClaim(
+        { documentId: document.id, cacheIdentity, holderId: "holder-2" },
+        ownerScope,
+      );
+      expect(
+        await repositories.extractions.claim(
+          {
+            ...claim,
+            at: "2026-01-15T00:07:00.000Z",
+            expiresAt: "2026-01-15T00:12:00.000Z",
+          },
+          ownerScope,
+        ),
+      ).toBe(true);
+      await expect(
+        repositories.extractions.claim(claim, {
+          ownerId: "owner-2",
+          caseId: "case-1",
+        }),
+      ).rejects.toMatchObject({ code: "case-not-owned" });
+
+      await expect(
+        repositories.extractions.deleteForCase({
+          ownerId: "owner-2",
+          caseId: "case-1",
+        }),
+      ).rejects.toMatchObject({ code: "case-not-owned" });
+      expect(await repositories.extractions.deleteForCase(ownerScope)).toBe(1);
+      expect(
+        await repositories.extractions.findForDocument(document.id, ownerScope),
+      ).toBeNull();
+      expect(
+        await repositories.extractions.claim(
+          { ...claim, holderId: "holder-3" },
+          ownerScope,
+        ),
+      ).toBe(true);
+    });
+
+    it("recovers an expired extraction claim only if its holder is unchanged", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document-recovery",
+        caseId: "case-1",
+        name: "source.txt",
+        mimeType: "text/plain",
+        sizeBytes: 1,
+        state: "uploaded" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "object-key",
+        contentHash: "hash-a",
+      };
+      await repositories.documents.insert(document, ownerScope);
+      const claim = {
+        documentId: document.id,
+        cacheIdentity: {
+          contentHash: document.contentHash,
+          extractorVersion: "recovery-test",
+          modelVersion: null,
+        },
+        holderId: "original",
+        at: "2026-01-15T00:00:00.000Z",
+        expiresAt: "2026-01-15T00:00:01.000Z",
+      };
+      expect(await repositories.extractions.claim(claim, ownerScope)).toBe(
+        true,
+      );
+      const renewal = {
+        ...claim,
+        at: claim.expiresAt,
+        expiresAt: "2026-01-15T00:00:02.000Z",
+      };
+      expect(
+        await repositories.extractions.renewClaim(renewal, ownerScope),
+      ).toBe(false);
+      expect(
+        await repositories.extractions.renewClaim(renewal, ownerScope, {
+          recoverExpired: true,
+        }),
+      ).toBe(true);
+      const takeover = {
+        ...renewal,
+        holderId: "replacement",
+        at: renewal.expiresAt,
+        expiresAt: "2026-01-15T00:00:03.000Z",
+      };
+      expect(await repositories.extractions.claim(takeover, ownerScope)).toBe(
+        true,
+      );
+      expect(
+        await repositories.extractions.renewClaim(
+          { ...takeover, holderId: claim.holderId },
+          ownerScope,
+          { recoverExpired: true },
+        ),
+      ).toBe(false);
+      await repositories.extractions.releaseClaim(takeover, ownerScope);
+      expect(
+        await repositories.extractions.renewClaim(takeover, ownerScope, {
+          recoverExpired: true,
+        }),
+      ).toBe(false);
+    });
+
+    it("does not commit an extraction after its document source is replaced", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document-replaced",
+        caseId: "case-1",
+        name: "source.txt",
+        mimeType: "text/plain",
+        sizeBytes: 1,
+        state: "uploaded" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "object-key",
+        contentHash: "hash-a",
+      };
+      await repositories.documents.insert(document, ownerScope);
+      const cacheIdentity = {
+        contentHash: "hash-a",
+        extractorVersion: "ingestion-1",
+        modelVersion: null,
+      };
+      const extraction: ExtractedDocument = {
+        documentId: document.id,
+        kind: "text",
+        method: "parse",
+        confidence: 1,
+        pages: [],
+        tables: [],
+        warnings: [],
+        cacheIdentity,
+      };
+      const claim = {
+        documentId: document.id,
+        cacheIdentity,
+        holderId: "holder-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:05:00.000Z",
+      };
+      expect(await repositories.extractions.claim(claim, ownerScope)).toBe(
+        true,
+      );
+      await repositories.documents.replaceOwned(
+        { ...document, objectKey: "replacement-key", contentHash: "hash-b" },
+        ownerScope,
+      );
+
+      expect(
+        await repositories.extractions.saveClaimed(
+          extraction,
+          { ...document, state: "ready" },
+          { holderId: claim.holderId, at: claim.at },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.documents.findOwned(document.id, ownerScope),
+      ).toMatchObject({
+        objectKey: "replacement-key",
+        contentHash: "hash-b",
+        state: "uploaded",
+      });
+      expect(
+        await repositories.extractions.findCached(
+          document.id,
+          cacheIdentity,
+          ownerScope,
+        ),
+      ).toBeNull();
     });
 
     it("enforces case ownership for runs, tasks, findings and usage", async () => {
