@@ -73,6 +73,19 @@ function normalizeHeaders(
   });
 }
 
+function assertCellLimit(
+  rowCount: number,
+  columnCount: number,
+  limit: number,
+): void {
+  if (rowCount > 0 && columnCount > Math.floor(limit / rowCount)) {
+    throw new IngestionError(
+      "Table exceeds the cell limit",
+      "cell-limit-exceeded",
+    );
+  }
+}
+
 function buildTable(
   id: string,
   grid: readonly (readonly (string | null)[])[],
@@ -84,6 +97,7 @@ function buildTable(
     cellReferences?: boolean;
     cellRange?: string;
   } = {},
+  maxCells = limits.maxTableCells,
 ): ExtractedTable | null {
   const width = grid.reduce((max, row) => Math.max(max, row.length), 0);
   if (grid.length === 0 || width === 0) return null;
@@ -96,6 +110,7 @@ function buildTable(
   if (grid.length - 1 > limits.maxRows) {
     throw new IngestionError("Table has too many rows", "row-limit-exceeded");
   }
+  assertCellLimit(grid.length, width, maxCells);
   const headers = normalizeHeaders(grid[0], width);
   const rows = grid.slice(1).map((row) =>
     Array.from({ length: width }, (_, index) => {
@@ -180,11 +195,14 @@ export function parseWorkbook(
   }
   const tables: ExtractedTable[] = [];
   const warnings: ExtractionWarning[] = [];
+  let remainingCells = limits.maxTableCells;
   workbook.SheetNames.forEach((sheetName, index) => {
     const sheet = workbook.Sheets[sheetName];
     const fullRange = sheet?.["!fullref"] ?? sheet?.["!ref"];
     if (!sheet || !fullRange) return;
     const full = XLSX.utils.decode_range(fullRange);
+    const rowCount = full.e.r - full.s.r + 1;
+    const columnCount = full.e.c - full.s.c + 1;
     if (
       full.e.r - full.s.r > limits.maxRows ||
       full.e.r >= limits.maxRows + 2 ||
@@ -195,6 +213,9 @@ export function parseWorkbook(
         "row-limit-exceeded",
       );
     }
+    const availableCells = remainingCells;
+    assertCellLimit(rowCount, columnCount, availableCells);
+    remainingCells -= rowCount * columnCount;
     const grid = XLSX.utils.sheet_to_json<(string | null)[]>(sheet, {
       header: 1,
       raw: false,
@@ -202,10 +223,16 @@ export function parseWorkbook(
       blankrows: false,
     });
     const range = XLSX.utils.decode_range(sheet["!ref"] ?? fullRange);
-    const table = buildTable(`sheet-${index + 1}`, grid, limits, {
-      sheet: sheetName,
-      cellRange: XLSX.utils.encode_range(range),
-    });
+    const table = buildTable(
+      `sheet-${index + 1}`,
+      grid,
+      limits,
+      {
+        sheet: sheetName,
+        cellRange: XLSX.utils.encode_range(range),
+      },
+      availableCells,
+    );
     if (table) tables.push(table);
     else {
       warnings.push({
@@ -262,6 +289,7 @@ export function parseJson(text: string, limits: IngestionLimits): ParsedJson {
         }
       }
     }
+    assertCellLimit(value.length + 1, headers.length, limits.maxTableCells);
     const grid = [
       headers,
       ...value.map((row) => headers.map((header) => cellValue(row[header]))),

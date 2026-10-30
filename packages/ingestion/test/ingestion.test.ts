@@ -488,6 +488,70 @@ describe("caching and claims", () => {
     expect(h.generate).toHaveBeenCalledTimes(1);
   });
 
+  it("does not overwrite a replacement document after OCR completes", async () => {
+    const replacement: { apply: () => Promise<void> } = {
+      apply: async () => {},
+    };
+    const ocr: OcrBackend = {
+      version: "replacement-test",
+      async extractPage() {
+        await replacement.apply();
+        return {
+          text: "Old document content",
+          method: "ocr",
+          confidence: 0.9,
+          spans: [],
+        };
+      },
+    };
+    const h = await setup({ ocr });
+    const original = await h.addDocument(
+      plainImage(),
+      mimeTypes.png,
+      "scan.png",
+    );
+    replacement.apply = async () => {
+      const bytes = Buffer.from("replacement");
+      const contentHash = createHash("sha256").update(bytes).digest("hex");
+      const objectKey = await h.storage.uploadAsync(
+        original.caseId,
+        mimeTypes.png,
+        {
+          body: (async function* () {
+            yield bytes;
+          })(),
+          contentLength: bytes.byteLength,
+          contentHash,
+        },
+      );
+      await h.store.repositories.documents.replaceOwned(
+        {
+          ...original,
+          objectKey,
+          contentHash,
+          sizeBytes: bytes.byteLength,
+          state: "uploaded",
+        },
+        ownerScope,
+      );
+    };
+
+    const result = await h.ingestion.ingest(ingestRequest(original.id));
+
+    expect(result).toMatchObject({
+      status: "in-progress",
+      stopReason: "claim-lost",
+      extraction: null,
+    });
+    expect(await h.stateOf(original.id)).toBe("uploaded");
+    expect(
+      await h.store.repositories.extractions.findForDocument(
+        original.id,
+        ownerScope,
+      ),
+    ).toBeNull();
+  });
+
   it("does not OCR while another worker holds the claim", async () => {
     const h = await setup();
     const doc = await h.addDocument(
@@ -672,7 +736,9 @@ describe("security and limits", () => {
   });
 
   it("fails explicitly before persisting oversized encoded output", async () => {
-    const h = await setup();
+    const h = await setup({
+      ingestion: { limits: { maxTableCells: 2_500_000 } },
+    });
     const header = Array.from({ length: 20 }, (_, i) => `column${i}`).join(",");
     const bytes = Buffer.from(
       `${header}\n${`${Array(20).fill("x").join(",")}\n`.repeat(100000)}`,
@@ -689,6 +755,18 @@ describe("security and limits", () => {
         ownerScope,
       ),
     ).toBeNull();
+  });
+
+  it("rejects oversized rectangular tables before padding sparse rows", async () => {
+    const headers = Array.from({ length: 500 }, (_, index) => `column${index}`);
+    const bytes = Buffer.from(`${headers.join(",")}\n${"x\n".repeat(100000)}`);
+    const h = await setup();
+    const doc = await h.addDocument(bytes, mimeTypes.csv, "wide-sparse.csv");
+
+    await expect(
+      h.ingestion.ingest(ingestRequest(doc.id)),
+    ).rejects.toMatchObject({ code: "cell-limit-exceeded" });
+    expect(await h.stateOf(doc.id)).toBe("failed");
   });
 
   it("positions text using its own rotation, independently of page rotation", async () => {

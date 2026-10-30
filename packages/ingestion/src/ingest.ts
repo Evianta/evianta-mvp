@@ -341,16 +341,25 @@ export function createDocumentIngestion(
         );
       }
 
-      const setState = async (state: DocumentState) => {
-        if (!record || record.state === state) return;
+      const setState = async (state: DocumentState): Promise<boolean> => {
+        if (!record || record.state === state) return true;
+        const source = record;
         const next: DocumentMetadataRecord = {
-          ...record,
+          ...source,
           state,
           processedAt:
-            state === "processing" ? record.processedAt : now().toISOString(),
+            state === "processing" ? source.processedAt : now().toISOString(),
         };
-        if (await dependencies.documents.replaceOwned(next, scope))
+        if (
+          await dependencies.documents.replaceOwned(next, scope, {
+            objectKey: source.objectKey,
+            contentHash: source.contentHash,
+          })
+        ) {
           record = next;
+          return true;
+        }
+        return false;
       };
       const ownership: { verify?: () => Promise<boolean> } = {};
       const fail = async (error: unknown): Promise<never> => {
@@ -495,7 +504,12 @@ export function createDocumentIngestion(
             stopReason: null,
           };
         }
-        await setState("processing");
+        if (!(await setState("processing"))) {
+          throw new IngestionError(
+            "Document changed during ingestion",
+            "document-changed",
+          );
+        }
         const parsed = (() => {
           try {
             return parseOnly(format, bytes);

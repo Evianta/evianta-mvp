@@ -668,7 +668,7 @@ function repositoryContract(
       expect(
         await repositories.extractions.saveClaimed(
           { ...extraction, confidence: 0.1 },
-          { ...document, state: "partial" },
+          { ...document, state: "ready" },
           { holderId: "holder-1", at: "2026-01-15T00:07:00.000Z" },
           ownerScope,
         ),
@@ -735,6 +735,75 @@ function repositoryContract(
           ownerScope,
         ),
       ).toBe(true);
+    });
+
+    it("does not commit an extraction after its document source is replaced", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document-replaced",
+        caseId: "case-1",
+        name: "source.txt",
+        mimeType: "text/plain",
+        sizeBytes: 1,
+        state: "uploaded" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "object-key",
+        contentHash: "hash-a",
+      };
+      await repositories.documents.insert(document, ownerScope);
+      const cacheIdentity = {
+        contentHash: "hash-a",
+        extractorVersion: "ingestion-1",
+        modelVersion: null,
+      };
+      const extraction: ExtractedDocument = {
+        documentId: document.id,
+        kind: "text",
+        method: "parse",
+        confidence: 1,
+        pages: [],
+        tables: [],
+        warnings: [],
+        cacheIdentity,
+      };
+      const claim = {
+        documentId: document.id,
+        cacheIdentity,
+        holderId: "holder-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:05:00.000Z",
+      };
+      expect(await repositories.extractions.claim(claim, ownerScope)).toBe(
+        true,
+      );
+      await repositories.documents.replaceOwned(
+        { ...document, objectKey: "replacement-key", contentHash: "hash-b" },
+        ownerScope,
+      );
+
+      expect(
+        await repositories.extractions.saveClaimed(
+          extraction,
+          { ...document, state: "ready" },
+          { holderId: claim.holderId, at: claim.at },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.documents.findOwned(document.id, ownerScope),
+      ).toMatchObject({
+        objectKey: "replacement-key",
+        contentHash: "hash-b",
+        state: "uploaded",
+      });
+      expect(
+        await repositories.extractions.findCached(
+          document.id,
+          cacheIdentity,
+          ownerScope,
+        ),
+      ).toBeNull();
     });
 
     it("enforces case ownership for runs, tasks, findings and usage", async () => {

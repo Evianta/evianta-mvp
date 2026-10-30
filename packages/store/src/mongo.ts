@@ -821,13 +821,24 @@ export class MongoStore {
   async documentReplaceOwned(
     record: DocumentMetadataRecord,
     scope: OwnerScope,
+    expectedSource?: Pick<DocumentMetadataRecord, "objectKey" | "contentHash">,
   ): Promise<boolean> {
     const parsed = DocumentMetadataRecordSchema.parse(record);
     if (parsed.caseId !== scope.caseId || !(await this.ownsCase(scope))) {
       return false;
     }
     const result = await this.documents.replaceOne(
-      { _id: parsed.id, caseId: scope.caseId, ownerId: scope.ownerId },
+      {
+        _id: parsed.id,
+        caseId: scope.caseId,
+        ownerId: scope.ownerId,
+        ...(expectedSource
+          ? {
+              objectKey: expectedSource.objectKey,
+              contentHash: expectedSource.contentHash,
+            }
+          : {}),
+      },
       { ...documentFor(parsed), ownerId: scope.ownerId },
     );
     return result.matchedCount === 1;
@@ -891,7 +902,13 @@ export class MongoStore {
         );
         if (owned.matchedCount === 0) return false;
         const updated = await this.documents.replaceOne(
-          { _id: next.id, caseId: scope.caseId, ownerId: scope.ownerId },
+          {
+            _id: next.id,
+            caseId: scope.caseId,
+            ownerId: scope.ownerId,
+            objectKey: next.objectKey,
+            contentHash: next.contentHash,
+          },
           { ...documentFor(next), ownerId: scope.ownerId },
           { session },
         );
@@ -1037,23 +1054,31 @@ export class MongoStore {
       isSample: false,
     });
     if (owned !== 1) throw new CaseNotOwnedError();
-    const documentIds = await this.extractions.distinct("documentId", {
-      caseId: scope.caseId,
+    return this.withTransaction(async (session) => {
+      const documentIds = await this.extractions.distinct(
+        "documentId",
+        { caseId: scope.caseId },
+        { session },
+      );
+      const result = await this.extractions.deleteMany(
+        { caseId: scope.caseId },
+        { session },
+      );
+      await Promise.all([
+        this.extractionClaims.deleteMany({ caseId: scope.caseId }, { session }),
+        this.extractionCounters.deleteMany(
+          {
+            _id: {
+              $in: documentIds.map((documentId) =>
+                JSON.stringify([scope.caseId, documentId]),
+              ),
+            },
+          },
+          { session },
+        ),
+      ]);
+      return result.deletedCount;
     });
-    const result = await this.extractions.deleteMany({
-      caseId: scope.caseId,
-    });
-    await Promise.all([
-      this.extractionClaims.deleteMany({ caseId: scope.caseId }),
-      this.extractionCounters.deleteMany({
-        _id: {
-          $in: documentIds.map((documentId) =>
-            JSON.stringify([scope.caseId, documentId]),
-          ),
-        },
-      }),
-    ]);
-    return result.deletedCount;
   }
 
   async evidenceListForCase(scope: OwnerScope): Promise<Evidence[]> {

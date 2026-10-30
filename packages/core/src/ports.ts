@@ -76,6 +76,7 @@ export interface DocumentRepository {
   replaceOwned(
     record: DocumentMetadataRecord,
     scope: OwnerScope,
+    expectedSource?: Pick<DocumentMetadataRecord, "objectKey" | "contentHash">,
   ): Promise<boolean>;
 }
 

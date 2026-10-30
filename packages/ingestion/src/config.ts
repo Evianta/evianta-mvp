@@ -15,6 +15,7 @@ export interface IngestionLimits {
   maxRenderDimension: number;
   maxRows: number;
   maxColumns: number;
+  maxTableCells: number;
   maxSheets: number;
   /** Uncompressed byte bound for zip-based spreadsheets. */
   maxDecompressedBytes: number;
@@ -51,6 +52,7 @@ export const defaultIngestionLimits: IngestionLimits = {
   maxRenderDimension: 2_000,
   maxRows: 100_000,
   maxColumns: 500,
+  maxTableCells: 250_000,
   maxSheets: 25,
   maxDecompressedBytes: 200 * 1024 * 1024,
   maxZipEntries: 2_000,

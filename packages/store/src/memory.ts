@@ -408,13 +408,20 @@ export class InMemoryStore {
           if (this.documents.has(record.id)) duplicate();
           this.documents.set(record.id, record);
         },
-        replaceOwned: async (document, scope) => {
+        replaceOwned: async (document, scope, expectedSource) => {
           const record = parse(DocumentMetadataRecordSchema, document);
           if (!this.ownsCase(scope) || record.caseId !== scope.caseId) {
             return false;
           }
           const current = this.documents.get(record.id);
-          if (!current || current.caseId !== scope.caseId) return false;
+          if (
+            !current ||
+            current.caseId !== scope.caseId ||
+            (expectedSource &&
+              (current.objectKey !== expectedSource.objectKey ||
+                current.contentHash !== expectedSource.contentHash))
+          )
+            return false;
           this.documents.set(record.id, record);
           return true;
         },
@@ -461,6 +468,8 @@ export class InMemoryStore {
           if (
             !stored ||
             stored.caseId !== scope.caseId ||
+            stored.objectKey !== next.objectKey ||
+            stored.contentHash !== next.contentHash ||
             next.id !== stored.id ||
             next.caseId !== stored.caseId ||
             !current ||
