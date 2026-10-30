@@ -12,11 +12,21 @@
   "dependencies": {
     "@evianta/ai": "workspace:*",
     "@evianta/core": "workspace:*",
-    "@evianta/store": "workspace:*"
+    "@evianta/store": "workspace:*",
+    "@langchain/core": "1.2.20",
+    "@langchain/langgraph": "1.5.2",
+    "@langchain/langgraph-checkpoint": "1.2.1",
+    "@langchain/langgraph-checkpoint-mongodb": "1.5.0",
+    "mongodb": "7.7.0",
+    "zod": "4.4.3"
   },
   "scripts": {
+    "pretypecheck": "pnpm --filter @evianta/core build && pnpm --filter @evianta/env build && pnpm --filter @evianta/ai build && pnpm --filter @evianta/store build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "11.3.0"
   }
 }

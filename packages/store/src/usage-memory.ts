@@ -5,6 +5,7 @@ import {
   UsageUnitsSchema,
   estimateUsageAllowance,
   estimateUsageCost,
+  summarizeUsage,
   type Case,
   type RunRecord,
   type UsageAdmissionPort,
@@ -565,6 +566,56 @@ export class InMemoryUsageRepository
       )
       .slice(0, limit)
       .map((entry) => structuredClone(entry));
+  }
+
+  async listForCase(
+    ownerId: string,
+    caseId: string,
+  ): Promise<UsageLedgerEntry[]> {
+    return [...this.ledger.values()]
+      .filter((entry) => entry.ownerId === ownerId && entry.caseId === caseId)
+      .map((entry) => structuredClone(entry));
+  }
+
+  summarizeForCase(ownerId: string, caseId: string) {
+    return summarizeUsage(
+      [...this.ledger.values()].filter(
+        (entry) => entry.ownerId === ownerId && entry.caseId === caseId,
+      ),
+    );
+  }
+
+  async markInterrupted(
+    ownerId: string,
+    caseId: string,
+    runId: string,
+    taskId: string | null,
+    at: string,
+  ): Promise<void> {
+    const timestamp = new Date(at).toISOString();
+    for (const [id, entry] of this.ledger) {
+      if (
+        entry.ownerId === ownerId &&
+        entry.caseId === caseId &&
+        entry.runId === runId &&
+        entry.taskId === taskId &&
+        entry.outcome === "admitted"
+      ) {
+        this.ledger.set(
+          id,
+          UsageLedgerEntrySchema.parse({
+            ...entry,
+            outcome: "unknown",
+            errorCode: "attempt-interrupted",
+            units: unknownUnits,
+            costStatus: "unknown",
+            costUsd: null,
+            updatedAt: timestamp,
+            settledAt: timestamp,
+          }),
+        );
+      }
+    }
   }
 
   async listForRun(

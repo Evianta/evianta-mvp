@@ -13,6 +13,7 @@ import {
   RunRecordSchema,
   SessionRecordSchema,
   TaskSchema,
+  TaskPlanSchema,
   UserRecordSchema,
   UsageRecordSchema,
   type AccessKeyRecord,
@@ -187,6 +188,32 @@ export class InMemoryStore {
         },
       },
       cases: {
+        refreshUsage: async (scope, request) => {
+          const run = this.runs.get(request.runId);
+          const record = this.cases.get(scope.caseId);
+          if (
+            !record ||
+            !this.ownsCase(scope) ||
+            !run ||
+            run.ownerId !== scope.ownerId ||
+            run.caseId !== scope.caseId ||
+            run.fencingToken !== request.fencingToken ||
+            !["queued", "running", "waiting-for-input"].includes(run.status)
+          )
+            return false;
+          this.cases.set(
+            record.id,
+            parse(CaseSchema, {
+              ...record,
+              usage: this.usageAccounting.summarizeForCase(
+                scope.ownerId,
+                scope.caseId,
+              ),
+              updatedAt: request.at,
+            }),
+          );
+          return true;
+        },
         findOwnedById: async (id, ownerId) => {
           const record = this.cases.get(id);
           return record &&
@@ -459,6 +486,111 @@ export class InMemoryStore {
           this.insertChild(this.findings, finding, scope, FindingSchema),
       },
       tasks: {
+        insertPlan: async (tasks, scope, options) => {
+          this.requireScope(scope.caseId, scope);
+          const run = tasks[0] && this.runs.get(tasks[0].runId);
+          if (
+            !run ||
+            run.ownerId !== scope.ownerId ||
+            run.caseId !== scope.caseId ||
+            run.fencingToken !== options.fencingToken
+          ) {
+            throw new StoreError(
+              "Run lease generation is stale",
+              "stale-fencing-token",
+            );
+          }
+          const plan = parse(TaskPlanSchema, {
+            caseId: scope.caseId,
+            runId: run.id,
+            version: run.planVersion,
+            tasks,
+          });
+          if (plan.tasks.some((task) => this.tasks.has(task.id))) duplicate();
+          for (const task of plan.tasks) this.tasks.set(task.id, task);
+        },
+        commitResult: async (task, result, scope, options) => {
+          this.requireScope(scope.caseId, scope);
+          const record = parse(TaskSchema, task);
+          const run = this.runs.get(record.runId);
+          const current = this.tasks.get(record.id);
+          if (
+            !run ||
+            run.ownerId !== scope.ownerId ||
+            run.caseId !== scope.caseId ||
+            run.fencingToken !== options.fencingToken ||
+            !current ||
+            current.runId !== record.runId ||
+            current.caseId !== scope.caseId
+          )
+            return false;
+          const deliverable = result.deliverable
+            ? parse(DeliverableSchema, result.deliverable)
+            : undefined;
+          const evidence = result.evidence.map((item) =>
+            parse(EvidenceSchema, item),
+          );
+          const findings = result.findings.map((item) =>
+            parse(FindingSchema, item),
+          );
+          if (
+            record.caseId !== scope.caseId ||
+            (deliverable &&
+              (deliverable.caseId !== scope.caseId ||
+                deliverable.runId !== run.id)) ||
+            [...evidence, ...findings].some(
+              (item) => item.caseId !== scope.caseId,
+            )
+          ) {
+            throw new CaseNotOwnedError();
+          }
+          const existing = deliverable && this.deliverables.get(deliverable.id);
+          if (
+            existing &&
+            (existing.caseId !== scope.caseId || existing.runId !== run.id)
+          )
+            throw new CaseNotOwnedError();
+          for (const item of evidence) {
+            if (
+              this.evidence.has(item.id) &&
+              this.evidence.get(item.id)!.caseId !== scope.caseId
+            )
+              throw new CaseNotOwnedError();
+          }
+          for (const item of findings) {
+            if (
+              this.findings.has(item.id) &&
+              this.findings.get(item.id)!.caseId !== scope.caseId
+            )
+              throw new CaseNotOwnedError();
+          }
+          for (const item of evidence)
+            if (!this.evidence.has(item.id)) this.evidence.set(item.id, item);
+          for (const item of findings)
+            if (!this.findings.has(item.id)) this.findings.set(item.id, item);
+          if (deliverable)
+            this.deliverables.set(
+              deliverable.id,
+              existing
+                ? {
+                    ...existing,
+                    summary: deliverable.summary || existing.summary,
+                    sections: [
+                      ...existing.sections,
+                      ...deliverable.sections.filter(
+                        (section) =>
+                          !existing.sections.some(
+                            (prior) => prior.id === section.id,
+                          ),
+                      ),
+                    ],
+                    updatedAt: deliverable.updatedAt,
+                  }
+                : deliverable,
+            );
+          this.tasks.set(record.id, record);
+          return true;
+        },
         listForRun: async (runId, scope) => {
           if (!this.ownsCase(scope)) return [];
           const run = this.runs.get(runId);
@@ -493,6 +625,27 @@ export class InMemoryStore {
           if (this.tasks.has(record.id)) duplicate();
           this.tasks.set(record.id, record);
         },
+        replaceOwned: async (task, scope, options) => {
+          const record = parse(TaskSchema, task);
+          if (record.caseId !== scope.caseId || !this.ownsCase(scope)) {
+            return false;
+          }
+          const current = this.tasks.get(record.id);
+          const run = this.runs.get(record.runId);
+          if (
+            !current ||
+            current.runId !== record.runId ||
+            current.caseId !== record.caseId ||
+            !run ||
+            run.ownerId !== scope.ownerId ||
+            run.caseId !== scope.caseId ||
+            (options !== undefined && run.fencingToken !== options.fencingToken)
+          ) {
+            return false;
+          }
+          this.tasks.set(record.id, record);
+          return true;
+        },
       },
       runs: {
         findOwnedById: async (id, ownerId) => {
@@ -501,8 +654,17 @@ export class InMemoryStore {
             ? parse(RunRecordSchema, record)
             : null;
         },
-        insert: async (run) => {
+        insert: async (run, tasks) => {
           const record = parse(RunRecordSchema, run);
+          const plan = tasks
+            ? parse(TaskPlanSchema, {
+                caseId: record.caseId,
+                runId: record.id,
+                version: record.planVersion,
+                tasks,
+              })
+            : null;
+          if (plan?.tasks.some((task) => this.tasks.has(task.id))) duplicate();
           if (this.runs.has(record.id)) duplicate();
           if (
             !this.ownsCase({ caseId: record.caseId, ownerId: record.ownerId })
@@ -525,6 +687,7 @@ export class InMemoryStore {
             duplicate("An active run already exists for this case");
           }
           this.runs.set(record.id, record);
+          for (const task of plan?.tasks ?? []) this.tasks.set(task.id, task);
         },
         updateOwned: async (run, ownerId) => {
           const record = parse(RunRecordSchema, run);
@@ -568,6 +731,35 @@ export class InMemoryStore {
           }
           this.runs.set(record.id, record);
           return true;
+        },
+        listClaimable: async (at, limit = 50, after) => {
+          const atMs = Date.parse(TimestampSchema.parse(at));
+          if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
+            throw new StoreError(
+              "Invalid run query limit",
+              "invalid-query-limit",
+            );
+          return [...this.runs.values()]
+            .filter(
+              (run) =>
+                (!after ||
+                  Date.parse(run.createdAt) > Date.parse(after.createdAt) ||
+                  (Date.parse(run.createdAt) === Date.parse(after.createdAt) &&
+                    run.id > after.id)) &&
+                (["queued", "running"].includes(run.status) ||
+                  (run.status === "waiting-for-input" &&
+                    run.cancellationRequested) ||
+                  run.terminalEvent?.pending) &&
+                (run.leaseExpiresAt === null ||
+                  Date.parse(run.leaseExpiresAt) <= atMs),
+            )
+            .sort(
+              (a, b) =>
+                Date.parse(a.createdAt) - Date.parse(b.createdAt) ||
+                (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+            )
+            .slice(0, limit)
+            .map((run) => parse(RunRecordSchema, run));
         },
       },
       deliverables: {

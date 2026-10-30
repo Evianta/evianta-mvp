@@ -11,6 +11,9 @@ import type {
   Finding,
   RunEvent,
   RunRecord,
+  RunStatus,
+  UsageSummary,
+  SanitizedError,
   SessionRecord,
   Task,
   UserRecord,
@@ -38,6 +41,10 @@ export interface CaseRepository {
   listOwned(ownerId: string, cursor?: string): Promise<Case[]>;
   insert(record: Case): Promise<void>;
   replaceOwned(record: Case, ownerId: string): Promise<boolean>;
+  refreshUsage(
+    scope: OwnerScope,
+    request: { runId: string; fencingToken: number; at: string },
+  ): Promise<boolean>;
 }
 
 export interface EvidenceRepository {
@@ -97,12 +104,45 @@ export interface FindingRepository {
 export interface TaskRepository {
   listForRun(runId: string, scope: OwnerScope): Promise<Task[]>;
   insert(task: Task, scope: OwnerScope): Promise<void>;
+  insertPlan(
+    tasks: Task[],
+    scope: OwnerScope,
+    options: { fencingToken: number },
+  ): Promise<void>;
+  commitResult(
+    task: Task,
+    result: {
+      evidence: Evidence[];
+      findings: Finding[];
+      deliverable?: Deliverable;
+    },
+    scope: OwnerScope,
+    options: { fencingToken: number },
+  ): Promise<boolean>;
+  /**
+   * Replaces a task in its run. When a fencing token is supplied, the write
+   * only succeeds while the run still carries that lease generation.
+   */
+  replaceOwned(
+    task: Task,
+    scope: OwnerScope,
+    options?: { fencingToken: number },
+  ): Promise<boolean>;
 }
 
 export interface RunRepository {
   findOwnedById(id: string, ownerId: string): Promise<RunRecord | null>;
-  insert(run: RunRecord): Promise<void>;
+  insert(run: RunRecord, tasks?: Task[]): Promise<void>;
   updateOwned(run: RunRecord, ownerId: string): Promise<boolean>;
+  /**
+   * Lists queued or running runs whose lease is absent or expired at `at`,
+   * oldest first, so a worker can claim new or abandoned work.
+   */
+  listClaimable(
+    at: string,
+    limit?: number,
+    after?: Pick<RunRecord, "createdAt" | "id">,
+  ): Promise<RunRecord[]>;
 }
 
 export interface DeliverableRepository {
@@ -234,6 +274,14 @@ export interface UsageLedgerFilter {
 
 export interface UsageLedgerRepository {
   list(filter?: UsageLedgerFilter): Promise<UsageLedgerEntry[]>;
+  listForCase(ownerId: string, caseId: string): Promise<UsageLedgerEntry[]>;
+  markInterrupted(
+    ownerId: string,
+    caseId: string,
+    runId: string,
+    taskId: string | null,
+    at: string,
+  ): Promise<void>;
   listForRun(
     ownerId: string,
     caseId: string,
@@ -288,6 +336,12 @@ export interface RunAdmissionPort {
     leaseId: string | null;
     fencingToken: number;
     at: string;
+    terminal?: {
+      status: RunStatus;
+      usage: UsageSummary;
+      reason?: string | null;
+      error?: SanitizedError;
+    };
   }): Promise<boolean>;
 }
 

@@ -603,14 +603,9 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
     });
   }
 
-  async release(request: {
-    ownerId: string;
-    caseId: string;
-    runId: string;
-    leaseId: string | null;
-    fencingToken: number;
-    at: string;
-  }): Promise<boolean> {
+  async release(
+    request: Parameters<RunAdmissionPort["release"]>[0],
+  ): Promise<boolean> {
     const id = lockId(request.ownerId, request.caseId);
     const at = canonicalTimestamp(request.at);
     return this.withTransaction(async (session) => {
@@ -618,12 +613,28 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
         await this.locks.findOne({ _id: id }, { session }),
       );
       if (
-        !lock ||
-        lock.runId !== request.runId ||
-        lock.fencingToken !== request.fencingToken ||
-        (lock.state === "active" && lock.leaseId !== request.leaseId) ||
-        (lock.state === "waiting-for-input" && request.leaseId !== null) ||
-        lock.state === "released"
+        request.terminal &&
+        ["queued", "running", "waiting-for-input"].includes(
+          request.terminal.status,
+        )
+      ) {
+        throw new StoreError(
+          "Finalization requires a terminal status",
+          "invalid-run-admission",
+        );
+      }
+      const idleTerminal =
+        request.terminal &&
+        request.leaseId === null &&
+        (!lock || lock.state === "released");
+      if (
+        !idleTerminal &&
+        (!lock ||
+          lock.runId !== request.runId ||
+          lock.fencingToken !== request.fencingToken ||
+          (lock.state === "active" && lock.leaseId !== request.leaseId) ||
+          (lock.state === "waiting-for-input" && request.leaseId !== null) ||
+          lock.state === "released")
       ) {
         return false;
       }
@@ -638,6 +649,11 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
       );
       if (!runDocument) return false;
       const run = RunRecordSchema.parse(withoutId(runDocument));
+      if (
+        !["queued", "running", "waiting-for-input"].includes(run.status) ||
+        (idleTerminal && run.leaseId !== null)
+      )
+        return false;
       const nextFencingToken = run.fencingToken + 1;
       const runUpdate = await this.runs.updateOne(
         {
@@ -652,36 +668,54 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
             leaseExpiresAt: null,
             fencingToken: nextFencingToken,
             updatedAt: at,
+            ...(request.terminal
+              ? {
+                  status: run.cancellationRequested
+                    ? "cancelled"
+                    : request.terminal.status,
+                  usage: request.terminal.usage,
+                  inputRequired: false,
+                  terminalEvent: {
+                    pending: true,
+                    reason: request.terminal.reason ?? null,
+                    error: request.terminal.error ?? null,
+                  },
+                }
+              : {}),
           },
+          ...(request.terminal ? { $unset: { activeCaseKey: "" } } : {}),
         },
         { session },
       );
       if (runUpdate.matchedCount !== 1) return false;
-      const result = await this.locks.updateOne(
-        {
-          _id: id,
-          runId: request.runId,
-          state: lock.state,
-          fencingToken: request.fencingToken,
-        },
-        {
-          $set: {
-            state: "released",
-            leaseId: null,
-            leaseExpiresAt: null,
-            fencingToken: nextFencingToken,
-            updatedAt: at,
-          },
-        },
-        { session },
-      );
-      if (result.matchedCount !== 1) {
+      const result =
+        lock?.runId === request.runId
+          ? await this.locks.updateOne(
+              {
+                _id: id,
+                runId: request.runId,
+                state: lock.state,
+                fencingToken: request.fencingToken,
+              },
+              {
+                $set: {
+                  state: "released",
+                  leaseId: null,
+                  leaseExpiresAt: null,
+                  fencingToken: nextFencingToken,
+                  updatedAt: at,
+                },
+              },
+              { session },
+            )
+          : null;
+      if (lock?.runId === request.runId && result?.matchedCount !== 1) {
         throw new StoreError(
           "The run admission changed during release",
           "stale-run-admission",
         );
       }
-      if (lock.state === "active") {
+      if (lock?.state === "active") {
         await this.decreaseCounter(counterId("user", request.ownerId), session);
         await this.decreaseCounter(counterId("global"), session);
       }
