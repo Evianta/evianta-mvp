@@ -11,9 +11,13 @@ import {
   RefreshCw,
   StopCircle,
 } from "lucide-react";
-import type { Case, RunDto, RunEvent } from "@evianta/core";
+import {
+  liveWorkflows,
+  type Case,
+  type RunDto,
+  type RunEvent,
+} from "@evianta/core";
 import type { CaseWorkspace } from "../api/client";
-import { ApiError } from "../api/errors";
 import { formatDate } from "../format";
 import { useSession } from "../session/SessionProvider";
 import { Button } from "./Button";
@@ -91,6 +95,8 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState(false);
+  const [uncertainAction, setUncertainAction] = useState(false);
+  const actionInFlight = useRef(false);
   const lastSequence = useRef(0);
   const runId = run?.id;
   const runStatus = run?.status;
@@ -132,6 +138,31 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
       active = false;
     };
   }, [api, caseId, session]);
+
+  const preparing = workspace?.documents.some((document) =>
+    ["uploaded", "processing"].includes(document.state),
+  );
+  useEffect(() => {
+    if (!preparing || run) return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void api
+        .getCaseWorkspace(caseId)
+        .then((result) => {
+          if (active) setWorkspace(result);
+        })
+        .catch((reason: unknown) => {
+          if (active)
+            setError(
+              `Source preparation could not be refreshed: ${reason instanceof Error ? reason.message : "Request failed."}`,
+            );
+        });
+    }, 2000);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [api, caseId, preparing, run, workspace]);
 
   useEffect(() => {
     if (!runId || !runStatus || !session) return;
@@ -235,7 +266,8 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   }, [api, caseId, runId, runStatus, session]);
 
   async function startRun() {
-    if (!record) return;
+    if (!record || actionInFlight.current || uncertainAction) return;
+    actionInFlight.current = true;
     setError(null);
     setPendingAction(true);
     try {
@@ -244,15 +276,27 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
       lastSequence.current = 0;
       setRun(created);
     } catch (reason) {
-      setError(
-        reason instanceof ApiError && reason.status === 409
-          ? "A run is already active for this case. Reopen the case to follow its progress."
-          : reason instanceof Error
-            ? reason.message
-            : "Analysis could not be started.",
-      );
+      setUncertainAction(true);
+      try {
+        const latest = await api.getLatestRun(record.id);
+        if (latest && latest.id !== run?.id) {
+          setEvents([]);
+          lastSequence.current = 0;
+          setRun(latest);
+          setUncertainAction(false);
+        } else {
+          setError(
+            `${reason instanceof Error ? reason.message : "Analysis could not be started."} No new run was confirmed. Reopen the case to check before trying again.`,
+          );
+        }
+      } catch (lookupError) {
+        setError(
+          `Run outcome could not be checked: ${lookupError instanceof Error ? lookupError.message : "Request failed."} Reopen the case after reconnecting; this request will not be sent again.`,
+        );
+      }
     } finally {
       setPendingAction(false);
+      actionInFlight.current = false;
     }
   }
 
@@ -333,7 +377,8 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   const canRetry =
     run && (run.status === "failed" || run.status === "partially-completed");
   const canStartAnalysis =
-    record.useCase !== "data-analysis" ||
+    liveWorkflows.includes(record.useCase) &&
+    !preparing &&
     Boolean(
       workspace?.documents.some((document) => document.state === "ready"),
     );
@@ -363,7 +408,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
         {!run ? (
           <Button
             onClick={startRun}
-            disabled={pendingAction || !canStartAnalysis}
+            disabled={pendingAction || uncertainAction || !canStartAnalysis}
           >
             <Play size={15} aria-hidden="true" />
             {pendingAction ? "Starting..." : "Start analysis"}
@@ -386,7 +431,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
           <Button
             variant="secondary"
             onClick={startRun}
-            disabled={pendingAction || !canStartAnalysis}
+            disabled={pendingAction || uncertainAction || !canStartAnalysis}
           >
             <RefreshCw size={15} aria-hidden="true" />
             Run again
@@ -427,8 +472,11 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
       )}
       {!canStartAnalysis && (
         <p className="mt-3 text-xs text-muted-foreground" role="status">
-          Upload and finish processing a CSV or Excel file before starting
-          analysis.
+          {!liveWorkflows.includes(record.useCase)
+            ? "Coming next. This workflow is not available for live work."
+            : preparing
+              ? "Reading source files. Start analysis here when preparation finishes."
+              : "Upload and finish processing a CSV or Excel file before starting analysis."}
         </p>
       )}
 

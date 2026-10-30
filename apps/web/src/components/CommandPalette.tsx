@@ -12,9 +12,14 @@ import {
 } from "lucide-react";
 
 const commands = [
-  { label: "Open synthetic samples", href: "/", keywords: "sample replay" },
+  { label: "Start a task", href: "/", keywords: "prompt composer" },
+  {
+    label: "Open synthetic samples",
+    href: "/#samples",
+    keywords: "sample replay",
+  },
   { label: "View your cases", href: "/cases", keywords: "private workspace" },
-  { label: "Create a new case", href: "/cases/new", keywords: "intake upload" },
+  { label: "New task", href: "/cases/new", keywords: "intake upload" },
   { label: "Admin usage", href: "/admin/usage", keywords: "cost tokens" },
 ];
 

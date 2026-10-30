@@ -8,6 +8,7 @@ import {
   RunEventSchema,
   UsageSummarySchema,
   syntheticWorkflowFixtures,
+  liveWorkflows,
   type AgentProfileRepository,
   type Case,
   type CaseRepository,
@@ -112,6 +113,20 @@ function authContext(request: Request): AuthContext | undefined {
 
 function requestCase(request: Request): Case | undefined {
   return (request as AuthenticatedRequest).caseRecord;
+}
+
+function requireLiveWorkflow(
+  record: Pick<Case, "useCase">,
+  response: Response,
+): boolean {
+  if (liveWorkflows.includes(record.useCase)) return true;
+  sendApiError(
+    response,
+    409,
+    "conflict",
+    "This workflow is coming next and is not available for live work.",
+  );
+  return false;
 }
 
 function routeParam(value: string | string[] | undefined): string | undefined {
@@ -826,6 +841,10 @@ export function registerCaseApiRoutes(
   const repositories = services.repositories;
   registerSampleRoutes(app);
 
+  app.get("/intake/configuration", authenticate, (_request, response) => {
+    response.json({ workflows: liveWorkflows, ...services.uploads });
+  });
+
   app.get("/agents", authenticate, async (_request, response) => {
     const profiles = AgentProfileSetSchema.parse(
       await repositories.agentProfiles.listEnabled(),
@@ -849,6 +868,7 @@ export function registerCaseApiRoutes(
     const input = parseInput(CaseCreateInputSchema, request.body, response);
     const principal = authContext(request)?.principal;
     if (!input || !principal) return;
+    if (!requireLiveWorkflow(input, response)) return;
     if (input.sourceCaseId) {
       const source = sampleById(input.sourceCaseId);
       if (!source) {
@@ -1107,6 +1127,7 @@ export function registerCaseApiRoutes(
       const record = requestCase(request);
       const principal = authContext(request)?.principal;
       if (!record || !principal) return;
+      if (!requireLiveWorkflow(record, response)) return;
       if (record.deletionRequestedAt || record.status !== "active") {
         sendApiError(
           response,
@@ -1383,6 +1404,7 @@ export function registerCaseApiRoutes(
       const record = requestCase(request);
       const input = parseInput(RunInputSchema, request.body ?? {}, response);
       if (!principal || !record || !input) return;
+      if (!requireLiveWorkflow(record, response)) return;
       if (record.deletionRequestedAt || record.status !== "active") {
         sendApiError(
           response,
@@ -1416,6 +1438,7 @@ export function registerCaseApiRoutes(
       sendApiError(response, 409, "conflict", "Case is not accepting new runs");
       return;
     }
+    if (!requireLiveWorkflow(record, response)) return;
     const run = input.priorRunId
       ? await services.orchestrator.retryFailedAsync({
           ownerId: principal.userId,
@@ -1449,6 +1472,7 @@ export function registerCaseApiRoutes(
       sendApiError(response, 404, "not-found", "Resource not found");
       return;
     }
+    if (!requireLiveWorkflow(record, response)) return;
     const run = await services.orchestrator.retryFailedAsync({
       ownerId: principal.userId,
       caseId: record.id,
@@ -1485,6 +1509,7 @@ export function registerCaseApiRoutes(
       const record = requestCase(request);
       const input = parseInput(RetryInputSchema, request.body, response);
       if (!principal || !record || !input) return;
+      if (!requireLiveWorkflow(record, response)) return;
       if (record.deletionRequestedAt || record.status !== "active") {
         sendApiError(
           response,
@@ -1542,6 +1567,7 @@ export function registerCaseApiRoutes(
       if (!principal || !record) return;
       const input = parseInput(ResumeRequestSchema, request.body, response);
       if (!input) return;
+      if (!requireLiveWorkflow(record, response)) return;
       if (record.deletionRequestedAt || record.status !== "active") {
         sendApiError(
           response,

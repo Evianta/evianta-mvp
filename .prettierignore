@@ -7,6 +7,7 @@ coverage/
 **/coverage/
 pnpm-lock.yaml
 **/.next/
+**/.next-e2e/
 **/next-env.d.ts
 **/*.tsbuildinfo
 **/playwright-report/

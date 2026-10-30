@@ -6,6 +6,8 @@ import {
   DocumentMetadataDtoSchema,
   EvidenceSchema,
   FindingSchema,
+  IntakeConfigurationSchema,
+  type IntakeConfiguration,
   type ExtractionMethod,
   ListCasesResponseSchema,
   LatestRunResponseSchema,
@@ -72,6 +74,7 @@ type ResponseSchema<T> = {
 };
 
 export interface WebApiClient {
+  getIntakeConfiguration(): Promise<IntakeConfiguration>;
   listCases(): Promise<Case[]>;
   getCase(caseId: string): Promise<Case>;
   getCaseWorkspace(caseId: string): Promise<CaseWorkspace>;
@@ -115,6 +118,10 @@ export class FetchWebApiClient implements WebApiClient {
   constructor(private readonly options: WebApiClientOptions) {
     this.baseUrl = (options.baseUrl ?? "").replace(/\/$/, "");
     this.fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
+  }
+
+  async getIntakeConfiguration(): Promise<IntakeConfiguration> {
+    return this.request("/intake/configuration", IntakeConfigurationSchema);
   }
 
   async listCases(): Promise<Case[]> {

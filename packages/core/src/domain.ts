@@ -13,6 +13,16 @@ export const UseCaseSchema = z.enum([
 ]);
 export type UseCase = z.infer<typeof UseCaseSchema>;
 
+export const liveWorkflows: readonly UseCase[] = ["data-analysis"];
+
+export const IntakeConfigurationSchema = z.object({
+  workflows: z.array(UseCaseSchema),
+  uploadMaxBytes: z.number().int().positive(),
+  uploadMaxFiles: z.number().int().positive(),
+  documentMaxPages: z.number().int().positive(),
+});
+export type IntakeConfiguration = z.infer<typeof IntakeConfigurationSchema>;
+
 export const UserRoleSchema = z.enum(["user", "admin"]);
 export type UserRole = z.infer<typeof UserRoleSchema>;
 

@@ -13,6 +13,7 @@ export default tseslint.config(
       "**/coverage/**",
       ".tmp/**",
       "apps/web/.next/**",
+      "apps/web/.next-e2e/**",
       "apps/web/next-env.d.ts",
       "**/playwright-report/**",
       "**/test-results/**",

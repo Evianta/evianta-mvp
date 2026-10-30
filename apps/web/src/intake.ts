@@ -1,4 +1,29 @@
-import type { UseCase } from "@evianta/core";
+import { CreateCaseRequestSchema, type UseCase } from "@evianta/core";
+
+export const starterPrompts: Record<UseCase, string> = {
+  "data-analysis":
+    "Analyze my sales spreadsheet, highlight trends and anomalies, and create a dashboard.",
+  "tax-notice":
+    "Help me review an income-tax notice, reconcile the records, and prepare a response for professional review.",
+  "msme-payment":
+    "Reconcile my invoices and payments, identify overdue amounts, and prepare a follow-up case pack.",
+};
+
+export function intakeCaseDetails(prompt: string, title: string) {
+  const derivedTitle =
+    prompt
+      .split(/\r?\n/)
+      .find((line) => line.trim())
+      ?.trim()
+      .slice(0, 200) ?? "";
+  return CreateCaseRequestSchema.pick({
+    title: true,
+    description: true,
+  }).safeParse({
+    title: title.trim() || derivedTitle,
+    description: prompt,
+  });
+}
 
 export interface WorkflowSpec {
   label: string;
@@ -71,8 +96,9 @@ export function validateUploadFile(
   file: Pick<File, "name" | "size" | "type">,
   spec: WorkflowSpec,
 ): string | null {
+  if (file.size === 0) return "Empty files are not allowed.";
   if (file.size > spec.maxFileBytes) {
-    return `Each file must be smaller than ${formatFileSize(spec.maxFileBytes)}.`;
+    return `Each file must be at most ${formatFileSize(spec.maxFileBytes)}.`;
   }
   const extension = file.name.split(".").at(-1)?.toLowerCase();
   const inferredMimeType =
@@ -98,6 +124,8 @@ function normalizeDocumentName(name: string): string {
     .replace(/\s+/g, " ");
 }
 
-function formatFileSize(bytes: number): string {
-  return `${Math.round(bytes / (1024 * 1024))} MB`;
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round((bytes / 1024) * 10) / 10} KB`;
+  return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
 }

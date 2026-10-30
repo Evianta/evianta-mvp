@@ -19,14 +19,15 @@ import { ThemeToggle } from "./ThemeToggle";
 import { useSession } from "../session/SessionProvider";
 
 const navigation = [
-  { href: "/", label: "Open samples", icon: Layers3, match: "home" },
-  { href: "/cases", label: "Your cases", icon: Files, match: "/cases" },
+  { href: "/", label: "Start", icon: Layers3, match: "home" },
+  { href: "/cases", label: "Cases", icon: Files, match: "/cases" },
   {
     href: "/cases/new",
-    label: "New case",
+    label: "New task",
     icon: FilePlus2,
     match: "/cases/new",
   },
+  { href: "/#samples", label: "Samples", icon: Layers3, match: "/samples" },
   {
     href: "/admin/usage",
     label: "Usage overview",
@@ -71,7 +72,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           {navigation.map((item) => {
             const active =
               item.match === "home"
-                ? pathname === "/" || pathname.startsWith("/samples/")
+                ? pathname === "/"
                 : item.match === "/cases"
                   ? pathname === "/cases" ||
                     (/^\/cases\/[^/]+$/.test(pathname) &&

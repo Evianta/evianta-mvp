@@ -1,15 +1,8 @@
 import Link from "next/link";
-import {
-  ArrowRight,
-  Check,
-  CircleHelp,
-  LockKeyhole,
-  Sparkles,
-} from "lucide-react";
+import { ArrowRight, Check, CircleHelp, LockKeyhole } from "lucide-react";
 import { publicSamples } from "../src/samples";
 import { PublicSampleCard } from "../src/components/PublicSampleCard";
-import { Reveal } from "../src/components/Reveal";
-import { StatusBadge } from "../src/components/Badges";
+import { CaseIntake } from "../src/components/CaseIntake";
 
 const principles = [
   {
@@ -40,93 +33,19 @@ export default function HomePage() {
 
   return (
     <div>
-      <Reveal className="hero-panel">
-        <div className="hero-grid">
-          <div className="max-w-xl">
-            <p className="page-eyebrow">
-              <Sparkles size={14} aria-hidden="true" />
-              Evidence Atlas · Synthetic preview
-            </p>
-            <h1 className="page-title mt-4">
-              Make the evidence
-              <br />
-              easier to see.
-            </h1>
-            <p className="page-description">
-              Evianta turns business records into clear, reviewable
-              findings—keeping every conclusion connected to its source.
-            </p>
-            <div className="mt-6 flex flex-wrap items-center gap-3">
-              <Link
-                href={`/samples/${featured?.case.id ?? ""}`}
-                className="button-link bg-primary text-primary-foreground shadow-soft hover:brightness-105"
-              >
-                Open the replay <ArrowRight size={15} aria-hidden="true" />
-              </Link>
-              <Link
-                href="/cases/new"
-                className="button-link button-link-secondary"
-              >
-                Try a workflow
-              </Link>
-            </div>
-            <div className="mt-5 flex flex-wrap items-center gap-2">
-              <StatusBadge tone="success">Deterministic fixtures</StatusBadge>
-              <span className="text-[11px] text-muted-foreground">
-                No model calls · No live records
-              </span>
-            </div>
-          </div>
-          <div
-            className="hero-visual"
-            role="img"
-            aria-label="Illustration of source records connected to a finding"
-          >
-            <div className="hero-visual-header">
-              <span>Evidence trail</span>
-              <span className="mono-number">03 records</span>
-            </div>
-            <div className="hero-visual-row">
-              <span className="hero-evidence">
-                <span className="hero-evidence-dot" />
-                Invoice ledger
-              </span>
-              <span className="text-[10px] text-muted-foreground">Matched</span>
-            </div>
-            <div className="hero-visual-row">
-              <span className="hero-evidence">
-                <span className="hero-evidence-dot coral" />
-                Payment records
-              </span>
-              <span className="text-[10px] text-muted-foreground">
-                Reconciled
-              </span>
-            </div>
-            <div className="hero-visual-row">
-              <span className="hero-evidence">
-                <span className="hero-evidence-dot" />
-                Delivery confirmation
-              </span>
-              <span className="badge badge-warning">Open question</span>
-            </div>
-            <div className="absolute bottom-3 right-4 font-mono text-[9px] text-muted-foreground">
-              SYNTHETIC DATA · READ ONLY
-            </div>
-          </div>
-        </div>
-      </Reveal>
+      <CaseIntake />
 
-      <section aria-labelledby="sample-heading">
+      <section id="samples" aria-labelledby="sample-heading" className="mt-12">
         <div className="section-heading">
           <div>
             <h2 id="sample-heading">Explore a synthetic replay</h2>
-            <p>See how source records become reviewable findings.</p>
+            <p>Read-only synthetic previews. No model calls or live records.</p>
           </div>
           <Link
             href="/cases/new"
             className="inline-flex items-center gap-1 text-xs font-medium text-primary"
           >
-            Start a private case <ArrowRight size={14} aria-hidden="true" />
+            New task <ArrowRight size={14} aria-hidden="true" />
           </Link>
         </div>
         <div className="card-grid">

@@ -126,6 +126,19 @@ const workspace = {
   ],
 };
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/intake/configuration", (route) =>
+    route.fulfill({
+      json: {
+        workflows: ["data-analysis"],
+        uploadMaxBytes: 25 * 1024 * 1024,
+        uploadMaxFiles: 5,
+        documentMaxPages: 80,
+      },
+    }),
+  );
+});
+
 test("shows dataset formats without PDF limits in data-analysis intake", async ({
   page,
 }) => {
@@ -146,7 +159,7 @@ test("shows dataset formats without PDF limits in data-analysis intake", async (
     .getByLabel("Workflow", { exact: true })
     .selectOption("data-analysis");
 
-  const dropzone = page.locator('label[for="case-files"]');
+  const dropzone = page.locator("#accepted-files");
   await expect(dropzone).toContainText(".csv, .xlsx");
   await expect(dropzone).not.toContainText("PDF files");
   await expect(page.locator("#case-files")).toHaveAttribute(
@@ -158,7 +171,12 @@ test("shows dataset formats without PDF limits in data-analysis intake", async (
     .getByLabel("Workflow", { exact: true })
     .selectOption("msme-payment");
   await expect(dropzone).toContainText(".pdf, .csv");
-  await expect(dropzone).toContainText("PDF files are limited to 120 pages");
+  await expect(
+    page.getByRole("button", { name: "Start task", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Coming next" }),
+  ).toBeVisible();
 });
 
 test("creates a case with two CSVs without optional supporting documents", async ({
@@ -174,6 +192,11 @@ test("creates a case with two CSVs without optional supporting documents", async
   );
   let created = 0;
   let uploaded = 0;
+  let started = 0;
+  await page.route("**/runs", async (route) => {
+    started += 1;
+    await route.fulfill({ json: { run: completedRun } });
+  });
   await page.route("**/cases", async (route) => {
     if (route.request().method() !== "POST") {
       await route.continue();
@@ -217,28 +240,31 @@ test("creates a case with two CSVs without optional supporting documents", async
     })),
   );
 
-  await expect(page.getByText("2 optional documents suggested")).toBeVisible();
-  await expect(
-    page.getByText("These suggestions do not block case creation."),
-  ).toBeVisible();
-  const create = page.getByRole("button", { name: "Create private case" });
-  await expect(create).toBeDisabled();
-  await expect(page.getByRole("status")).toHaveText(
-    "Add a case title in Case context above to enable Create private case.",
-  );
-  await page.getByLabel("Case title", { exact: true }).fill("   ");
+  const create = page.getByRole("button", { name: "Start task", exact: true });
   await expect(create).toBeDisabled();
   await page
-    .getByLabel("Case title", { exact: true })
+    .getByLabel("Task prompt", { exact: true })
+    .fill("Analyze the sales records");
+  await page
+    .getByText("Recommended documents and optional case details", {
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByText("2 optional documents suggested.", { exact: false }),
+  ).toBeVisible();
+  await page
+    .getByLabel("Case title (optional)", { exact: true })
     .fill("CSV intake verification");
   await expect(create).toBeEnabled();
   await create.click();
-  await expect(page).toHaveURL(/\/cases\/private-case$/);
+  await expect(page).toHaveURL(/\/cases\/private-case$/, { timeout: 15000 });
   await expect(
     page.getByRole("button", { name: "Start analysis" }),
   ).toBeVisible();
   expect(created).toBe(1);
   expect(uploaded).toBe(2);
+  expect(started).toBe(1);
 });
 
 test("reopens a completed analysis and renders its report and charts", async ({

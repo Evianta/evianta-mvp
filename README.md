@@ -86,14 +86,31 @@ The admin command requires the API build (`pnpm dev` prepares it, or run
 Enter it in the web sign-in dialog; do not put it in a URL, source file or log.
 The worker must be running for submitted analyses to complete.
 
-To check the data-analysis flow, open `/cases/new`, choose **Data analysis**,
-and upload a `.csv` or `.xlsx` dataset. A case title is required to enable
-creation; the data dictionary and reporting-period notes are optional.
-Create the private case, then choose
-**Start analysis**. Completed reports include computed metrics, data-quality
-checks and source-linked charts; reopen the case from **Your cases** to view
-the saved results. Creating a case from the sample intake copies only its
-setup, not its synthetic files or results.
+To check the data-analysis flow, open `/` or `/cases/new`, sign in, and choose
+the **Data analysis** suggestion or write a prompt and select its workflow.
+Attach a `.csv` or `.xlsx` dataset and choose **Start task**. The prompt stays
+editable; the title is derived from its first nonempty line unless supplied in
+optional case details. Data dictionaries and reporting-period notes are optional.
+Enter submits, Shift+Enter adds a line, and IME composition does not submit.
+Starting authorizes private case creation, upload/extraction and execution under
+existing model limits. File limits and enabled workflows come from the authenticated
+`GET /intake/configuration` endpoint. Tax and MSME suggestions are **Coming next**;
+the API also rejects live creation, uploads and execution for those workflows.
+
+Ready sources start a run automatically. Sources still being read open in the case
+workspace with preparation status and **Start analysis** when ready. Completed
+reports retain computed metrics, data-quality checks and source-linked charts.
+Reopen saved work through **Cases**, without resubmitting. Upload failures retain
+the created case and successful files; rejected uploads can be retried in
+the composer. Ambiguous create/upload/run responses are checked against persisted
+state and never blindly resubmitted: follow the recovery link to inspect the case
+or register. The create/upload APIs have no idempotency key, so an unconfirmed
+outcome requires inspection rather than an automatic retry.
+
+Private drafts/files stay in memory and clear with the session. Signed-out
+visitors can select a static suggestion but cannot enter private data or files.
+Public replay remains read-only. Sample-origin intake copies only the workflow
+setup, not synthetic files or results. Case-grounded Ask remains later work.
 
 From `apps/api`, the equivalent command is `pnpm admin issue-key <user-id>`.
 `issue-key` requires an existing user ID, not an email address. An optional
@@ -150,6 +167,10 @@ Install Chromium once before running browser tests:
 pnpm --filter @evianta/web exec playwright install chromium
 pnpm test:e2e
 ```
+
+Browser tests use a separate `.next-e2e` build directory so they do not overwrite
+an active development server's `.next` output. Navigation assertions allow cold
+Next.js compilation; they are functional checks, not latency measurements.
 
 The browser suite owns port 3100 and starts a dedicated fixture-backed web server;
 it never reuses a running development server. Free that port before testing.

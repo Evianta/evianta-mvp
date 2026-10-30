@@ -9,6 +9,7 @@ coverage/
 **/coverage/
 .turbo/
 .next/
+.next-e2e/
 .data/
 *.tsbuildinfo
 .tmp/

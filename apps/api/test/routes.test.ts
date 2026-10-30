@@ -156,6 +156,65 @@ describe("case API routes", () => {
     };
   }
 
+  it("exposes configured intake limits only to authenticated owners", async () => {
+    expect((await fetch(`${baseUrl}/intake/configuration`)).status).toBe(401);
+    const response = await fetch(`${baseUrl}/intake/configuration`, {
+      headers: authHeaders(),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      workflows: ["data-analysis"],
+      ...services.uploads,
+    });
+  });
+
+  it.each(["tax-notice", "msme-payment"] as const)(
+    "blocks live %s creation, upload and run admission",
+    async (useCase) => {
+      const response = await fetch(`${baseUrl}/cases`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ title: "Not available", useCase }),
+      });
+      expect(response.status).toBe(409);
+      expect(await repositories.cases.listOwned(user.id)).toEqual([]);
+      const record = {
+        ...syntheticWorkflowFixtures.dataAnalysis.case,
+        id: `disabled-${useCase}`,
+        ownerId: user.id,
+        isSample: false,
+        synthetic: false,
+        useCase,
+      };
+      await repositories.cases.insert(record);
+      for (const [path, body] of [
+        ["/runs", { caseId: record.id }],
+        [`/cases/${record.id}/run`, {}],
+        [`/cases/${record.id}/retry`, { priorRunId: "absent" }],
+        [`/cases/${record.id}/documents`, {}],
+      ] as const) {
+        const blocked = await fetch(`${baseUrl}${path}`, {
+          method: "POST",
+          headers: { ...authHeaders(), "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect(blocked.status).toBe(409);
+        expect(await blocked.json()).toMatchObject({
+          error: { message: expect.stringContaining("coming next") },
+        });
+      }
+      expect(
+        await repositories.documents.listOwned({
+          ownerId: user.id,
+          caseId: record.id,
+        }),
+      ).toEqual([]);
+      expect(await repositories.runs.listForCase(record.id, user.id)).toEqual(
+        [],
+      );
+    },
+  );
+
   it.each([undefined, null, "sample-sales-quarter"])(
     "accepts the web client's case-creation request with source %s",
     async (sourceCaseId) => {
