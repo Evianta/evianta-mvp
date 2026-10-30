@@ -34,7 +34,7 @@ cloud services or model providers.
 | `packages/ai`        | Muse/mock provider adapters, structured output and usage boundary     |
 | `packages/agents`    | LangGraph planning, specialist execution, review and run recovery     |
 | `packages/ingestion` | Document parsing, text-layer and admitted OCR extraction with caching |
-| `apps/api`           | Express API, access-key authentication and admin CLI                  |
+| `apps/api`           | Express case API, access-key authentication, worker and admin CLI     |
 | `apps/web`           | Web application boundary; UI features come in the web work pack       |
 
 Keep shared types in `core`, environment reads in `env`, persistence in
@@ -123,13 +123,18 @@ Configure the required API values in `.env`, including a unique random
 `SESSION_RECHECK_SECONDS`. Keep `TRUST_PROXY_HOPS` at `0` unless the API is
 behind a known proxy chain. JWTs last 30 minutes and are checked against the
 current user, access key and revocable session on each request.
-The API start and admin commands load the repository-root `.env` automatically;
+The API, worker and admin commands load the repository-root `.env` automatically;
 environment variables already exported by the process take precedence.
 Clients must hold tokens in memory only and ask users to re-enter their key
 after a reload or token expiry; there are no refresh tokens.
 
 Build and run the API with `pnpm --filter @evianta/api build` and
-`pnpm --filter @evianta/api start`. The admin CLI supports `create-user`,
+`pnpm --filter @evianta/api start`. Run durable case execution in a separate
+process with `pnpm --filter @evianta/api start:worker`. Configure
+`UPLOAD_MAX_BYTES`, `UPLOAD_MAX_FILES` and `DOCUMENT_MAX_PAGES` to bound file
+admission and extraction. The API serves owned case lifecycle routes, public
+synthetic samples and authenticated persisted-event streams; sample sources
+contain synthetic data only. The admin CLI supports `create-user`,
 `disable-user`, `issue-key` and `revoke-key`; run it with
 `pnpm --filter @evianta/api admin -- <command> <arguments>`. An issued key is
 printed once and only its SHA-256 verifier is stored. Do not pass keys in

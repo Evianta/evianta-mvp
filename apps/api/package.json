@@ -8,19 +8,26 @@
     "@evianta/ai": "workspace:*",
     "@evianta/core": "workspace:*",
     "@evianta/env": "workspace:*",
+    "@evianta/ingestion": "workspace:*",
     "@evianta/store": "workspace:*",
+    "busboy": "^1.6.0",
     "express": "^5.3.0",
     "zod": "4.4.3"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=../../.env dist/index.js",
+    "start": "node --env-file-if-exists=../../.env dist/server.js",
+    "start:worker": "node --env-file-if-exists=../../.env dist/worker.js",
     "admin": "node --env-file-if-exists=../../.env dist/admin.js",
-    "pretypecheck": "pnpm --filter @evianta/core build && pnpm --filter @evianta/env build && pnpm --filter @evianta/store build",
+    "prebuild": "pnpm run pretypecheck",
+    "pretest": "pnpm run build",
+    "pretypecheck": "pnpm --filter @evianta/core build && pnpm --filter @evianta/env build && pnpm --filter @evianta/store build && pnpm --filter @evianta/ai build && pnpm --filter @evianta/ingestion build && pnpm --filter @evianta/agents build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "build": "tsc -p tsconfig.build.json"
   },
   "devDependencies": {
-    "@types/express": "^5.0.6"
+    "@types/busboy": "^1.5.5",
+    "@types/express": "^5.0.6",
+    "mongodb-memory-server": "11.3.0"
   }
 }

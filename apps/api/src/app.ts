@@ -39,6 +39,7 @@ export interface ApiAppOptions {
     authenticate: RequestHandler;
     service: AuthenticationService;
     configuration: ApiAppConfiguration;
+    repositories: ApiAppRepositories;
   }) => void;
 }
 
@@ -144,9 +145,12 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
       );
       response.setHeader(
         "Access-Control-Allow-Headers",
-        "Authorization, Content-Type",
+        "Authorization, Content-Type, Last-Event-ID",
       );
-      response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      response.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET, POST, DELETE, OPTIONS",
+      );
     }
     if (request.method === "OPTIONS") {
       response.status(204).end();
@@ -246,6 +250,7 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
     authenticate: authenticated,
     service,
     configuration,
+    repositories,
   });
 
   app.use((_request, response) => {
@@ -259,15 +264,43 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
     _next,
   ) => {
     void _next;
-    const status =
+    const errorCode =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : undefined;
+    const declaredStatus =
       typeof error === "object" &&
       error !== null &&
       "status" in error &&
-      (error.status === 400 || error.status === 413 || error.status === 415)
+      typeof error.status === "number"
         ? error.status
-        : error instanceof AuthenticationError
-          ? 401
-          : 500;
+        : undefined;
+    const status =
+      error instanceof AuthenticationError
+        ? 401
+        : declaredStatus &&
+            [400, 403, 404, 409, 413, 415, 429].includes(declaredStatus)
+          ? declaredStatus
+          : errorCode === "not-found"
+            ? 404
+            : errorCode === "admin-required"
+              ? 403
+              : errorCode === "invalid-cursor"
+                ? 400
+                : errorCode === "run-conflict" ||
+                    errorCode === "duplicate-record" ||
+                    errorCode === "run-case-active" ||
+                    errorCode === "invalid-run-admission" ||
+                    errorCode === "run-admission-counter-conflict"
+                  ? 409
+                  : errorCode === "run-concurrency-limit" ||
+                      errorCode === "spend-limit-exceeded" ||
+                      errorCode === "usage-admission-rejected"
+                    ? 429
+                    : 500;
     if (status === 500) {
       const errorName = error instanceof Error ? error.name : "UnknownError";
       console.error("API request failed", {
@@ -278,22 +311,55 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
     const code =
       status === 401
         ? "unauthenticated"
-        : status === 413
-          ? "limit-reached"
-          : status === 500
-            ? "internal-error"
-            : "validation-failed";
+        : status === 403
+          ? "forbidden"
+          : status === 404
+            ? "not-found"
+            : status === 409
+              ? "conflict"
+              : status === 429 || status === 413
+                ? "limit-reached"
+                : status === 500
+                  ? "internal-error"
+                  : "validation-failed";
     const message =
       status === 401
         ? "Authentication required"
-        : status === 413
-          ? "Request body is too large"
-          : status === 415
-            ? "Request content type or encoding is not supported"
-            : status === 400
-              ? "Request body is invalid"
-              : "An unexpected error occurred";
-    sendApiError(response, status, code, message);
+        : status === 403
+          ? "Access is forbidden"
+          : status === 404
+            ? "Resource not found"
+            : status === 409
+              ? "The request conflicts with current state"
+              : status === 429
+                ? "A request or usage limit was reached"
+                : status === 413
+                  ? "Request body is too large"
+                  : status === 415
+                    ? "Request content type or encoding is not supported"
+                    : status === 400
+                      ? "Request body is invalid"
+                      : "An unexpected error occurred";
+    if (status === 429) response.setHeader("Retry-After", "60");
+    const reason =
+      status === 429
+        ? errorCode === "run-concurrency-limit"
+          ? "run-concurrency-limit"
+          : errorCode === "spend-limit-exceeded"
+            ? "spend-limit-exceeded"
+            : "usage-admission-rejected"
+        : status === 409
+          ? errorCode === "run-case-active"
+            ? "run-case-active"
+            : "request-conflict"
+          : undefined;
+    sendApiError(
+      response,
+      status,
+      code,
+      message,
+      reason ? [{ path: ["reason"], message: reason }] : [],
+    );
   };
   app.use(errorHandler);
 

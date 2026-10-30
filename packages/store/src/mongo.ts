@@ -188,6 +188,8 @@ export interface MongoRunLease {
 }
 
 export class MongoStore {
+  readonly client: MongoClient;
+  readonly databaseName: string;
   readonly agents: Collection<Stored<AgentProfile>>;
   readonly users: Collection<Stored<UserRecord>>;
   readonly accessKeys: Collection<Stored<AccessKeyRecord>>;
@@ -262,6 +264,8 @@ export class MongoStore {
 
   constructor(private readonly options: MongoStoreOptions) {
     const { db } = options;
+    this.client = options.client;
+    this.databaseName = db.databaseName;
     this.pageSize = options.pageSize ?? 50;
     this.agents = db.collection("agents");
     this.users = db.collection("users");
@@ -369,6 +373,7 @@ export class MongoStore {
       },
       runs: {
         findOwnedById: (id, ownerId) => this.runFindOwnedById(id, ownerId),
+        listForCase: (caseId, ownerId) => this.runListForCase(caseId, ownerId),
         insert: (record, tasks) => this.runInsert(record, tasks),
         updateOwned: (record, ownerId) => this.runUpdateOwned(record, ownerId),
         listClaimable: (at, limit, after) =>
@@ -1474,6 +1479,14 @@ export class MongoStore {
       RunRecordSchema,
       await this.runs.findOne({ _id: id, ownerId }),
     );
+  }
+
+  async runListForCase(caseId: string, ownerId: string): Promise<RunRecord[]> {
+    const records = await this.runs
+      .find({ caseId, ownerId })
+      .sort({ createdAt: -1, id: -1 })
+      .toArray();
+    return records.map((record) => decode(RunRecordSchema, record)!);
   }
 
   async runInsert(run: RunRecord, tasks?: Task[]): Promise<void> {

@@ -180,6 +180,7 @@ export interface TaskRepository {
 
 export interface RunRepository {
   findOwnedById(id: string, ownerId: string): Promise<RunRecord | null>;
+  listForCase(caseId: string, ownerId: string): Promise<RunRecord[]>;
   insert(run: RunRecord, tasks?: Task[]): Promise<void>;
   updateOwned(run: RunRecord, ownerId: string): Promise<boolean>;
   /**

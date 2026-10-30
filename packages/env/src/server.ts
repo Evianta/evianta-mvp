@@ -182,6 +182,31 @@ export interface ApiEnvironment {
   trustProxyHops: number;
 }
 
+export interface UploadEnvironment {
+  uploadMaxBytes: number;
+  uploadMaxFiles: number;
+  documentMaxPages: number;
+}
+
+export function getUploadEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): UploadEnvironment {
+  const uploadMaxBytes = getPositiveInteger(
+    "UPLOAD_MAX_BYTES",
+    env,
+    25 * 1024 * 1024,
+  );
+  const uploadMaxFiles = getPositiveInteger("UPLOAD_MAX_FILES", env, 10);
+  const documentMaxPages = getPositiveInteger("DOCUMENT_MAX_PAGES", env, 100);
+  if (uploadMaxBytes > 100 * 1024 * 1024) {
+    throw new Error("UPLOAD_MAX_BYTES must not exceed 100 MiB");
+  }
+  if (uploadMaxFiles > 20) {
+    throw new Error("UPLOAD_MAX_FILES must not exceed 20");
+  }
+  return { uploadMaxBytes, uploadMaxFiles, documentMaxPages };
+}
+
 function getPositiveInteger(
   name: string,
   env: NodeJS.ProcessEnv,

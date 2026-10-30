@@ -806,6 +806,17 @@ export class InMemoryStore {
             ? parse(RunRecordSchema, record)
             : null;
         },
+        listForCase: async (caseId, ownerId) =>
+          [...this.runs.values()]
+            .filter(
+              (record) =>
+                record.caseId === caseId && record.ownerId === ownerId,
+            )
+            .sort(
+              (left, right) =>
+                Date.parse(right.createdAt) - Date.parse(left.createdAt),
+            )
+            .map((record) => parse(RunRecordSchema, record)),
         insert: async (run, tasks) => {
           const record = parse(RunRecordSchema, run);
           const plan = tasks

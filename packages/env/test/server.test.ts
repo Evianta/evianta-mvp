@@ -6,6 +6,7 @@ import {
   getDocumentStoreConfig,
   getMongoConfig,
   getRequiredEnv,
+  getUploadEnvironment,
   getUsageEnvironment,
 } from "../src/server.js";
 
@@ -141,6 +142,22 @@ describe("getMongoConfig", () => {
         }),
       ).toThrow("MONGODB_DB must be a valid MongoDB database name");
     }
+  });
+});
+
+describe("getUploadEnvironment", () => {
+  it("uses bounded defaults and validates configured limits", () => {
+    expect(getUploadEnvironment({})).toEqual({
+      uploadMaxBytes: 25 * 1024 * 1024,
+      uploadMaxFiles: 10,
+      documentMaxPages: 100,
+    });
+    expect(() =>
+      getUploadEnvironment({ UPLOAD_MAX_BYTES: "104857601" }),
+    ).toThrow("UPLOAD_MAX_BYTES must not exceed 100 MiB");
+    expect(() => getUploadEnvironment({ UPLOAD_MAX_FILES: "21" })).toThrow(
+      "UPLOAD_MAX_FILES must not exceed 20",
+    );
   });
 });
 
