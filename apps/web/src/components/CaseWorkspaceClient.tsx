@@ -106,10 +106,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
       };
 
     setLoading(true);
-    void Promise.all([
-      api.getCaseWorkspace(caseId),
-      api.getLatestRun(caseId),
-    ])
+    void Promise.all([api.getCaseWorkspace(caseId), api.getLatestRun(caseId)])
       .then(([caseWorkspace, latestRun]) => {
         if (active) {
           setWorkspace(caseWorkspace);
@@ -332,11 +329,12 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
     ? ["running", "queued", "waiting-for-input"].includes(run.status)
     : false;
   const canRetry =
-    run &&
-    (run.status === "failed" || run.status === "partially-completed");
+    run && (run.status === "failed" || run.status === "partially-completed");
   const canStartAnalysis =
     record.useCase !== "data-analysis" ||
-    Boolean(workspace?.documents.some((document) => document.state === "ready"));
+    Boolean(
+      workspace?.documents.some((document) => document.state === "ready"),
+    );
 
   return (
     <div>

@@ -94,25 +94,44 @@ function buildTable(
     sheet?: string;
     originRow?: number;
     originColumn?: number;
+    sourceRows?: readonly number[];
     cellReferences?: boolean;
     cellRange?: string;
   } = {},
   maxCells = limits.maxTableCells,
 ): ExtractedTable | null {
-  const width = grid.reduce((max, row) => Math.max(max, row.length), 0);
-  if (grid.length === 0 || width === 0) return null;
+  const header = grid[0];
+  if (!header) return null;
+  const data = grid.slice(1).flatMap((row, index) =>
+    row.some((value) => value !== null && value.trim() !== "")
+      ? [
+          {
+            row,
+            sourceRow:
+              location.sourceRows?.[index] ??
+              (location.originRow ?? 0) + index + 2,
+          },
+        ]
+      : [],
+  );
+  const normalizedGrid = [header, ...data.map(({ row }) => row)];
+  const width = normalizedGrid.reduce(
+    (max, row) => Math.max(max, row.length),
+    0,
+  );
+  if (width === 0) return null;
   if (width > limits.maxColumns) {
     throw new IngestionError(
       "Table has too many columns",
       "row-limit-exceeded",
     );
   }
-  if (grid.length - 1 > limits.maxRows) {
+  if (data.length > limits.maxRows) {
     throw new IngestionError("Table has too many rows", "row-limit-exceeded");
   }
-  assertCellLimit(grid.length, width, maxCells);
-  const headers = normalizeHeaders(grid[0], width);
-  const rows = grid.slice(1).map((row) =>
+  assertCellLimit(data.length + 1, width, maxCells);
+  const headers = normalizeHeaders(header, width);
+  const rows = data.map(({ row }) =>
     Array.from({ length: width }, (_, index) => {
       const value = row[index];
       return value === undefined || value === null || value === ""
@@ -122,12 +141,16 @@ function buildTable(
   );
   const originRow = location.originRow ?? 0;
   const originColumn = location.originColumn ?? 0;
-  const cellRange = `${columnName(originColumn)}${originRow + 1}:${columnName(originColumn + width - 1)}${originRow + grid.length}`;
+  const lastRow = data.at(-1)?.sourceRow ?? originRow + normalizedGrid.length;
+  const cellRange = `${columnName(originColumn)}${originRow + 1}:${columnName(originColumn + width - 1)}${lastRow}`;
   return {
     id,
     pageIndex: null,
     headers,
     rows,
+    ...(location.cellReferences === false
+      ? {}
+      : { sourceRowNumbers: data.map(({ sourceRow }) => sourceRow) }),
     columnTypes: inferColumnTypes(width, rows),
     ...(location.sheet ? { sheet: location.sheet } : {}),
     ...(location.cellReferences === false
@@ -141,25 +164,67 @@ export function parseDelimited(
   delimiter: "," | "\t",
   limits: IngestionLimits,
 ): ParsedTables {
-  const result = Papa.parse<string[]>(text.replace(/^\uFEFF/, ""), {
+  const source = text.replace(/^\uFEFF/, "");
+  const data: string[][] = [];
+  const sourceRows: number[] = [];
+  const errors: Papa.ParseError[] = [];
+  let cursor = 0;
+  let sourceLine = 1;
+  let tooManyRows = false;
+  Papa.parse<string[]>(source, {
     delimiter,
     header: false,
-    skipEmptyLines: "greedy",
+    skipEmptyLines: false,
     dynamicTyping: false,
-    // Read one row past the limit so oversize input is rejected, not truncated.
-    preview: limits.maxRows + 2,
+    step(result, parser) {
+      if (result.data.some((value) => value.trim() !== "")) {
+        data.push(result.data);
+        sourceRows.push(sourceLine);
+      }
+      errors.push(...result.errors);
+      const nextCursor = result.meta.cursor;
+      const consumed = source.slice(cursor, nextCursor);
+      sourceLine += (consumed.match(/\r\n|\r|\n/g) ?? []).length;
+      cursor = nextCursor;
+      if (data.length > limits.maxRows + 1) {
+        tooManyRows = true;
+        parser.abort();
+      }
+    },
   });
-  if (result.data.length > limits.maxRows + 1) {
+  if (tooManyRows) {
     throw new IngestionError("Table has too many rows", "row-limit-exceeded");
   }
-  const warnings: ExtractionWarning[] = result.errors
-    .slice(0, 20)
-    .map((error) => ({
-      code: "delimited-parse-issue",
-      message: `Row ${(error.row ?? 0) + 1}: ${error.message}`,
-      pageIndex: null,
-    }));
-  const table = buildTable("table-1", result.data, limits);
+  const warnings: ExtractionWarning[] = errors.slice(0, 20).map((error) => ({
+    code: "delimited-parse-issue",
+    message: `Row ${(error.row ?? 0) + 1}: ${error.message}`,
+    pageIndex: null,
+  }));
+  const headerIndex = data.findIndex((row) =>
+    row.some((value) => value.trim() !== ""),
+  );
+  const headerRow = data[headerIndex];
+  const parsedRows = data.slice(headerIndex);
+  const parsedSourceRows = sourceRows.slice(headerIndex + 1);
+  let lastDataIndex = parsedRows.length - 1;
+  while (
+    lastDataIndex > 0 &&
+    !parsedRows[lastDataIndex]!.some((value) => value.trim() !== "")
+  ) {
+    lastDataIndex -= 1;
+  }
+  const columnCount = parsedRows.reduce(
+    (width, row) => Math.max(width, row.length),
+    0,
+  );
+  const table = headerRow
+    ? buildTable("table-1", parsedRows, limits, {
+        sourceRows: parsedSourceRows,
+        cellRange: `A${sourceRows[headerIndex]}:${columnName(
+          Math.max(0, columnCount - 1),
+        )}${sourceRows[headerIndex + lastDataIndex]}`,
+      })
+    : null;
   return { tables: table ? [table] : [], warnings };
 }
 
@@ -220,7 +285,8 @@ export function parseWorkbook(
       header: 1,
       raw: false,
       defval: null,
-      blankrows: false,
+      blankrows: true,
+      range: full,
     });
     const range = XLSX.utils.decode_range(sheet["!ref"] ?? fullRange);
     const table = buildTable(
@@ -229,6 +295,10 @@ export function parseWorkbook(
       limits,
       {
         sheet: sheetName,
+        originRow: range.s.r,
+        sourceRows: grid
+          .slice(1)
+          .map((_, rowIndex) => range.s.r + rowIndex + 2),
         cellRange: XLSX.utils.encode_range(range),
       },
       availableCells,

@@ -495,7 +495,9 @@ describe("case API routes", () => {
         }),
       }),
       plan: {
-        ...planOf([{ key: "sales-analysis", role: BUSINESS_DATA_ANALYST_ROLE }]),
+        ...planOf([
+          { key: "sales-analysis", role: BUSINESS_DATA_ANALYST_ROLE },
+        ]),
         title: "Sales data analysis",
         format: "dashboard",
       },

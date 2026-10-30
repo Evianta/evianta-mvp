@@ -71,7 +71,9 @@ for (const phase of ["create", "upload"] as const) {
             outcome === "failure"
               ? { error: { message: "Old session upload failed." } }
               : {
-                  documents: [syntheticWorkflowFixtures.dataAnalysis.documents[0]],
+                  documents: [
+                    syntheticWorkflowFixtures.dataAnalysis.documents[0],
+                  ],
                 },
         });
       });
@@ -292,7 +294,6 @@ for (const status of ["queued", "running", "failed", "none"] as const) {
           },
         });
       }
-
     });
     await page.route("**/cases", async (route) => {
       if (route.request().headers().accept !== "application/json") {

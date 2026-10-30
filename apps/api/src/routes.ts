@@ -1407,12 +1407,7 @@ export function registerCaseApiRoutes(
       return;
     }
     if (record.deletionRequestedAt || record.status !== "active") {
-      sendApiError(
-        response,
-        409,
-        "conflict",
-        "Case is not accepting new runs",
-      );
+      sendApiError(response, 409, "conflict", "Case is not accepting new runs");
       return;
     }
     const run = input.priorRunId
@@ -1432,7 +1427,10 @@ export function registerCaseApiRoutes(
     const principal = authContext(request)?.principal;
     const runId = routeParam(request.params.runId);
     if (!principal || !runId) return;
-    const prior = await repositories.runs.findOwnedById(runId, principal.userId);
+    const prior = await repositories.runs.findOwnedById(
+      runId,
+      principal.userId,
+    );
     if (!prior) {
       sendApiError(response, 404, "not-found", "Resource not found");
       return;
@@ -1457,7 +1455,10 @@ export function registerCaseApiRoutes(
     const principal = authContext(request)?.principal;
     const runId = routeParam(request.params.runId);
     if (!principal || !runId) return;
-    const existing = await repositories.runs.findOwnedById(runId, principal.userId);
+    const existing = await repositories.runs.findOwnedById(
+      runId,
+      principal.userId,
+    );
     if (!existing) {
       sendApiError(response, 404, "not-found", "Resource not found");
       return;

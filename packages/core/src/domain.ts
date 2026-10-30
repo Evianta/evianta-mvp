@@ -533,6 +533,7 @@ export const ExtractedTableSchema = z.object({
   pageIndex: NonNegativeIntegerSchema.nullable(),
   headers: z.array(z.string()),
   rows: z.array(z.array(z.string().nullable())),
+  sourceRowNumbers: z.array(z.number().int().positive()).optional(),
   columnTypes: z.array(ExtractedColumnTypeSchema).optional(),
   sheet: z.string().min(1).optional(),
   cellRange: z.string().min(1).optional(),

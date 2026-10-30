@@ -120,6 +120,8 @@ interface NarrativeLimits {
   contextChars: number;
 }
 
+const MAX_PERSISTED_ANALYSIS_BYTES = 8 * 1024 * 1024;
+
 const monthNames = [
   "jan",
   "feb",
@@ -257,16 +259,22 @@ function startColumn(cellRange: string | undefined): number {
   );
 }
 
+function sourceRowNumber(table: ExtractedTable, rowIndex: number): number {
+  return (
+    table.sourceRowNumbers?.[rowIndex] ??
+    startRow(table.cellRange) + rowIndex + 1
+  );
+}
+
 function sourceCellRange(
   table: ExtractedTable,
   firstColumnIndex: number,
   lastColumnIndex: number,
   rows: { start: number; end: number },
 ): string {
-  const firstTableRow = startRow(table.cellRange);
   const firstTableColumn = startColumn(table.cellRange);
-  const first = `${columnName(firstTableColumn + firstColumnIndex)}${firstTableRow + rows.start}`;
-  const last = `${columnName(firstTableColumn + lastColumnIndex)}${firstTableRow + rows.end}`;
+  const first = `${columnName(firstTableColumn + firstColumnIndex)}${rows.start}`;
+  const last = `${columnName(firstTableColumn + lastColumnIndex)}${rows.end}`;
   return `${first}:${last}`;
 }
 
@@ -283,13 +291,13 @@ function dataQualityIssues(
   headers: readonly string[],
   valueIndex: number,
   periodIndex: number,
-  firstSourceRow: number,
+  sourceRowAt: (rowIndex: number) => number,
 ): DataQualityIssue[] {
   const issues: DataQualityIssue[] = [];
   headers.forEach((header, columnIndex) => {
     const missingRows = rows.flatMap((row, rowIndex) =>
       row[columnIndex] === null || row[columnIndex]?.trim() === ""
-        ? [firstSourceRow + rowIndex]
+        ? [sourceRowAt(rowIndex)]
         : [],
     );
     if (missingRows.length) {
@@ -321,7 +329,7 @@ function dataQualityIssues(
         rows: rowGroups(
           populated
             .filter((item) => parseNumber(item.value) === null)
-            .map((item) => firstSourceRow + item.rowIndex),
+            .map((item) => sourceRowAt(item.rowIndex)),
         ),
         count: populated.length - numericRows.length,
       });
@@ -332,7 +340,7 @@ function dataQualityIssues(
   const repeated: number[] = [];
   rows.forEach((row, rowIndex) => {
     const key = JSON.stringify(row);
-    if (duplicateRows.has(key)) repeated.push(firstSourceRow + rowIndex);
+    if (duplicateRows.has(key)) repeated.push(sourceRowAt(rowIndex));
     else duplicateRows.set(key, rowIndex);
   });
   if (repeated.length) {
@@ -348,7 +356,7 @@ function dataQualityIssues(
 
   const negativeRows = rows.flatMap((row, rowIndex) => {
     const amount = parseNumber(row[valueIndex]);
-    return amount !== null && amount < 0 ? [firstSourceRow + rowIndex] : [];
+    return amount !== null && amount < 0 ? [sourceRowAt(rowIndex)] : [];
   });
   if (negativeRows.length) {
     issues.push({
@@ -377,7 +385,7 @@ function dataQualityIssues(
       const inconsistent = rows.flatMap((row, rowIndex) =>
         row[periodIndex]?.trim() &&
         classifyDateFormat(row[periodIndex]) !== firstFormat
-          ? [firstSourceRow + rowIndex]
+          ? [sourceRowAt(rowIndex)]
           : [],
       );
       issues.push({
@@ -396,22 +404,59 @@ function dataQualityIssues(
 function chooseTable(tables: readonly SourceTable[]): {
   source: SourceTable;
   valueIndex: number;
+  competingValueColumns: string[];
   periodIndex: number;
   segmentIndex: number;
 } {
   const candidates = tables.flatMap((source) => {
     const table = source.table;
-    const valueIndex = table.headers
+    const measures = table.headers
       .map((header, index) => ({ header: normalized(header), index }))
       .filter(({ index }) =>
         table.rows.some((row) => parseNumber(row[index]) !== null),
       )
-      .sort((left, right) => {
-        const score = (header: string) =>
-          /revenue|sales|amount|total|value|price/.test(header) ? 1 : 0;
-        return score(right.header) - score(left.header);
-      })[0]?.index;
-    if (valueIndex === undefined) return [];
+      .filter(
+        ({ header }) =>
+          !/(^| )(id|identifier|code|sku|key)($| )/.test(header) &&
+          !/(^| )(product|account|customer|sales rep|representative) (number|no)($| )/.test(
+            header,
+          ),
+      )
+      .map((column) => {
+        const score = /\b(revenue|net revenue|gross revenue)\b/.test(
+          column.header,
+        )
+          ? 120
+          : /\b(net sales|gross sales|sales amount|total sales)\b/.test(
+                column.header,
+              )
+            ? 110
+            : /\bsales\b/.test(column.header)
+              ? 100
+              : /\bamount\b/.test(column.header)
+                ? 90
+                : /\btotal value\b|\bvalue\b/.test(column.header)
+                  ? 80
+                  : /\bunit price\b|\bprice per\b|\bcost per\b/.test(
+                        column.header,
+                      )
+                    ? 30
+                    : /\bprice\b/.test(column.header)
+                      ? 40
+                      : /\bquantity\b|\bqty\b|\bunits\b/.test(column.header)
+                        ? 20
+                        : 0;
+        return { ...column, score };
+      });
+    if (!measures.length) return [];
+    measures.sort(
+      (left, right) => right.score - left.score || left.index - right.index,
+    );
+    const highestScore = measures[0]!.score;
+    const leadingMeasures = measures.filter(
+      (measure) => measure.score === highestScore,
+    );
+    const valueIndex = measures[0]!.index;
     const periodIndex = table.headers.findIndex((header) =>
       /date|month|period|week|quarter|year/.test(normalized(header)),
     );
@@ -432,7 +477,17 @@ function chooseTable(tables: readonly SourceTable[]): {
           ).size > 1,
       );
     }
-    return [{ source, valueIndex, periodIndex, segmentIndex }];
+    return [
+      {
+        source,
+        valueIndex,
+        competingValueColumns: leadingMeasures
+          .slice(1)
+          .map(({ index }) => table.headers[index]!),
+        periodIndex,
+        segmentIndex,
+      },
+    ];
   });
   const candidate = candidates.sort(
     (left, right) =>
@@ -453,8 +508,8 @@ function makeSourceEvidence(
   columnStart = 0,
   columnEnd = Math.max(0, source.table.headers.length - 1),
 ): EvidenceDraft {
-  const sourceRowStart = startRow(source.table.cellRange) + rowRange.start;
-  const sourceRowEnd = startRow(source.table.cellRange) + rowRange.end;
+  const sourceRowStart = rowRange.start;
+  const sourceRowEnd = rowRange.end;
   const cellRange = sourceCellRange(
     source.table,
     columnStart,
@@ -483,9 +538,15 @@ function makeSourceEvidence(
 export function analyzeSalesTables(
   tables: readonly SourceTable[],
 ): DataAnalysisResult {
-  const { source, valueIndex, periodIndex, segmentIndex } = chooseTable(tables);
+  const {
+    source,
+    valueIndex,
+    competingValueColumns,
+    periodIndex,
+    segmentIndex,
+  } = chooseTable(tables);
   const table = source.table;
-  const firstSourceRow = startRow(table.cellRange) + 1;
+  const firstSourceRow = sourceRowNumber(table, 0);
   const values = table.rows.map((row) => parseNumber(row[valueIndex]));
   const validValues = values.filter((value): value is number => value !== null);
   if (!validValues.length) {
@@ -559,25 +620,19 @@ export function analyzeSalesTables(
     table.headers,
     valueIndex,
     periodIndex,
-    firstSourceRow,
+    (rowIndex) => sourceRowNumber(table, rowIndex),
   );
-  const finalSourceRow = Math.max(
-    firstSourceRow,
-    firstSourceRow + table.rows.length - 1,
-  );
+  const finalSourceRow = sourceRowNumber(table, table.rows.length - 1);
   const sourceEvidence = makeSourceEvidence(
     source,
-    { start: 1, end: Math.max(1, table.rows.length) },
+    { start: firstSourceRow, end: finalSourceRow },
     table.headers,
   );
   const qualityEvidence = dataQuality.flatMap((issue) =>
     issue.rows.map((rows) =>
       makeSourceEvidence(
         source,
-        {
-          start: rows.start - firstSourceRow + 1,
-          end: rows.end - firstSourceRow + 1,
-        },
+        rows,
         issue.columns,
         Math.max(0, table.headers.indexOf(issue.columns[0]!)),
         Math.max(
@@ -653,6 +708,16 @@ export function analyzeSalesTables(
     `${metrics.average.toLocaleString("en-IN", { maximumFractionDigits: 2 })}.`;
   const assumptions: string[] = [];
   const openQuestions: DataAnalysisResult["openQuestions"] = [];
+  if (competingValueColumns.length) {
+    const alternatives = [table.headers[valueIndex]!, ...competingValueColumns];
+    assumptions.push(
+      `The ${table.headers[valueIndex]} column was selected as the measure; other equally suitable numeric columns were not included: ${competingValueColumns.join(", ")}.`,
+    );
+    openQuestions.push({
+      text: `Which measure should be used for totals and charts: ${alternatives.join(", ")}?`,
+      severity: "medium",
+    });
+  }
   if (tables.length > 1) {
     assumptions.push(
       `The table with the most rows containing numeric values (${source.name}, ${table.sheet ?? table.id}) was treated as the primary dataset.`,
@@ -661,6 +726,30 @@ export function analyzeSalesTables(
       text: "Should the other uploaded tables or workbook sheets be included in this analysis?",
       severity: "low",
     });
+  }
+  const persistedProjection = {
+    summary,
+    findings: [
+      { evidence: [sourceEvidence] },
+      ...qualityEvidence.map((evidence) => ({ evidence: [evidence] })),
+    ],
+    report: {
+      summary,
+      interpretation: "",
+      metrics,
+      dataQuality,
+      assumptions,
+      openQuestions,
+    },
+    dashboard,
+  };
+  if (
+    new TextEncoder().encode(JSON.stringify(persistedProjection)).byteLength >
+    MAX_PERSISTED_ANALYSIS_BYTES
+  ) {
+    throw new Error(
+      "The analysis results exceed the 8 MiB persistence safety limit. Reduce the dataset's distinct periods or segments and retry.",
+    );
   }
   return {
     table: source,

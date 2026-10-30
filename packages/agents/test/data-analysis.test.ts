@@ -133,6 +133,39 @@ describe("business data analyst", () => {
     });
   });
 
+  it("uses extracted physical row numbers for quality evidence", () => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "blank-lines-doc",
+        name: "blank-lines.csv",
+        table: {
+          ...table,
+          headers: ["product", "revenue"],
+          rows: [
+            ["A", "100"],
+            ["B", "unknown"],
+            ["C", "50"],
+          ],
+          sourceRowNumbers: [2, 4, 5],
+          cellRange: "A1:B5",
+        },
+      },
+    ]);
+
+    const issue = result.dataQuality.find(
+      ({ code }) => code === "type-mismatch",
+    );
+    expect(issue?.rows).toEqual([{ start: 4, end: 4 }]);
+    expect(
+      result.qualityEvidence.find((evidence) =>
+        evidence.sourceRef.includes(":revenue:"),
+      )?.location,
+    ).toMatchObject({
+      cellRange: "B4:B4",
+      rowRange: { start: 4, end: 4 },
+    });
+  });
+
   it("sorts supported year, quarter, and week labels before computing growth", () => {
     for (const [header, labels, expectedLabels] of [
       ["year", ["2026", "2025"], ["2025", "2026"]],
@@ -177,6 +210,68 @@ describe("business data analyst", () => {
     expect(
       unknownOrder.metrics.byPeriod.map(({ growthPercent }) => growthPercent),
     ).toEqual([null, null]);
+  });
+
+  it("selects revenue over IDs and unit prices and reports tied measures", () => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "measure-doc",
+        name: "measures.csv",
+        table: {
+          ...table,
+          headers: [
+            "month",
+            "sales_rep_id",
+            "unit_price",
+            "quantity",
+            "revenue",
+          ],
+          rows: [
+            ["Jan", "10001", "5", "2", "10"],
+            ["Feb", "10002", "7", "3", "21"],
+          ],
+        },
+      },
+    ]);
+    expect(result.metrics.valueColumn).toBe("revenue");
+    expect(result.metrics.total).toBe(31);
+
+    const ambiguous = analyzeSalesTables([
+      {
+        documentId: "ambiguous-doc",
+        name: "ambiguous.csv",
+        table: {
+          ...table,
+          headers: ["month", "revenue", "net revenue"],
+          rows: [
+            ["Jan", "10", "9"],
+            ["Feb", "20", "18"],
+          ],
+        },
+      },
+    ]);
+    expect(ambiguous.assumptions[0]).toContain("net revenue");
+    expect(ambiguous.openQuestions[0]?.severity).toBe("medium");
+  });
+
+  it("rejects oversized persisted analysis results before any narrative call", () => {
+    const rows = Array.from({ length: 80_000 }, (_, index) => [
+      `segment-${String(index).padStart(6, "0")}-${"x".repeat(48)}`,
+      "1",
+    ]);
+    expect(() =>
+      analyzeSalesTables([
+        {
+          documentId: "large-doc",
+          name: "large.csv",
+          table: {
+            ...table,
+            headers: ["product", "revenue"],
+            rows,
+          },
+        },
+      ]),
+    ).toThrow(/8 MiB persistence safety limit/);
   });
 
   it("returns report, chart spec, and source evidence after one mock narrative call", async () => {

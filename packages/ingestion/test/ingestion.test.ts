@@ -30,6 +30,8 @@ import {
   isIncomplete,
   lowConfidenceWarningCode,
   pageNotExtractedWarningCode,
+  parseDelimited,
+  parseWorkbook,
   requiresReview,
   type IngestionOptions,
   type OcrBackend,
@@ -270,6 +272,52 @@ describe("deterministic extraction", () => {
         ["Mar", "B", "250"],
       ],
       cellRange: "A1:C7",
+    });
+  });
+
+  it("preserves physical CSV row numbers while omitting blank records", () => {
+    const result = parseDelimited(
+      "date,amount\n2026-01,10\n\n2026-02,unknown\n",
+      ",",
+      resolveIngestionSettings().limits,
+    );
+
+    expect(result.tables[0]).toMatchObject({
+      rows: [
+        ["2026-01", "10"],
+        ["2026-02", "unknown"],
+      ],
+      sourceRowNumbers: [2, 4],
+      cellRange: "A1:B4",
+    });
+  });
+
+  it("preserves physical worksheet row numbers while omitting blank records", () => {
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ["date", "amount"],
+      ["2026-01", "10"],
+      [null, null],
+      ["2026-02", "unknown"],
+    ]);
+    XLSX.utils.book_append_sheet(workbook, sheet, "Sales");
+    const bytes = XLSX.write(workbook, {
+      type: "buffer",
+      bookType: "xlsx",
+    }) as Buffer;
+    const result = parseWorkbook(
+      bytes,
+      resolveIngestionSettings().limits,
+      true,
+    );
+
+    expect(result.tables[0]).toMatchObject({
+      rows: [
+        ["2026-01", "10"],
+        ["2026-02", "unknown"],
+      ],
+      sourceRowNumbers: [2, 4],
+      cellRange: "A1:B4",
     });
   });
 

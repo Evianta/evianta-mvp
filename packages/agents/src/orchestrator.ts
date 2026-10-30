@@ -2019,12 +2019,10 @@ export class Orchestrator {
                   sourceRef: item.sourceRef,
                   confidence: item.confidence,
                   documentId: item.documentId,
-                  location:
-                    item.location ??
-                    ({
-                      ...(item.page ? { page: item.page } : {}),
-                      ...(item.textQuote ? { textQuote: item.textQuote } : {}),
-                    }),
+                  location: item.location ?? {
+                    ...(item.page ? { page: item.page } : {}),
+                    ...(item.textQuote ? { textQuote: item.textQuote } : {}),
+                  },
                 }
               : null
             : {
