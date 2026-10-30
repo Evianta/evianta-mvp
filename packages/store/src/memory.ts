@@ -56,7 +56,12 @@ import {
   type RateLimitRequest,
   type RateLimitResult,
 } from "@evianta/core";
-import { CaseNotOwnedError, InvalidCursorError, StoreError } from "./errors.js";
+import {
+  CaseNotActiveError,
+  CaseNotOwnedError,
+  InvalidCursorError,
+  StoreError,
+} from "./errors.js";
 import { InMemoryUsageRepository } from "./usage-memory.js";
 import { InMemoryRunAdmissionRepository } from "./run-admission-memory.js";
 import { UsageAdminService } from "./usage-admin.js";
@@ -142,7 +147,7 @@ export class InMemoryStore {
       return record &&
         record.ownerId === ownerId &&
         !record.isSample &&
-        record.status !== "deleted"
+        record.status === "active"
         ? parse(CaseSchema, record)
         : null;
     };
@@ -290,6 +295,28 @@ export class InMemoryStore {
             return false;
           }
           this.cases.set(record.id, record);
+          return true;
+        },
+        requestDeletion: async (id, ownerId, at) => {
+          const timestamp = TimestampSchema.parse(at);
+          const record = this.cases.get(id);
+          if (
+            !record ||
+            record.ownerId !== ownerId ||
+            record.isSample ||
+            record.status === "deleted"
+          ) {
+            return false;
+          }
+          this.cases.set(
+            id,
+            parse(CaseSchema, {
+              ...record,
+              status: "archived",
+              deletionRequestedAt: timestamp,
+              updatedAt: timestamp,
+            }),
+          );
           return true;
         },
       },
@@ -806,6 +833,17 @@ export class InMemoryStore {
             ? parse(RunRecordSchema, record)
             : null;
         },
+        listForCase: async (caseId, ownerId) =>
+          [...this.runs.values()]
+            .filter(
+              (record) =>
+                record.caseId === caseId && record.ownerId === ownerId,
+            )
+            .sort(
+              (left, right) =>
+                Date.parse(right.createdAt) - Date.parse(left.createdAt),
+            )
+            .map((record) => parse(RunRecordSchema, record)),
         insert: async (run, tasks) => {
           const record = parse(RunRecordSchema, run);
           const plan = tasks
@@ -823,6 +861,8 @@ export class InMemoryStore {
           ) {
             throw new CaseNotOwnedError();
           }
+          const parent = this.cases.get(record.caseId);
+          if (parent?.status !== "active") throw new CaseNotActiveError();
           if (
             ["queued", "running", "waiting-for-input"].includes(
               record.status,

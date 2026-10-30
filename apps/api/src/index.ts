@@ -1,7 +1,8 @@
 import { getApiEnvironment } from "@evianta/env/server";
-import { connectMongoStore } from "@evianta/store";
 import { pathToFileURL } from "node:url";
 import { createApiApp } from "./app.js";
+import { registerCaseApiRoutes } from "./routes.js";
+import { createApiRuntime } from "./runtime.js";
 
 export async function startApi(): Promise<void> {
   let environment: ReturnType<typeof getApiEnvironment>;
@@ -13,10 +14,12 @@ export async function startApi(): Promise<void> {
     console.error("API configuration invalid", { message });
     throw error;
   }
-  const store = await connectMongoStore();
+  const runtime = await createApiRuntime();
   const { app } = createApiApp({
-    repositories: store.repositories,
+    repositories: runtime.repositories,
     configuration: environment,
+    registerRoutes: (context) =>
+      registerCaseApiRoutes(context, runtime.services),
   });
   const server = app.listen(environment.apiPort, "127.0.0.1");
   server.on("listening", () => {
@@ -25,7 +28,7 @@ export async function startApi(): Promise<void> {
   server.on("error", async (error: Error) => {
     console.error("API server failed", { errorName: error.name });
     try {
-      await store.close();
+      await runtime.close();
     } catch (closeError) {
       const errorName =
         closeError instanceof Error ? closeError.name : "UnknownError";
@@ -40,7 +43,7 @@ export async function startApi(): Promise<void> {
         console.error("API shutdown failed", { errorName: error.name });
         process.exitCode = 1;
       }
-      void store.close().catch((closeError: unknown) => {
+      void runtime.close().catch((closeError: unknown) => {
         const errorName =
           closeError instanceof Error ? closeError.name : "UnknownError";
         console.error("API store shutdown failed", { errorName });

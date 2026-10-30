@@ -1,0 +1,142 @@
+import {
+  MockProvider,
+  MuseProvider,
+  createAdmittedUsageAccounting,
+  createAi,
+  type UsageAccounting,
+} from "@evianta/ai";
+import {
+  PlanRegistry,
+  RunWorker,
+  Orchestrator,
+  createGenericAnalystAgent,
+  createMongoCheckpointerAsync,
+  seedAgentDirectoryAsync,
+  createTrivialReferencePlan,
+} from "@evianta/agents";
+import {
+  getAiEnvironment,
+  getDocumentStoreConfig,
+  getUploadEnvironment,
+  getUsageEnvironment,
+} from "@evianta/env/server";
+import { createDocumentIngestion } from "@evianta/ingestion";
+import { connectMongoStore, createDocumentStore } from "@evianta/store";
+import type { CaseApiServices } from "./routes.js";
+
+export interface ApiRuntime {
+  services: CaseApiServices;
+  repositories: Awaited<ReturnType<typeof connectMongoStore>>["repositories"];
+  worker: RunWorker;
+  close(): Promise<void>;
+}
+
+export async function createApiRuntime(): Promise<ApiRuntime> {
+  const uploads = getUploadEnvironment();
+  const documentStoreConfig = getDocumentStoreConfig();
+  const aiEnvironment = getAiEnvironment();
+  const usage = getUsageEnvironment();
+  const store = await connectMongoStore();
+  try {
+    const storage = createDocumentStore(documentStoreConfig);
+    const checkpointer = await createMongoCheckpointerAsync({
+      client: store.client,
+      dbName: store.databaseName,
+    });
+    await seedAgentDirectoryAsync(store.repositories.agentProfiles);
+
+    const accounting: UsageAccounting =
+      usage.mode === "enforced"
+        ? createAdmittedUsageAccounting({
+            admission: store.repositories.usageAdmission,
+            runAdmission: store.repositories.runAdmission,
+            prices: store.repositories.usagePrices,
+            limits: {
+              userSpendLimitUsd: usage.userSpendLimitUsd,
+              globalSpendLimitUsd: usage.globalSpendLimitUsd,
+              spendPeriodSeconds: usage.spendPeriodSeconds,
+            },
+            runLeaseTtlSeconds: 120,
+          })
+        : {
+            mode: "test",
+            admit: async () => undefined,
+            record: async () => undefined,
+            cancel: async () => undefined,
+          };
+    const provider =
+      aiEnvironment.provider === "muse"
+        ? new MuseProvider({
+            apiKey: aiEnvironment.modelApiKey ?? "",
+            baseUrl: aiEnvironment.museBaseUrl,
+          })
+        : new MockProvider({
+            responses: [
+              JSON.stringify({
+                summary: "Analysis completed using the supplied case record.",
+                findings: [],
+                inputRequired: null,
+              }),
+            ],
+          });
+    const ai = createAi({
+      provider,
+      accounting,
+      models: {
+        provider: aiEnvironment.provider,
+        sparkModel: aiEnvironment.museSparkModel ?? "mock-spark",
+        wonderModel: aiEnvironment.museWonderModel ?? "mock-wonder",
+        maxInputTokens: usage.modelMaxInputTokens,
+        maxOutputTokens: usage.modelMaxOutputTokens,
+      },
+    });
+    const plans = new PlanRegistry()
+      .register(createTrivialReferencePlan("data-analysis"))
+      .register(createTrivialReferencePlan("tax-notice"))
+      .register(createTrivialReferencePlan("msme-payment"));
+    const orchestrator = new Orchestrator({
+      repositories: store.repositories,
+      ai,
+      plans,
+      specialists: [createGenericAnalystAgent()],
+      checkpointer,
+      userRunLimit: usage.userMaxConcurrentRuns,
+      globalRunLimit: usage.globalMaxConcurrentRuns,
+      leaseTtlSeconds: 120,
+    });
+    const ingestion = createDocumentIngestion({
+      documents: store.repositories.documents,
+      extractions: store.repositories.extractions,
+      storage,
+      ocr: null,
+      options: {
+        limits: {
+          maxBytes: uploads.uploadMaxBytes,
+          maxPages: uploads.documentMaxPages,
+        },
+      },
+    });
+    const services: CaseApiServices = {
+      repositories: store.repositories,
+      storage,
+      orchestrator,
+      usageAdmin: store.repositories.usageAdmin,
+      uploads,
+      ingestion,
+    };
+    const worker = new RunWorker({
+      orchestrator,
+      runs: store.repositories.runs,
+    });
+
+    return {
+      services,
+      repositories: store.repositories,
+      worker,
+      close: () => store.close(),
+    };
+  } catch (error) {
+    await store.close();
+    throw error;
+  }
+}

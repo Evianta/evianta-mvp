@@ -269,6 +269,7 @@ export const CaseSchema = z
     isSample: z.boolean(),
     synthetic: z.boolean(),
     sourceCaseId: IdSchema.nullable(),
+    deletionRequestedAt: TimestampSchema.nullable().optional(),
     status: CaseStatusSchema,
     usage: UsageSummarySchema,
     createdAt: TimestampSchema,

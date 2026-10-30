@@ -18,6 +18,12 @@ export class CaseNotOwnedError extends StoreError {
   }
 }
 
+export class CaseNotActiveError extends StoreError {
+  constructor() {
+    super("The case is not accepting runs", "case-not-active");
+  }
+}
+
 export class InvalidCursorError extends StoreError {
   constructor() {
     super("The case pagination cursor is invalid", "invalid-cursor");

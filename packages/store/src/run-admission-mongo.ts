@@ -1,5 +1,4 @@
 import {
-  CaseSchema,
   RunRecordSchema,
   type RunAdmissionLease,
   type RunAdmissionPort,
@@ -13,7 +12,7 @@ import {
   type MongoClient,
 } from "mongodb";
 import { z } from "zod";
-import { StoreError } from "./errors.js";
+import { CaseNotActiveError, StoreError } from "./errors.js";
 
 type RunLock = {
   _id: string;
@@ -152,21 +151,17 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
     };
     await this.reapExpired(request.at);
     return this.withTransaction(async (session) => {
-      const parent = await this.cases.findOne(
+      const fencedCase = await this.cases.updateOne(
         {
           _id: request.caseId,
           ownerId: request.ownerId,
           isSample: false,
-          status: { $ne: "deleted" },
+          status: "active",
         },
+        { $inc: { runAdmissionFence: 1 } },
         { session },
       );
-      if (!parent || !CaseSchema.safeParse(withoutId(parent)).success) {
-        throw new StoreError(
-          "The case does not exist in the requested owner scope",
-          "case-not-owned",
-        );
-      }
+      if (fencedCase.matchedCount !== 1) throw new CaseNotActiveError();
       const runDocument = await this.runs.findOne(
         {
           _id: request.runId,
@@ -495,21 +490,17 @@ export class MongoRunAdmissionRepository implements RunAdmissionPort {
           "stale-run-admission",
         );
       }
-      const parent = await this.cases.findOne(
+      const fencedCase = await this.cases.updateOne(
         {
           _id: request.caseId,
           ownerId: request.ownerId,
           isSample: false,
-          status: { $ne: "deleted" },
+          status: "active",
         },
+        { $inc: { runAdmissionFence: 1 } },
         { session },
       );
-      if (!parent || !CaseSchema.safeParse(withoutId(parent)).success) {
-        throw new StoreError(
-          "The case does not exist in the requested owner scope",
-          "case-not-owned",
-        );
-      }
+      if (fencedCase.matchedCount !== 1) throw new CaseNotActiveError();
       const runDocument = await this.runs.findOne(
         {
           _id: request.runId,
