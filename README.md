@@ -98,7 +98,7 @@ and up to 8 KB of CSV header text to detect one of the three supported task type
 Unclear or conflicting intent asks you to choose, without changing your message
 or files and without creating a case. No model or upload is used for detection.
 PDF/Excel contents are not read for classification; ambiguous filenames/messages
-need a choice. Old `/cases/new` links redirect to Start and preserve sample origin.
+need a choice. Sample-origin entry uses Start at `/?source=<sample-id>`.
 Enter submits, Shift+Enter adds a line, and IME composition does not submit.
 Starting authorizes private case creation, upload/extraction and execution under
 existing model limits. File limits and enabled workflows come from the authenticated

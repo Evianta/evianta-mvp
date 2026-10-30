@@ -309,11 +309,11 @@ test("clear tax and MSME messages are detected but cannot start unavailable work
   expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
 });
 
-test("Start is the only intake surface and legacy links preserve sample origin through redirects", async ({
+test("Start is the only intake surface and accepts sample origin directly", async ({
   page,
 }) => {
   const calls = await setup(page);
-  await page.goto("/cases/new");
+  await page.goto("/");
   await expect(page).toHaveURL("/");
   await expect(
     page
@@ -340,7 +340,7 @@ test("Start is the only intake surface and legacy links preserve sample origin t
       ),
     ),
   ).toBe(true);
-  await page.goto("/cases/new?source=sample-sales-quarter");
+  await page.goto("/?source=sample-sales-quarter");
   await expect(page).toHaveURL(/\/\?source=sample-sales-quarter/);
   await expect(
     page.getByText("Copying a synthetic workflow", { exact: true }),
