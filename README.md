@@ -32,7 +32,7 @@ cloud services or model providers.
 | `packages/env`       | Server-side environment and storage configuration validation          |
 | `packages/store`     | MongoDB repositories and private document storage adapters            |
 | `packages/ai`        | Muse/mock provider adapters, structured output and usage boundary     |
-| `packages/agents`    | Agent boundary; orchestration comes later                             |
+| `packages/agents`    | LangGraph planning, specialist execution, review and run recovery     |
 | `packages/ingestion` | Document parsing, text-layer and admitted OCR extraction with caching |
 | `apps/api`           | Express API, access-key authentication and admin CLI                  |
 | `apps/web`           | Web application boundary; UI features come in the web work pack       |
@@ -75,6 +75,26 @@ until the provider's image usage can be bounded for spending admission. Scanned
 documents therefore remain `partial` with `ocr-unsupported` under Muse; mock
 OCR and deterministic parsing are available. Do not remove the spending guard
 to enable OCR.
+
+Orchestration publishes each full task plan atomically, including adapted
+instructions, and copies retry runs with their tasks in one transaction.
+Findings, evidence and deliverable sections are committed under the run's
+fencing token. Cancellation and terminal status are resolved together when
+admission is released; cancelling a waiting run needs no execution slot.
+Workers recover abandoned cancellations and replay pending terminal events.
+Recovery rejects changed plan versions, preserves spend-limit stops, and does
+not repeat a paid coordinator call whose result was lost. Worker polling advances
+past owners at capacity so later eligible runs can start.
+
+Human-input rounds have separate question IDs and durable consumed keys.
+Answers accumulate across rounds. Resumed calls count as new attempts and retain
+their accepted input through a worker restart, including after output correction.
+Interrupted admitted attempts remain unknown-cost exposure.
+Case usage includes the complete case ledger, not the administrator's bounded
+query page, and refreshes are fenced without replacing other case fields.
+Specialist document slices include bounded table text as well as PDF pages and
+share the configured input budget with the rest of the request. Reviewers receive
+the persisted task instructions.
 
 ## Environment and generated files
 

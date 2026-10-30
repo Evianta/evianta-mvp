@@ -242,6 +242,7 @@ export interface RunStructuredResult<O> {
 }
 
 export interface AiClient {
+  inputTokenLimit(tier: ModelTier): number;
   runStructured<I, O>(
     request: RunStructuredRequest<I, O>,
   ): Promise<RunStructuredResult<O>>;
@@ -385,7 +386,7 @@ function validateImages(images: readonly ImageInput[] | undefined): void {
   }
 }
 
-function inputTokenAllowance(input: {
+export function inputTokenAllowance(input: {
   system: string;
   input: unknown;
   schema?: Record<string, unknown>;
@@ -772,6 +773,8 @@ export function createAi(options: AiClientOptions): AiClient {
   }
 
   return {
+    inputTokenLimit: (tier) =>
+      modelForTier(tier, options.models).maxInputTokens,
     runStructured,
     streamText,
     extractMultimodal: (request) =>

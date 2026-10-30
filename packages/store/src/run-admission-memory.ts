@@ -337,34 +337,47 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
     };
   }
 
-  async release(request: {
-    ownerId: string;
-    caseId: string;
-    runId: string;
-    leaseId: string | null;
-    fencingToken: number;
-    at: string;
-  }): Promise<boolean> {
+  async release(
+    request: Parameters<RunAdmissionPort["release"]>[0],
+  ): Promise<boolean> {
     const id = lockId(request.ownerId, request.caseId);
     const lock = this.locks.get(id);
-    if (
-      !lock ||
-      lock.runId !== request.runId ||
-      lock.fencingToken !== request.fencingToken ||
-      (lock.state === "active" && lock.leaseId !== request.leaseId) ||
-      (lock.state === "waiting-for-input" && request.leaseId !== null) ||
-      lock.state === "released"
-    ) {
-      return false;
-    }
     const run = this.findOwnedRun(
       request.runId,
       request.caseId,
       request.ownerId,
     );
+    const idleTerminal =
+      request.terminal &&
+      run?.leaseId === null &&
+      request.leaseId === null &&
+      (!lock || lock.state === "released");
+    if (
+      request.terminal &&
+      ["queued", "running", "waiting-for-input"].includes(
+        request.terminal.status,
+      )
+    ) {
+      throw new StoreError(
+        "Finalization requires a terminal status",
+        "invalid-run-admission",
+      );
+    }
+    if (
+      !idleTerminal &&
+      (!lock ||
+        lock.runId !== request.runId ||
+        lock.fencingToken !== request.fencingToken ||
+        (lock.state === "active" && lock.leaseId !== request.leaseId) ||
+        (lock.state === "waiting-for-input" && request.leaseId !== null) ||
+        lock.state === "released")
+    ) {
+      return false;
+    }
     if (
       !run ||
       run.fencingToken !== request.fencingToken ||
+      !["queued", "running", "waiting-for-input"].includes(run.status) ||
       !this.updateRun(
         request.runId,
         request.caseId,
@@ -375,21 +388,36 @@ export class InMemoryRunAdmissionRepository implements RunAdmissionPort {
           leaseExpiresAt: null,
           fencingToken: run.fencingToken + 1,
           updatedAt: request.at,
+          ...(request.terminal
+            ? {
+                status: run.cancellationRequested
+                  ? "cancelled"
+                  : request.terminal.status,
+                usage: request.terminal.usage,
+                inputRequired: false,
+                terminalEvent: {
+                  pending: true,
+                  reason: request.terminal.reason ?? null,
+                  error: request.terminal.error ?? null,
+                },
+              }
+            : {}),
         },
       )
     ) {
       return false;
     }
     const fencingToken = run.fencingToken + 1;
-    if (lock.state === "active") this.decrement(request.ownerId);
-    this.locks.set(id, {
-      ...lock,
-      state: "released",
-      leaseId: null,
-      fencingToken,
-      leaseExpiresAt: null,
-      updatedAt: request.at,
-    });
+    if (lock?.state === "active") this.decrement(request.ownerId);
+    if (lock?.runId === request.runId)
+      this.locks.set(id, {
+        ...lock,
+        state: "released",
+        leaseId: null,
+        fencingToken,
+        leaseExpiresAt: null,
+        updatedAt: request.at,
+      });
     return true;
   }
 

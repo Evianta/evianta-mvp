@@ -806,6 +806,38 @@ export class MongoUsageRepository
     );
   }
 
+  async listForCase(
+    ownerId: string,
+    caseId: string,
+  ): Promise<UsageLedgerEntry[]> {
+    const records = await this.ledger.find({ ownerId, caseId }).toArray();
+    return records.map((record) => decode(UsageLedgerEntrySchema, record)!);
+  }
+
+  async markInterrupted(
+    ownerId: string,
+    caseId: string,
+    runId: string,
+    taskId: string | null,
+    at: string,
+  ): Promise<void> {
+    const timestamp = canonicalTimestamp(at);
+    await this.ledger.updateMany(
+      { ownerId, caseId, runId, taskId, outcome: "admitted" },
+      {
+        $set: {
+          outcome: "unknown",
+          errorCode: "attempt-interrupted",
+          units: unknownUnits,
+          costStatus: "unknown",
+          costUsd: null,
+          updatedAt: timestamp,
+          settledAt: timestamp,
+        },
+      },
+    );
+  }
+
   async listForRun(
     ownerId: string,
     caseId: string,

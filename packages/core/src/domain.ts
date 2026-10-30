@@ -361,6 +361,10 @@ export const TaskSchema = z.object({
   runId: IdSchema,
   role: IdSchema,
   dependencyIds: z.array(IdSchema),
+  instructions: z.string().optional(),
+  resumeKeys: z.array(z.string()).optional(),
+  resumeInput: z.record(z.string(), z.unknown()).optional(),
+  usageEntryCount: NonNegativeIntegerSchema.optional(),
   status: TaskStatusSchema,
   attemptCount: NonNegativeIntegerSchema,
   lastError: SanitizedErrorSchema.nullable(),
@@ -830,6 +834,13 @@ export const RunRecordSchema = z.object({
   fencingToken: NonNegativeIntegerSchema,
   leaseExpiresAt: TimestampSchema.nullable(),
   cancellationRequested: z.boolean(),
+  terminalEvent: z
+    .object({
+      pending: z.boolean(),
+      reason: z.string().nullable(),
+      error: SanitizedErrorSchema.nullable(),
+    })
+    .optional(),
   inputRequired: z.boolean(),
   usage: UsageSummarySchema,
   createdAt: TimestampSchema,

@@ -208,6 +208,106 @@ function repositoryContract(
       ).toBe(false);
     });
 
+    it("refreshes only case usage under the current run generation", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      await repositories.usagePrices.insert(makeUsagePrice());
+      const request = {
+        ownerId: "owner-1",
+        caseId: "case-1",
+        runId: "run-1",
+        leaseId: "usage-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:01:00.000Z",
+        userLimit: 2,
+        globalLimit: 2,
+      };
+      const first = await repositories.runAdmission.acquire(request);
+      await repositories.usageAdmission.reserve({
+        ...makeReservationRequest("usage-refresh", 0.1),
+        leaseId: first.leaseId,
+        fencingToken: first.fencingToken,
+      });
+      const second = await repositories.runAdmission.acquire({
+        ...request,
+        leaseId: "recovery-lease",
+        at: "2026-01-15T00:02:00.000Z",
+        expiresAt: "2026-01-15T00:03:00.000Z",
+      });
+      const current = (await repositories.cases.findOwnedById(
+        "case-1",
+        "owner-1",
+      ))!;
+      await repositories.cases.replaceOwned(
+        { ...current, title: "Updated by user" },
+        "owner-1",
+      );
+      expect(
+        await repositories.cases.refreshUsage(ownerScope, {
+          runId: "run-1",
+          fencingToken: first.fencingToken,
+          at: request.at,
+        }),
+      ).toBe(false);
+      expect(
+        await repositories.cases.refreshUsage(ownerScope, {
+          runId: "run-1",
+          fencingToken: second.fencingToken,
+          at: "2026-01-15T00:02:00.000Z",
+        }),
+      ).toBe(true);
+      expect(
+        await repositories.cases.findOwnedById("case-1", "owner-1"),
+      ).toMatchObject({
+        title: "Updated by user",
+        usage: { costStatus: "unknown", costUsd: null, reservedUsd: 0.100002 },
+      });
+      expect(
+        await repositories.cases.refreshUsage(
+          {
+            ...ownerScope,
+            ownerId: "owner-2",
+          },
+          {
+            runId: "run-1",
+            fencingToken: second.fencingToken,
+            at: timestamp,
+          },
+        ),
+      ).toBe(false);
+    });
+
+    it("paginates claimable runs by timestamp instant and ID without omissions", async () => {
+      for (const [id, createdAt] of [
+        ["A", "2026-01-15T01:00:00+02:00"],
+        ["a", "2026-01-14T23:00:00Z"],
+        ["B", "2026-01-15T00:00:00Z"],
+      ]) {
+        await repositories.cases.insert(makeCase(`case-${id}`, "owner-1"));
+        await repositories.runs.insert({
+          ...makeRun(id, `case-${id}`, "owner-1"),
+          createdAt,
+          leaseExpiresAt: null,
+        });
+      }
+      const first = await repositories.runs.listClaimable(timestamp, 1);
+      const second = await repositories.runs.listClaimable(
+        timestamp,
+        1,
+        first[0],
+      );
+      const third = await repositories.runs.listClaimable(
+        timestamp,
+        1,
+        second[0],
+      );
+      expect([...first, ...second, ...third].map((run) => run.id)).toEqual([
+        "A",
+        "a",
+        "B",
+      ]);
+    });
+
     it("compares session expiry timestamps as instants", async () => {
       await repositories.sessions.insert({
         id: "session-expired",
@@ -460,6 +560,50 @@ function repositoryContract(
           caseId: "case-2",
         }),
       ).toBeNull();
+    });
+
+    it("does not restore document state after its source has been replaced", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const document = {
+        id: "document-source",
+        caseId: "case-1",
+        name: "source.csv",
+        mimeType: "text/csv",
+        sizeBytes: 16,
+        state: "uploaded" as const,
+        uploadedAt: timestamp,
+        processedAt: null,
+        objectKey: "original-object",
+        contentHash: "original-hash",
+      };
+      await repositories.documents.insert(document, ownerScope);
+
+      const replacement = {
+        ...document,
+        objectKey: "replacement-object",
+        contentHash: "replacement-hash",
+      };
+      expect(
+        await repositories.documents.replaceOwned(replacement, ownerScope),
+      ).toBe(true);
+
+      expect(
+        await repositories.documents.replaceOwned(
+          { ...document, state: "processing" },
+          ownerScope,
+          {
+            objectKey: document.objectKey,
+            contentHash: document.contentHash,
+          },
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.documents.findOwned(document.id, ownerScope),
+      ).toMatchObject({
+        objectKey: "replacement-object",
+        contentHash: "replacement-hash",
+        state: "uploaded",
+      });
     });
 
     it("finds cached extractions for encoded document IDs", async () => {
@@ -963,6 +1107,280 @@ function repositoryContract(
       expect(
         await repositories.events.listAfter("case-1", 0, ownerScope),
       ).toHaveLength(1);
+    });
+
+    it("replaces tasks only within their run and current lease generation", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const task = {
+        id: "task-1",
+        caseId: "case-1",
+        runId: "run-1",
+        role: "analyst",
+        dependencyIds: [],
+        status: "pending" as const,
+        attemptCount: 0,
+        lastError: null,
+        usage: usageSummary,
+      };
+      await repositories.tasks.insert(task, ownerScope);
+      const running = { ...task, status: "running" as const, attemptCount: 1 };
+
+      expect(
+        await repositories.tasks.replaceOwned(running, ownerScope, {
+          fencingToken: 7,
+        }),
+      ).toBe(false);
+      expect(
+        await repositories.tasks.replaceOwned(running, {
+          ownerId: "owner-2",
+          caseId: "case-1",
+        }),
+      ).toBe(false);
+      expect(
+        await repositories.tasks.replaceOwned(
+          { ...running, id: "missing" },
+          ownerScope,
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.tasks.replaceOwned(running, ownerScope, {
+          fencingToken: 0,
+        }),
+      ).toBe(true);
+      expect(
+        await repositories.tasks.listForRun("run-1", ownerScope),
+      ).toMatchObject([{ id: "task-1", status: "running", attemptCount: 1 }]);
+    });
+
+    it("publishes retry runs and complete plans atomically", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const run = makeRun("run-atomic", "case-1", "owner-1");
+      const task = {
+        id: "run-atomic:a",
+        caseId: "case-1",
+        runId: run.id,
+        role: "analyst",
+        instructions: "Keep these adapted instructions",
+        dependencyIds: [],
+        status: "pending" as const,
+        attemptCount: 0,
+        lastError: null,
+        usage: usageSummary,
+      };
+      await expect(
+        repositories.runs.insert(run, [task, { ...task }]),
+      ).rejects.toThrow();
+      expect(
+        await repositories.runs.findOwnedById(run.id, "owner-1"),
+      ).toBeNull();
+      await repositories.runs.insert(run, [task]);
+      expect(
+        await repositories.tasks.listForRun(run.id, ownerScope),
+      ).toMatchObject([{ id: task.id, instructions: task.instructions }]);
+      const next = { ...task, id: "run-atomic:b" };
+      await expect(
+        repositories.tasks.insertPlan([next, task], ownerScope, {
+          fencingToken: 0,
+        }),
+      ).rejects.toThrow();
+      expect(
+        await repositories.tasks.listForRun(run.id, ownerScope),
+      ).toHaveLength(1);
+      await expect(
+        repositories.tasks.insertPlan([next], ownerScope, { fencingToken: 5 }),
+      ).rejects.toMatchObject({ code: "stale-fencing-token" });
+      await repositories.tasks.insertPlan([next], ownerScope, {
+        fencingToken: 0,
+      });
+      expect(
+        await repositories.tasks.listForRun(run.id, ownerScope),
+      ).toHaveLength(2);
+    });
+
+    it("fences the entire result commit and writes it idempotently", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      const run = makeRun("run-1", "case-1", "owner-1");
+      const task = {
+        id: "task-atomic",
+        caseId: "case-1",
+        runId: run.id,
+        role: "analyst",
+        dependencyIds: [],
+        status: "running" as const,
+        attemptCount: 1,
+        lastError: null,
+        usage: usageSummary,
+      };
+      await repositories.runs.insert(run, [task]);
+      const finding = {
+        id: "atomic-finding",
+        caseId: "case-1",
+        title: "Test",
+        description: "Test",
+        severity: "low" as const,
+        confidence: 1,
+        evidenceIds: [],
+        assumptions: [],
+        openQuestions: [],
+        createdAt: timestamp,
+      };
+      const result = {
+        evidence: [],
+        findings: [finding],
+        deliverable: makeDeliverable("atomic-deliverable", 1),
+      };
+      expect(
+        await repositories.tasks.commitResult(task, result, ownerScope, {
+          fencingToken: 5,
+        }),
+      ).toBe(false);
+      expect(await repositories.findings.listForCase(ownerScope)).toEqual([]);
+      expect(
+        await repositories.deliverables.findOwnedById(
+          "atomic-deliverable",
+          ownerScope,
+        ),
+      ).toBeNull();
+      await expect(
+        repositories.tasks.commitResult(
+          task,
+          {
+            ...result,
+            findings: [
+              finding,
+              { ...finding, id: "wrong-scope", caseId: "case-2" },
+            ],
+          },
+          ownerScope,
+          { fencingToken: 0 },
+        ),
+      ).rejects.toMatchObject({ code: "case-not-owned" });
+      expect(await repositories.findings.listForCase(ownerScope)).toEqual([]);
+      expect(
+        await repositories.tasks.commitResult(task, result, ownerScope, {
+          fencingToken: 0,
+        }),
+      ).toBe(true);
+      expect(await repositories.findings.listForCase(ownerScope)).toHaveLength(
+        1,
+      );
+      expect(
+        await repositories.tasks.commitResult(task, result, ownerScope, {
+          fencingToken: 0,
+        }),
+      ).toBe(true);
+      expect(await repositories.findings.listForCase(ownerScope)).toHaveLength(
+        1,
+      );
+    });
+
+    it("atomically honors cancellation during terminal release", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const lease = await repositories.runAdmission.acquire({
+        ...ownerScope,
+        runId: "run-1",
+        leaseId: "terminal-lease",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:10:00.000Z",
+        userLimit: 1,
+        globalLimit: 1,
+      });
+      const current = (await repositories.runs.findOwnedById(
+        "run-1",
+        "owner-1",
+      ))!;
+      expect(
+        await repositories.runs.updateOwned(
+          { ...current, cancellationRequested: true },
+          "owner-1",
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.runAdmission.release({
+          ...ownerScope,
+          runId: "run-1",
+          ...lease,
+          at: timestamp,
+          terminal: { status: "completed", usage: usageSummary },
+        }),
+      ).toBe(true);
+      expect(
+        await repositories.runs.findOwnedById("run-1", "owner-1"),
+      ).toMatchObject({
+        status: "cancelled",
+        leaseId: null,
+        terminalEvent: { pending: true },
+      });
+      expect(
+        (await repositories.runs.listClaimable(timestamp)).map((run) => run.id),
+      ).toEqual(["run-1"]);
+      await repositories.runs.insert({
+        ...makeRun("run-2", "case-1", "owner-1"),
+        status: "queued",
+      });
+    });
+
+    it("lists queued and abandoned runs as claimable", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.cases.insert(makeCase("case-2", "owner-1"));
+      await repositories.cases.insert(makeCase("case-3", "owner-1"));
+      await repositories.runs.insert({
+        ...makeRun("run-queued", "case-1", "owner-1"),
+        status: "queued",
+      });
+      await repositories.runs.insert({
+        ...makeRun("run-done", "case-2", "owner-1"),
+        status: "completed",
+      });
+      await repositories.runs.insert({
+        ...makeRun("run-leased", "case-3", "owner-1"),
+        status: "queued",
+        createdAt: "2026-01-16T00:00:00.000Z",
+      });
+      await repositories.runAdmission.acquire({
+        ownerId: "owner-1",
+        caseId: "case-3",
+        runId: "run-leased",
+        leaseId: "lease-1",
+        at: timestamp,
+        expiresAt: "2026-01-15T00:10:00.000Z",
+        userLimit: 5,
+        globalLimit: 5,
+      });
+
+      expect(
+        (await repositories.runs.listClaimable(timestamp)).map((run) => run.id),
+      ).toEqual(["run-queued"]);
+      expect(
+        (await repositories.runs.listClaimable("2026-01-15T00:20:00.000Z")).map(
+          (run) => run.id,
+        ),
+      ).toEqual(["run-queued", "run-leased"]);
+      const live = (await repositories.runs.findOwnedById(
+        "run-leased",
+        "owner-1",
+      ))!;
+      expect(
+        await repositories.runs.updateOwned(
+          { ...live, cancellationRequested: true },
+          "owner-1",
+        ),
+      ).toBe(true);
+      expect(
+        (await repositories.runs.listClaimable(timestamp)).map((run) => run.id),
+      ).toEqual(["run-queued"]);
+      expect(
+        (
+          await repositories.runs.listClaimable("2026-01-15T00:20:00.000Z", 1)
+        ).map((run) => run.id),
+      ).toEqual(["run-queued"]);
+      expect(
+        (await repositories.runs.listClaimable("2026-01-15T00:20:00.000Z")).map(
+          (run) => run.id,
+        ),
+      ).toEqual(["run-queued", "run-leased"]);
     });
 
     it("uses distinct cache identities for null and the string none", async () => {
@@ -1846,6 +2264,12 @@ describe("in-memory repositories", () => {
     expect(
       await repositories.usage.listForRun("run-1", ownerScope),
     ).toHaveLength(5_001);
+    expect(
+      await repositories.usageLedger.listForCase("owner-1", "case-1"),
+    ).toHaveLength(5_001);
+    expect(
+      await repositories.usageLedger.listForCase("owner-2", "case-1"),
+    ).toEqual([]);
   });
 });
 
@@ -2423,6 +2847,12 @@ describe("MongoDB repositories", () => {
 
       expect(
         await harness.store.repositories.usage.listForRun("run-1", ownerScope),
+      ).toHaveLength(5_002);
+      expect(
+        await harness.store.repositories.usageLedger.listForCase(
+          "owner-1",
+          "case-1",
+        ),
       ).toHaveLength(5_002);
     } finally {
       await harness.client.db(harness.dbName).dropDatabase();
