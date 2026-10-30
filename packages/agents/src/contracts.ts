@@ -1,4 +1,9 @@
-import { UseCaseSchema } from "@evianta/core";
+import {
+  DataAnalysisDashboardSchema,
+  DataAnalysisReportSchema,
+  EvidenceLocationSchema,
+  UseCaseSchema,
+} from "@evianta/core";
 import { z } from "zod";
 
 const SeveritySchema = z.enum(["high", "medium", "low"]);
@@ -17,6 +22,7 @@ export const EvidenceDraftSchema = z.object({
   confidence: z.enum(["high", "medium", "low", "unassessed"]),
   documentId: z.string().nullable(),
   page: z.number().int().positive().nullable(),
+  location: EvidenceLocationSchema.optional(),
   textQuote: z.string().nullable(),
   url: z.string().nullable(),
   title: z.string().nullable(),
@@ -41,6 +47,8 @@ export type FindingDraft = z.infer<typeof FindingDraftSchema>;
 export const SpecialistOutputSchema = z.object({
   summary: z.string(),
   findings: z.array(FindingDraftSchema),
+  report: DataAnalysisReportSchema.optional(),
+  dashboard: DataAnalysisDashboardSchema.optional(),
   inputRequired: z
     .object({
       questions: z.array(

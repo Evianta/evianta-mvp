@@ -1,6 +1,7 @@
 import type { AgentProfile, AgentProfileRepository } from "@evianta/core";
 import { AgentProfileSetSchema } from "@evianta/core";
 import { defineStructuredAgent, type Agent } from "./agent.js";
+import { businessDataAnalystProfile } from "./data-analysis.js";
 import {
   PlanningInputSchema,
   PlanningOutputSchema,
@@ -149,6 +150,7 @@ export async function seedAgentDirectoryAsync(
   repository: Pick<AgentProfileRepository, "upsert">,
   agents: readonly AgentDirectoryEntry[] = [
     { profile: coordinatorProfile },
+    { profile: businessDataAnalystProfile },
     { profile: genericAnalystProfile },
     { profile: reviewerProfile },
   ],

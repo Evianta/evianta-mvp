@@ -1,6 +1,7 @@
 import {
   AgentProfileSetSchema,
   CaseSchema,
+  CreateRunRequestSchema,
   DocumentMetadataDtoSchema,
   RunDtoSchema,
   RunEventSchema,
@@ -563,7 +564,11 @@ function registerStreamRoute(
         typeof request.query.runId === "string" ? request.query.runId : null;
       const lastEventId = request.get("last-event-id");
       const queryCursor =
-        typeof request.query.cursor === "string" ? request.query.cursor : null;
+        typeof request.query.cursor === "string"
+          ? request.query.cursor
+          : typeof request.query.afterSequence === "string"
+            ? request.query.afterSequence
+            : null;
       const rawCursor = lastEventId ?? queryCursor ?? "0";
       if (
         !principal ||
@@ -924,6 +929,29 @@ export function registerCaseApiRoutes(
         findings,
         evidence,
         deliverables: runChildren.flatMap((entry) => entry.deliverables),
+      });
+    },
+  );
+
+  app.get(
+    "/cases/:caseId/runs/latest",
+    authenticate,
+    requireCase(repositories),
+    async (request, response) => {
+      const principal = authContext(request)?.principal;
+      const record = requestCase(request);
+      if (!principal || !record) return;
+      const runs = await repositories.runs.listForCase(
+        record.id,
+        principal.userId,
+      );
+      const latest = runs.reduce<RunRecord | null>(
+        (current, run) =>
+          !current || run.createdAt > current.createdAt ? run : current,
+        null,
+      );
+      response.status(200).json({
+        run: latest ? RunDtoSchema.parse(latest) : null,
       });
     },
   );
@@ -1365,6 +1393,81 @@ export function registerCaseApiRoutes(
       sendRun(response, run);
     },
   );
+
+  app.post("/runs", authenticate, async (request, response) => {
+    const principal = authContext(request)?.principal;
+    const input = parseInput(CreateRunRequestSchema, request.body, response);
+    if (!principal || !input) return;
+    const record = await repositories.cases.findOwnedById(
+      input.caseId,
+      principal.userId,
+    );
+    if (!record) {
+      sendApiError(response, 404, "not-found", "Resource not found");
+      return;
+    }
+    if (record.deletionRequestedAt || record.status !== "active") {
+      sendApiError(
+        response,
+        409,
+        "conflict",
+        "Case is not accepting new runs",
+      );
+      return;
+    }
+    const run = input.priorRunId
+      ? await services.orchestrator.retryFailedAsync({
+          ownerId: principal.userId,
+          caseId: record.id,
+          priorRunId: input.priorRunId,
+        })
+      : await services.orchestrator.createRunAsync({
+          ownerId: principal.userId,
+          caseId: record.id,
+        });
+    sendRun(response, run);
+  });
+
+  app.post("/runs/:runId/retry", authenticate, async (request, response) => {
+    const principal = authContext(request)?.principal;
+    const runId = routeParam(request.params.runId);
+    if (!principal || !runId) return;
+    const prior = await repositories.runs.findOwnedById(runId, principal.userId);
+    if (!prior) {
+      sendApiError(response, 404, "not-found", "Resource not found");
+      return;
+    }
+    const record = await repositories.cases.findOwnedById(
+      prior.caseId,
+      principal.userId,
+    );
+    if (!record || record.status !== "active" || record.deletionRequestedAt) {
+      sendApiError(response, 404, "not-found", "Resource not found");
+      return;
+    }
+    const run = await services.orchestrator.retryFailedAsync({
+      ownerId: principal.userId,
+      caseId: record.id,
+      priorRunId: prior.id,
+    });
+    sendRun(response, run);
+  });
+
+  app.post("/runs/:runId/cancel", authenticate, async (request, response) => {
+    const principal = authContext(request)?.principal;
+    const runId = routeParam(request.params.runId);
+    if (!principal || !runId) return;
+    const existing = await repositories.runs.findOwnedById(runId, principal.userId);
+    if (!existing) {
+      sendApiError(response, 404, "not-found", "Resource not found");
+      return;
+    }
+    const run = await services.orchestrator.cancelRunAsync({
+      ownerId: principal.userId,
+      runId,
+    });
+    response.status(200).json({ run: RunDtoSchema.parse(run) });
+  });
 
   app.post(
     "/cases/:caseId/retry",

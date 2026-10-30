@@ -26,6 +26,7 @@ import {
   createSpecialistAgent,
   genericAnalystProfile,
   type OrchestratorHooks,
+  type SpecialistAgent,
   type OrchestratorRepositories,
   type ReferencePlan,
   type SpecialistOutput,
@@ -82,7 +83,9 @@ export class ScriptedProvider implements ModelProvider {
       ? "coordinator"
       : request.system.startsWith("You independently")
         ? "review"
-        : (input.task as { key: string }).key;
+        : request.system.startsWith("You are a careful business data analyst.")
+          ? "business-data-analyst"
+          : (input.task as { key: string }).key;
     this.calls.push(route);
     this.inputs.set(route, [...(this.inputs.get(route) ?? []), input]);
     this.active += 1;
@@ -295,6 +298,7 @@ export interface HarnessOptions {
   clock?: Clock;
   provider: ScriptedProvider;
   plan: ReferencePlan;
+  specialists?: readonly SpecialistAgent[];
   roles?: string[];
   reviewer?: boolean;
   coordinator?: boolean;
@@ -345,9 +349,11 @@ export function createHarness(options: HarnessOptions) {
     repositories: repositories as OrchestratorRepositories,
     ai,
     plans,
-    specialists: roles.map((role) =>
-      createSpecialistAgent(profileFor(role), `Specialist ${role}`),
-    ),
+    specialists:
+      options.specialists ??
+      roles.map((role) =>
+        createSpecialistAgent(profileFor(role), `Specialist ${role}`),
+      ),
     reviewer: options.reviewer === false ? undefined : createReviewAgent(),
     coordinator: options.coordinator ? createCoordinatorAgent() : undefined,
     checkpointer,

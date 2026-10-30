@@ -1,6 +1,10 @@
 import { syntheticWorkflowFixtures } from "@evianta/core";
 import { InMemoryDocumentStore, createInMemoryStore } from "@evianta/store";
-import { seedAgentDirectoryAsync } from "@evianta/agents";
+import {
+  BUSINESS_DATA_ANALYST_ROLE,
+  createBusinessDataAnalystAgent,
+  seedAgentDirectoryAsync,
+} from "@evianta/agents";
 import { createDocumentIngestion } from "@evianta/ingestion";
 import type { AddressInfo } from "node:net";
 import express from "express";
@@ -164,7 +168,7 @@ describe("case API routes", () => {
     expect(agents.status).toBe(200);
     expect(
       ((await agents.json()) as { agents: unknown[] }).agents,
-    ).toHaveLength(3);
+    ).toHaveLength(4);
 
     const created = await createCase();
     const listed = await fetch(`${baseUrl}/cases`, {
@@ -247,6 +251,7 @@ describe("case API routes", () => {
       state: "ready",
       name: "notes.txt",
     });
+
     const document = uploadBody.documents[0];
     if (!document) throw new Error("Uploaded document was not returned");
 
@@ -289,13 +294,13 @@ describe("case API routes", () => {
     expect(deniedCase.status).toBe(404);
     expect(deniedDocument.status).toBe(404);
 
-    const runResponse = await fetch(`${baseUrl}/cases/${created.case.id}/run`, {
+    const runResponse = await fetch(`${baseUrl}/runs`, {
       method: "POST",
       headers: {
         ...authHeaders(),
         "content-type": "application/json",
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ caseId: created.case.id, input: {} }),
     });
     expect(runResponse.status).toBe(202);
     const { run } = (await runResponse.json()) as {
@@ -310,6 +315,12 @@ describe("case API routes", () => {
     expect(
       await repositories.runs.findOwnedById(run.id, user.id),
     ).toMatchObject({ status: "queued" });
+    const latestRun = await fetch(
+      `${baseUrl}/cases/${created.case.id}/runs/latest`,
+      { headers: authHeaders() },
+    );
+    expect(latestRun.status).toBe(200);
+    expect(await latestRun.json()).toMatchObject({ run: { id: run.id } });
 
     await worker.runOnceAsync();
     const listAfter = repositories.events.listAfter.bind(repositories.events);
@@ -462,6 +473,114 @@ describe("case API routes", () => {
     await expect(protectedDownload.arrayBuffer()).rejects.toThrow();
     expect(authenticationChecks).toBe(2);
     releaseAuthentication?.();
+  });
+
+  it("runs an uploaded sales dataset and persists its report and chart specs", async () => {
+    const analyst = createHarness({
+      repositories,
+      provider: new ScriptedProvider({
+        "business-data-analyst": () => ({
+          interpretation:
+            "Monthly revenue increased through the quarter, led by product B.",
+          insights: [
+            {
+              title: "Revenue increased by period",
+              description:
+                "The grouped values show a rising trend across the supplied months.",
+              severity: "low",
+              assumptions: [],
+              openQuestions: [],
+            },
+          ],
+        }),
+      }),
+      plan: {
+        ...planOf([{ key: "sales-analysis", role: BUSINESS_DATA_ANALYST_ROLE }]),
+        title: "Sales data analysis",
+        format: "dashboard",
+      },
+      specialists: [createBusinessDataAnalystAgent()],
+      reviewer: false,
+    });
+    services.orchestrator = analyst.orchestrator;
+    worker = analyst.worker;
+
+    const created = await createCase();
+    const form = new FormData();
+    form.append(
+      "files",
+      new Blob(
+        [
+          [
+            "month,product,revenue",
+            "Jan,A,100",
+            "Jan,B,150",
+            "Feb,A,120",
+            "Feb,B,180",
+            "Mar,A,200",
+            "Mar,B,250",
+          ].join("\n"),
+        ],
+        { type: "text/csv" },
+      ),
+      "quarterly-sales.csv",
+    );
+    const uploaded = await fetch(
+      `${baseUrl}/cases/${created.case.id}/documents`,
+      { method: "POST", headers: authHeaders(), body: form },
+    );
+    expect(uploaded.status).toBe(201);
+    expect(await uploaded.json()).toMatchObject({
+      documents: [expect.objectContaining({ state: "ready" })],
+    });
+
+    const started = await fetch(`${baseUrl}/runs`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ caseId: created.case.id, input: {} }),
+    });
+    expect(started.status).toBe(202);
+    const { run } = (await started.json()) as { run: { id: string } };
+    await worker.runOnceAsync();
+
+    const details = await fetch(`${baseUrl}/cases/${created.case.id}`, {
+      headers: authHeaders(),
+    });
+    const body = (await details.json()) as {
+      deliverables: Array<{
+        format: string;
+        sections: Array<{
+          content: {
+            report: { metrics: { total: number } };
+            dashboard: { charts: unknown[] };
+          };
+          evidenceIds: string[];
+        }>;
+      }>;
+      evidence: Array<{
+        location: { rowRange?: { start: number; end: number } };
+      }>;
+      runs: Array<{ id: string; status: string }>;
+    };
+
+    expect(body.runs).toContainEqual(
+      expect.objectContaining({ id: run.id, status: "completed" }),
+    );
+    const deliverable = body.deliverables.find(
+      (item) => item.format === "dashboard",
+    );
+    expect(deliverable?.sections[0]?.content.report.metrics.total).toBe(1000);
+    expect(deliverable?.sections[0]?.content.dashboard.charts).toHaveLength(3);
+    expect(
+      body.evidence.some(
+        (item) =>
+          item.location.rowRange?.start === 2 &&
+          item.location.rowRange.end === 7,
+      ),
+    ).toBe(true);
   });
 
   it("requests case deletion without overwriting concurrent usage updates", async () => {

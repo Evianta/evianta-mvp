@@ -1,0 +1,184 @@
+import { syntheticWorkflowFixtures, type RunDto } from "@evianta/core";
+import { expect, test } from "@playwright/test";
+
+const record = {
+  ...syntheticWorkflowFixtures.dataAnalysis.case,
+  id: "private-case",
+  ownerId: "owner-1",
+  isSample: false,
+  synthetic: false,
+};
+
+const completedRun: RunDto = {
+  id: "sales-run",
+  caseId: record.id,
+  planVersion: 1,
+  status: "completed",
+  priorRunId: null,
+  cancellationRequested: false,
+  inputRequired: false,
+  usage: record.usage,
+  createdAt: record.createdAt,
+  updatedAt: record.updatedAt,
+};
+
+const workspace = {
+  case: record,
+  documents: [
+    {
+      id: "sales-document",
+      caseId: record.id,
+      name: "quarterly-sales.csv",
+      mimeType: "text/csv",
+      sizeBytes: 120,
+      state: "ready" as const,
+      uploadedAt: record.createdAt,
+      processedAt: record.updatedAt,
+    },
+  ],
+  findings: [],
+  evidence: [],
+  deliverables: [
+    {
+      id: "sales-deliverable",
+      caseId: record.id,
+      runId: completedRun.id,
+      version: 1,
+      format: "dashboard" as const,
+      title: "Sales data analysis",
+      summary: "Quarterly sales summary",
+      sections: [
+        {
+          id: "sales-section",
+          title: "Sales analysis",
+          kind: "text" as const,
+          content: {
+            taskId: "sales-task",
+            summary: "Revenue increased through the quarter.",
+            findings: [],
+            report: {
+              summary:
+                "6 row(s) analyzed. Revenue total: 1,000; average: 166.67.",
+              interpretation:
+                "Monthly revenue increased through the quarter, led by product B.",
+              metrics: {
+                rowCount: 6,
+                valueColumn: "revenue",
+                total: 1000,
+                average: 1000 / 6,
+                periodColumn: "month",
+                byPeriod: [
+                  { label: "Jan", value: 250, growthPercent: null },
+                  { label: "Feb", value: 300, growthPercent: 20 },
+                  { label: "Mar", value: 450, growthPercent: 50 },
+                ],
+                segmentColumn: "product",
+                bySegment: [
+                  { label: "B", value: 580 },
+                  { label: "A", value: 420 },
+                ],
+                topSegment: { label: "B", value: 580 },
+              },
+              dataQuality: [],
+              assumptions: [],
+              openQuestions: [],
+            },
+            dashboard: {
+              charts: [
+                {
+                  id: "sales-by-period",
+                  title: "Revenue by month",
+                  type: "bar",
+                  categoryKey: "period",
+                  valueKey: "revenue",
+                  data: [
+                    { period: "Jan", revenue: 250 },
+                    { period: "Feb", revenue: 300 },
+                    { period: "Mar", revenue: 450 },
+                  ],
+                  source: {
+                    documentId: "sales-document",
+                    tableId: "sales-table",
+                    sheet: "Sales",
+                    cellRange: "A1:C7",
+                    rowRange: { start: 2, end: 7 },
+                  },
+                },
+              ],
+            },
+          },
+          reviewerContent: null,
+          reviewerId: null,
+          reviewedAt: null,
+          producingRole: "business-data-analyst",
+          routingTier: "mid" as const,
+          provider: "mock",
+          model: "mock-spark",
+          findingIds: [],
+          evidenceIds: [],
+          reviewStatus: "pending" as const,
+          reviewComment: null,
+        },
+      ],
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    },
+  ],
+};
+
+test("reopens a completed analysis and renders its report and charts", async ({
+  page,
+}) => {
+  await page.route("**/auth/token", (route) =>
+    route.fulfill({
+      json: {
+        accessToken: "session-token",
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      },
+    }),
+  );
+  await page.route("**/cases/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (
+      route.request().headers().accept !== "application/json" &&
+      !url.pathname.endsWith("/stream")
+    ) {
+      await route.continue();
+      return;
+    }
+    if (url.pathname.endsWith("/runs/latest")) {
+      await route.fulfill({ json: { run: completedRun } });
+      return;
+    }
+    if (url.pathname.endsWith("/stream")) {
+      await route.fulfill({
+        contentType: "text/event-stream",
+        body: `id: 1\nevent: run-completed\ndata: ${JSON.stringify({
+          id: "sales-event",
+          runId: completedRun.id,
+          caseId: record.id,
+          sequence: 1,
+          occurredAt: record.updatedAt,
+          payload: {
+            type: "run-completed",
+            deliverableIds: ["sales-deliverable"],
+          },
+        })}\n\n`,
+      });
+      return;
+    }
+    await route.fulfill({ json: workspace });
+  });
+
+  await page.goto(`/cases/${record.id}`);
+  await page.getByRole("button", { name: "Enter access key" }).click();
+  await page.getByLabel("Access key").fill("test-key");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
+  await expect(page.getByText("Revenue total: 1,000")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+  await expect(page.getByText("Revenue by month")).toBeVisible();
+  await expect(page.getByText("quarterly-sales.csv")).toBeVisible();
+  await expect(page.getByText("rows 2–7")).toBeVisible();
+});

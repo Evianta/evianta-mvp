@@ -9,6 +9,8 @@ import {
   PlanRegistry,
   RunWorker,
   Orchestrator,
+  BUSINESS_DATA_ANALYST_ROLE,
+  createBusinessDataAnalystAgent,
   createGenericAnalystAgent,
   createMongoCheckpointerAsync,
   seedAgentDirectoryAsync,
@@ -76,6 +78,9 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
                 summary: "Analysis completed using the supplied case record.",
                 findings: [],
                 inputRequired: null,
+                interpretation:
+                  "No significant trend was identified in the supplied records.",
+                insights: [],
               }),
             ],
           });
@@ -90,15 +95,32 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
         maxOutputTokens: usage.modelMaxOutputTokens,
       },
     });
+    const dataAnalysisPlan = createTrivialReferencePlan("data-analysis");
+    dataAnalysisPlan.title = "Sales data analysis";
+    dataAnalysisPlan.format = "dashboard";
+    dataAnalysisPlan.tasks = [
+      {
+        key: "sales-analysis",
+        role: BUSINESS_DATA_ANALYST_ROLE,
+        title: "Sales analysis",
+        dependsOn: [],
+        required: true,
+        instructions:
+          "Compute sales metrics and data-quality checks deterministically, then interpret the results.",
+      },
+    ];
     const plans = new PlanRegistry()
-      .register(createTrivialReferencePlan("data-analysis"))
+      .register(dataAnalysisPlan)
       .register(createTrivialReferencePlan("tax-notice"))
       .register(createTrivialReferencePlan("msme-payment"));
     const orchestrator = new Orchestrator({
       repositories: store.repositories,
       ai,
       plans,
-      specialists: [createGenericAnalystAgent()],
+      specialists: [
+        createBusinessDataAnalystAgent(),
+        createGenericAnalystAgent(),
+      ],
       checkpointer,
       userRunLimit: usage.userMaxConcurrentRuns,
       globalRunLimit: usage.globalMaxConcurrentRuns,

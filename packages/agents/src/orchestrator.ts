@@ -33,7 +33,12 @@ import type {
   TaskStatus,
   UsageLedgerRepository,
 } from "@evianta/core";
-import { EvidenceSchema, FindingSchema } from "@evianta/core";
+import {
+  DataAnalysisDashboardSchema,
+  DataAnalysisReportSchema,
+  EvidenceSchema,
+  FindingSchema,
+} from "@evianta/core";
 import { z } from "zod";
 import {
   silentLogger,
@@ -161,6 +166,8 @@ const SectionContentSchema = z.object({
       claims: z.array(NumericClaimSchema),
     }),
   ),
+  report: DataAnalysisReportSchema.optional(),
+  dashboard: DataAnalysisDashboardSchema.optional(),
 });
 
 const ACTIVE_RUN_STATUSES: readonly RunStatus[] = [
@@ -1816,7 +1823,17 @@ export class Orchestrator {
             .get(execution.caseRecord.useCase)
             .tasks.find((item) => item.key === key)?.title ?? key,
         kind: "text",
-        content: { taskId: task.id, summary, findings: committed.outcomes },
+        content: {
+          taskId: task.id,
+          summary,
+          findings: committed.outcomes,
+          ...(!isReview && (output as SpecialistOutput).report
+            ? { report: (output as SpecialistOutput).report }
+            : {}),
+          ...(!isReview && (output as SpecialistOutput).dashboard
+            ? { dashboard: (output as SpecialistOutput).dashboard }
+            : {}),
+        },
         reviewerContent: null,
         reviewerId: null,
         reviewedAt: null,
@@ -2002,10 +2019,12 @@ export class Orchestrator {
                   sourceRef: item.sourceRef,
                   confidence: item.confidence,
                   documentId: item.documentId,
-                  location: {
-                    ...(item.page ? { page: item.page } : {}),
-                    ...(item.textQuote ? { textQuote: item.textQuote } : {}),
-                  },
+                  location:
+                    item.location ??
+                    ({
+                      ...(item.page ? { page: item.page } : {}),
+                      ...(item.textQuote ? { textQuote: item.textQuote } : {}),
+                    }),
                 }
               : null
             : {

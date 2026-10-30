@@ -41,7 +41,7 @@ describe("agent directory", () => {
     await seedAgentDirectoryAsync(store.repositories.agentProfiles);
     await seedAgentDirectoryAsync(store.repositories.agentProfiles);
     expect(await store.repositories.agentProfiles.listEnabled()).toHaveLength(
-      3,
+      4,
     );
   });
 });

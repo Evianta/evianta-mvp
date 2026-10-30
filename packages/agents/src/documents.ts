@@ -31,6 +31,22 @@ export function createDocumentAccess(
           state: document.state,
         }));
     },
+    async tablesAsync() {
+      const documents = await repositories.documents.listOwned(scope);
+      const ready = documents.filter((document) => document.state === "ready");
+      const extractions = await Promise.all(
+        ready.map((document) =>
+          repositories.extractions.findForDocument(document.id, scope),
+        ),
+      );
+      return ready.flatMap((document, index) =>
+        (extractions[index]?.tables ?? []).map((table) => ({
+          documentId: document.id,
+          name: document.name,
+          table,
+        })),
+      );
+    },
     async sliceAsync(documentId, options = {}) {
       const document = await repositories.documents.findOwned(
         documentId,

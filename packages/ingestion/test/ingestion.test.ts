@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   AdmissionRejectedError,
   createAi,
@@ -58,6 +59,12 @@ const mimeTypes = {
 
 const ocrResponse = (text: string, method = "ocr", confidence = 0.95) =>
   JSON.stringify({ text, method, confidence });
+const quarterlySalesFixture = readFileSync(
+  new URL("./fixtures/quarterly-sales.csv", import.meta.url),
+);
+const messySalesFixture = readFileSync(
+  new URL("./fixtures/messy-sales.csv", import.meta.url),
+);
 
 interface HarnessOptions {
   responses?: string[];
@@ -240,6 +247,53 @@ describe("deterministic extraction", () => {
     expect(extraction.tables[0].rows).toHaveLength(3);
     expect(extraction.tables[0].rows[1][2]).toBe("3,400");
     expect(await h.stateOf(doc.id)).toBe("ready");
+  });
+
+  it("extracts the synthetic quarterly-sales workflow fixture", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(
+      quarterlySalesFixture,
+      mimeTypes.csv,
+      "quarterly-sales.csv",
+    );
+
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+
+    expect(result.extraction?.tables[0]).toMatchObject({
+      headers: ["month", "product", "revenue"],
+      rows: [
+        ["Jan", "A", "100"],
+        ["Jan", "B", "150"],
+        ["Feb", "A", "120"],
+        ["Feb", "B", "180"],
+        ["Mar", "A", "200"],
+        ["Mar", "B", "250"],
+      ],
+      cellRange: "A1:C7",
+    });
+  });
+
+  it("preserves messy sales values for deterministic quality checks", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(
+      messySalesFixture,
+      mimeTypes.csv,
+      "messy-sales.csv",
+    );
+
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+
+    expect(result.extraction?.tables[0]?.rows).toHaveLength(7);
+    expect(result.extraction?.tables[0]?.rows[5]).toEqual([
+      "2026-03-01",
+      "C",
+      "unknown",
+    ]);
+    expect(result.extraction?.tables[0]?.rows[6]).toEqual([
+      "2026-03-02",
+      "D",
+      null,
+    ]);
   });
 
   it("parses every XLSX sheet with sheet names and cell ranges", async () => {

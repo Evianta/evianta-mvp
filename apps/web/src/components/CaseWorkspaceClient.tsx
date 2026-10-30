@@ -12,6 +12,7 @@ import {
   StopCircle,
 } from "lucide-react";
 import type { Case, RunDto, RunEvent } from "@evianta/core";
+import type { CaseWorkspace } from "../api/client";
 import { ApiError } from "../api/errors";
 import { formatDate } from "../format";
 import { useSession } from "../session/SessionProvider";
@@ -20,6 +21,7 @@ import { EmptyState } from "./EmptyState";
 import { LoadingSkeleton } from "./LoadingSkeleton";
 import { PrivateGate } from "./PrivateGate";
 import { StatusBadge, type StatusTone } from "./Badges";
+import { DataAnalysisResults } from "./DataAnalysisResults";
 
 const workflowNames: Record<Case["useCase"], string> = {
   "data-analysis": "Data analysis",
@@ -83,6 +85,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   const [timelineRef] = useAutoAnimate<HTMLOListElement>();
   const { session, api } = useSession();
   const [record, setRecord] = useState<Case | null>(null);
+  const [workspace, setWorkspace] = useState<CaseWorkspace | null>(null);
   const [run, setRun] = useState<RunDto | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -103,10 +106,14 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
       };
 
     setLoading(true);
-    void Promise.all([api.getCase(caseId), api.getLatestRun(caseId)])
-      .then(([result, latestRun]) => {
+    void Promise.all([
+      api.getCaseWorkspace(caseId),
+      api.getLatestRun(caseId),
+    ])
+      .then(([caseWorkspace, latestRun]) => {
         if (active) {
-          setRecord(result);
+          setWorkspace(caseWorkspace);
+          setRecord(caseWorkspace.case);
           setRun(latestRun);
         }
       })
@@ -135,6 +142,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
     void api
       .streamRunEvents(run.id, {
         afterSequence: lastSequence.current,
+        caseId,
         replayOnly,
         signal: controller.signal,
         onEvent(event) {
@@ -145,6 +153,18 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
               ? current
               : [...current, event].slice(-30),
           );
+          if (event.payload.type === "run-completed") {
+            void api
+              .getCaseWorkspace(caseId)
+              .then((caseWorkspace) => setWorkspace(caseWorkspace))
+              .catch((reason: unknown) => {
+                setError(
+                  reason instanceof Error
+                    ? reason.message
+                    : "The completed analysis could not be loaded.",
+                );
+              });
+          }
           if (replayOnly) return;
           setRun((current) => {
             if (!current) return current;
@@ -308,9 +328,15 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
 
   if (!record) return null;
 
-  const activeRun = run ? ["running", "queued"].includes(run.status) : false;
+  const activeRun = run
+    ? ["running", "queued", "waiting-for-input"].includes(run.status)
+    : false;
   const canRetry =
-    run && terminalStatuses.has(run.status) && run.status !== "completed";
+    run &&
+    (run.status === "failed" || run.status === "partially-completed");
+  const canStartAnalysis =
+    record.useCase !== "data-analysis" ||
+    Boolean(workspace?.documents.some((document) => document.state === "ready"));
 
   return (
     <div>
@@ -335,7 +361,10 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
           </p>
         </div>
         {!run ? (
-          <Button onClick={startRun} disabled={pendingAction}>
+          <Button
+            onClick={startRun}
+            disabled={pendingAction || !canStartAnalysis}
+          >
             <Play size={15} aria-hidden="true" />
             {pendingAction ? "Starting..." : "Start analysis"}
           </Button>
@@ -357,13 +386,51 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
           <Button
             variant="secondary"
             onClick={startRun}
-            disabled={pendingAction}
+            disabled={pendingAction || !canStartAnalysis}
           >
             <RefreshCw size={15} aria-hidden="true" />
             Run again
           </Button>
         )}
       </div>
+
+      {workspace && workspace.documents.length > 0 && (
+        <section
+          className="surface-card mt-5 p-4"
+          aria-labelledby="source-files-heading"
+        >
+          <h2 id="source-files-heading" className="text-xs font-semibold">
+            Source files
+          </h2>
+          <ul className="mt-3 divide-y divide-border">
+            {workspace.documents.map((document) => (
+              <li
+                className="flex flex-wrap items-center justify-between gap-2 py-2 text-xs"
+                key={document.id}
+              >
+                <span className="font-medium">{document.name}</span>
+                <StatusBadge
+                  tone={
+                    document.state === "ready"
+                      ? "success"
+                      : document.state === "failed"
+                        ? "danger"
+                        : "neutral"
+                  }
+                >
+                  {document.state}
+                </StatusBadge>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {!canStartAnalysis && (
+        <p className="mt-3 text-xs text-muted-foreground" role="status">
+          Upload and finish processing a CSV or Excel file before starting
+          analysis.
+        </p>
+      )}
 
       {error && (
         <div
@@ -487,17 +554,21 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
               </p>
             </div>
           </div>
-          <div className="mt-5 rounded-lg border border-dashed border-border p-4">
-            <p className="text-xs font-medium">
-              {events.some((event) => event.payload.type === "finding-added")
-                ? "Finding events received"
-                : "No findings to review yet"}
-            </p>
-            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              Findings appear here only after they are returned by the
-              authenticated API. This page does not invent private results.
-            </p>
-          </div>
+          {record.useCase === "data-analysis" ? (
+            <DataAnalysisResults workspace={workspace} />
+          ) : (
+            <div className="mt-5 rounded-lg border border-dashed border-border p-4">
+              <p className="text-xs font-medium">
+                {events.some((event) => event.payload.type === "finding-added")
+                  ? "Finding events received"
+                  : "No findings to review yet"}
+              </p>
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                Findings appear here only after they are returned by the
+                authenticated API. This page does not invent private results.
+              </p>
+            </div>
+          )}
           <div className="mt-4 grid grid-cols-2 gap-2">
             <div className="rounded-md bg-background p-3">
               <p className="text-[10px] text-muted-foreground">Input tokens</p>

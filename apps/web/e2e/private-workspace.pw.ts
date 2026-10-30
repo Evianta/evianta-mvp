@@ -71,7 +71,7 @@ for (const phase of ["create", "upload"] as const) {
             outcome === "failure"
               ? { error: { message: "Old session upload failed." } }
               : {
-                  document: syntheticWorkflowFixtures.dataAnalysis.documents[0],
+                  documents: [syntheticWorkflowFixtures.dataAnalysis.documents[0]],
                 },
         });
       });
@@ -182,7 +182,7 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
       await firstUploadCanFinish;
       await route.fulfill({
         json: {
-          document: syntheticWorkflowFixtures.dataAnalysis.documents[0],
+          documents: [syntheticWorkflowFixtures.dataAnalysis.documents[0]],
         },
       });
       return;
@@ -196,7 +196,7 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
     }
     await route.fulfill({
       json: {
-        document: syntheticWorkflowFixtures.dataAnalysis.documents[0],
+        documents: [syntheticWorkflowFixtures.dataAnalysis.documents[0]],
       },
     });
   });
@@ -280,8 +280,19 @@ for (const status of ["queued", "running", "failed", "none"] as const) {
         lookups += 1;
         await route.fulfill({ json: { run: status === "none" ? null : run } });
       } else {
-        await route.fulfill({ json: { case: record } });
+        await route.fulfill({
+          json: {
+            case: record,
+            documents: [],
+            runs: [],
+            tasks: [],
+            findings: [],
+            evidence: [],
+            deliverables: [],
+          },
+        });
       }
+
     });
     await page.route("**/cases", async (route) => {
       if (route.request().headers().accept !== "application/json") {
@@ -290,7 +301,7 @@ for (const status of ["queued", "running", "failed", "none"] as const) {
       }
       await route.fulfill({ json: { cases: [record], nextCursor: null } });
     });
-    await page.route("**/runs/existing-run/events?*", (route) => {
+    await page.route("**/cases/private-case/stream?*", (route) => {
       streams += 1;
       return route.fulfill({
         contentType: "text/event-stream",

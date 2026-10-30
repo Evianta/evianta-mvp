@@ -10,6 +10,7 @@ import type {
   Case,
   EvidenceConfidence,
   EvidenceLocation,
+  ExtractedTable,
   UsageUnits,
 } from "@evianta/core";
 import type { ZodType } from "zod";
@@ -54,6 +55,13 @@ export interface DocumentSlice {
  */
 export interface DocumentAccess {
   listAsync(): Promise<DocumentSummary[]>;
+  tablesAsync(): Promise<
+    Array<{
+      documentId: string;
+      name: string;
+      table: ExtractedTable;
+    }>
+  >;
   sliceAsync(
     documentId: string,
     options?: { pages?: number[]; maxChars?: number },

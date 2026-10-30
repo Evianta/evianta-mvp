@@ -123,7 +123,7 @@ describe("FetchWebApiClient", () => {
     } as const;
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockResolvedValue(Response.json({ document }));
+      .mockResolvedValue(Response.json({ documents: [document] }));
     const client = new FetchWebApiClient({
       getToken: () => "session-token",
       onUnauthorized: vi.fn(),
@@ -137,6 +137,41 @@ describe("FetchWebApiClient", () => {
         "mixed",
       ),
     ).resolves.toEqual(document);
+    const formData = fetcher.mock.calls[0]?.[1]?.body as FormData;
+    expect(formData.has("files")).toBe(true);
+  });
+
+  it("loads private workspace results and source metadata from the API", async () => {
+    const record = syntheticWorkflowFixtures.dataAnalysis.case;
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        case: record,
+        documents: [],
+        runs: [],
+        tasks: [],
+        findings: [],
+        evidence: [],
+        deliverables: [],
+        state: "active",
+        usage: record.usage,
+      }),
+    );
+    const client = new FetchWebApiClient({
+      getToken: () => "session-token",
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+
+    await expect(client.getCaseWorkspace(record.id)).resolves.toMatchObject({
+      case: record,
+      documents: [],
+      findings: [],
+      evidence: [],
+      deliverables: [],
+    });
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      `/cases/${encodeURIComponent(record.id)}`,
+    );
   });
 
   it("clears private streams and the session on an unauthorized response", async () => {
