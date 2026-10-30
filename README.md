@@ -86,6 +86,15 @@ The admin command requires the API build (`pnpm dev` prepares it, or run
 Enter it in the web sign-in dialog; do not put it in a URL, source file or log.
 The worker must be running for submitted analyses to complete.
 
+To check the data-analysis flow, open `/cases/new`, choose **Data analysis**,
+and upload a `.csv` or `.xlsx` dataset. A case title is required to enable
+creation; the data dictionary and reporting-period notes are optional.
+Create the private case, then choose
+**Start analysis**. Completed reports include computed metrics, data-quality
+checks and source-linked charts; reopen the case from **Your cases** to view
+the saved results. Creating a case from the sample intake copies only its
+setup, not its synthetic files or results.
+
 From `apps/api`, the equivalent command is `pnpm admin issue-key <user-id>`.
 `issue-key` requires an existing user ID, not an email address. An optional
 second argument sets the key expiry as an ISO timestamp. Without one, the key

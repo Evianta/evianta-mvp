@@ -126,6 +126,121 @@ const workspace = {
   ],
 };
 
+test("shows dataset formats without PDF limits in data-analysis intake", async ({
+  page,
+}) => {
+  await page.route("**/auth/token", (route) =>
+    route.fulfill({
+      json: {
+        accessToken: "session-token",
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      },
+    }),
+  );
+  await page.goto("/cases/new");
+  await page.getByRole("button", { name: "Enter access key" }).click();
+  await page.getByLabel("Access key").fill("test-key");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page
+    .getByLabel("Workflow", { exact: true })
+    .selectOption("data-analysis");
+
+  const dropzone = page.locator('label[for="case-files"]');
+  await expect(dropzone).toContainText(".csv, .xlsx");
+  await expect(dropzone).not.toContainText("PDF files");
+  await expect(page.locator("#case-files")).toHaveAttribute(
+    "accept",
+    ".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
+
+  await page
+    .getByLabel("Workflow", { exact: true })
+    .selectOption("msme-payment");
+  await expect(dropzone).toContainText(".pdf, .csv");
+  await expect(dropzone).toContainText("PDF files are limited to 120 pages");
+});
+
+test("creates a case with two CSVs without optional supporting documents", async ({
+  page,
+}) => {
+  await page.route("**/auth/token", (route) =>
+    route.fulfill({
+      json: {
+        accessToken: "session-token",
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      },
+    }),
+  );
+  let created = 0;
+  let uploaded = 0;
+  await page.route("**/cases", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    expect(route.request().postDataJSON()).toMatchObject({
+      title: "CSV intake verification",
+      useCase: "data-analysis",
+    });
+    created += 1;
+    await route.fulfill({ json: { case: record } });
+  });
+  await page.route("**/cases/private-case/documents", async (route) => {
+    uploaded += 1;
+    await route.fulfill({ json: { documents: workspace.documents } });
+  });
+  await page.route("**/cases/private-case", async (route) => {
+    if (route.request().headers().accept !== "application/json") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({ json: { ...workspace, deliverables: [] } });
+  });
+  await page.route("**/cases/private-case/runs/latest", (route) =>
+    route.fulfill({ json: { run: null } }),
+  );
+
+  await page.goto("/cases/new");
+  await page.getByRole("button", { name: "Enter access key" }).click();
+  await page.getByLabel("Access key").fill("test-key");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page
+    .getByLabel("Workflow", { exact: true })
+    .selectOption("data-analysis");
+  await page.locator("#case-files").setInputFiles(
+    ["messy-sales.csv", "quarterly-sales.csv"].map((name) => ({
+      name,
+      mimeType: "text/csv",
+      buffer: Buffer.from("month,product,revenue\nJan,A,100\n"),
+    })),
+  );
+
+  await expect(page.getByText("2 optional documents suggested")).toBeVisible();
+  await expect(
+    page.getByText("These suggestions do not block case creation."),
+  ).toBeVisible();
+  const create = page.getByRole("button", { name: "Create private case" });
+  await expect(create).toBeDisabled();
+  await expect(page.getByRole("status")).toHaveText(
+    "Add a case title in Case context above to enable Create private case.",
+  );
+  await page.getByLabel("Case title", { exact: true }).fill("   ");
+  await expect(create).toBeDisabled();
+  await page
+    .getByLabel("Case title", { exact: true })
+    .fill("CSV intake verification");
+  await expect(create).toBeEnabled();
+  await create.click();
+  await expect(page).toHaveURL(/\/cases\/private-case$/);
+  await expect(
+    page.getByRole("button", { name: "Start analysis" }),
+  ).toBeVisible();
+  expect(created).toBe(1);
+  expect(uploaded).toBe(2);
+});
+
 test("reopens a completed analysis and renders its report and charts", async ({
   page,
 }) => {

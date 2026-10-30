@@ -1,12 +1,12 @@
 import {
   AgentProfileSetSchema,
   CaseSchema,
+  CreateCaseRequestSchema,
   CreateRunRequestSchema,
   DocumentMetadataDtoSchema,
   RunDtoSchema,
   RunEventSchema,
   UsageSummarySchema,
-  UseCaseSchema,
   syntheticWorkflowFixtures,
   type AgentProfileRepository,
   type Case,
@@ -87,13 +87,7 @@ interface UploadedFile {
   bytes: Buffer;
 }
 
-const CaseCreateInputSchema = z
-  .object({
-    title: z.string().min(1).max(200),
-    description: z.string().max(5000).default(""),
-    useCase: UseCaseSchema,
-  })
-  .strict();
+const CaseCreateInputSchema = CreateCaseRequestSchema.strict();
 const CopyInputSchema = z
   .object({ title: z.string().min(1).max(200).optional() })
   .strict();
@@ -855,6 +849,18 @@ export function registerCaseApiRoutes(
     const input = parseInput(CaseCreateInputSchema, request.body, response);
     const principal = authContext(request)?.principal;
     if (!input || !principal) return;
+    if (input.sourceCaseId) {
+      const source = sampleById(input.sourceCaseId);
+      if (!source) {
+        sendApiError(
+          response,
+          400,
+          "validation-failed",
+          "Choose a public sample as the case source",
+        );
+        return;
+      }
+    }
     const at = new Date().toISOString();
     const record = CaseSchema.parse({
       id: randomUUID(),
@@ -862,7 +868,7 @@ export function registerCaseApiRoutes(
       ownerId: principal.userId,
       isSample: false,
       synthetic: false,
-      sourceCaseId: null,
+      sourceCaseId: input.sourceCaseId ?? null,
       status: "active",
       usage: emptyUsage(),
       createdAt: at,

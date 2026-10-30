@@ -15,6 +15,7 @@ import {
   type AuthenticationService,
 } from "../src/auth.js";
 import { registerCaseApiRoutes, type CaseApiServices } from "../src/routes.js";
+import { FetchWebApiClient } from "../../web/src/api/client.js";
 import {
   createHarness,
   planOf,
@@ -154,6 +155,58 @@ describe("case API routes", () => {
       case: { id: string; title: string };
     };
   }
+
+  it.each([undefined, null, "sample-sales-quarter"])(
+    "accepts the web client's case-creation request with source %s",
+    async (sourceCaseId) => {
+      const client = new FetchWebApiClient({
+        baseUrl,
+        getToken: () => token,
+        onUnauthorized: () => {
+          throw new Error("The test session was unexpectedly rejected");
+        },
+      });
+      const created = await client.createCase({
+        title: "Sales verification",
+        description: "Analyze the uploaded dataset",
+        useCase: "data-analysis",
+        sourceCaseId,
+      });
+      expect(created).toMatchObject({
+        ownerId: user.id,
+        useCase: "data-analysis",
+        sourceCaseId: sourceCaseId ?? null,
+        isSample: false,
+        synthetic: false,
+      });
+      expect(
+        await repositories.documents.listOwned({
+          ownerId: user.id,
+          caseId: created.id,
+        }),
+      ).toEqual([]);
+    },
+  );
+
+  it.each(["private-case", "unknown-sample"])(
+    "rejects a non-public setup source %s",
+    async (sourceCaseId) => {
+      const response = await fetch(`${baseUrl}/cases`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Sales verification",
+          useCase: "data-analysis",
+          sourceCaseId,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: "validation-failed" },
+      });
+      expect(await repositories.cases.listOwned(user.id)).toEqual([]);
+    },
+  );
 
   it("serves public synthetic samples and authenticated case/profile routes", async () => {
     const publicSamples = await fetch(`${baseUrl}/samples`);

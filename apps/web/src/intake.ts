@@ -7,6 +7,7 @@ export interface WorkflowSpec {
   recommendedDocuments: string[];
   maxFileBytes: number;
   maxPdfPages: number;
+  allowedExtensions: string[];
   allowedMimeTypes: string[];
 }
 
@@ -18,6 +19,7 @@ export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
     recommendedDocuments: ["Data dictionary", "Reporting-period notes"],
     maxFileBytes: 25 * 1024 * 1024,
     maxPdfPages: 80,
+    allowedExtensions: [".csv", ".xlsx"],
     allowedMimeTypes: [
       "text/csv",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -30,6 +32,7 @@ export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
     recommendedDocuments: ["Credit statements", "Prior correspondence"],
     maxFileBytes: 25 * 1024 * 1024,
     maxPdfPages: 120,
+    allowedExtensions: [".pdf", ".csv"],
     allowedMimeTypes: ["application/pdf", "text/csv"],
   },
   "msme-payment": {
@@ -39,6 +42,7 @@ export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
     recommendedDocuments: ["Delivery confirmation", "Correspondence"],
     maxFileBytes: 25 * 1024 * 1024,
     maxPdfPages: 120,
+    allowedExtensions: [".pdf", ".csv"],
     allowedMimeTypes: ["application/pdf", "text/csv"],
   },
 };

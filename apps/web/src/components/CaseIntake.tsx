@@ -303,8 +303,16 @@ function SessionCaseIntake({
               disabled={Boolean(createdCaseId)}
               onChange={(event) => setTitle(event.target.value)}
               placeholder="For example, Q4 vendor payment review"
+              aria-describedby="case-title-help"
               required
             />
+            <p
+              id="case-title-help"
+              className="mt-1 text-xs text-muted-foreground"
+            >
+              Enter a title to enable case creation. Selecting files alone does
+              not create a case.
+            </p>
             <p className="mt-1 text-right text-[10px] text-muted-foreground">
               {title.length}/200
             </p>
@@ -384,8 +392,8 @@ function SessionCaseIntake({
                 Document checklist
               </h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                Missing recommended documents become open questions, not
-                blockers.
+                Recommended documents are optional. You can create a case
+                without them.
               </p>
             </div>
             <ListChecks
@@ -428,22 +436,24 @@ function SessionCaseIntake({
                 Drop records here or browse
               </span>
               <span className="mt-1 block text-xs text-muted-foreground">
-                {spec.allowedMimeTypes
-                  .map((type) => type.split("/").at(-1))
-                  .join(", ")}{" "}
-                · Up to {Math.round(spec.maxFileBytes / (1024 * 1024))} MB per
-                file
+                {spec.allowedExtensions.join(", ")} · Up to{" "}
+                {Math.round(spec.maxFileBytes / (1024 * 1024))} MB per file
               </span>
-              <span className="mt-1 block text-[10px] text-muted-foreground">
-                PDF files are limited to {spec.maxPdfPages} pages; page count is
-                verified during processing.
-              </span>
+              {spec.allowedMimeTypes.includes("application/pdf") && (
+                <span className="mt-1 block text-[10px] text-muted-foreground">
+                  PDF files are limited to {spec.maxPdfPages} pages; page count
+                  is verified during processing.
+                </span>
+              )}
             </span>
             <input
               id="case-files"
               type="file"
               multiple
-              accept={spec.allowedMimeTypes.join(",")}
+              accept={[
+                ...spec.allowedExtensions,
+                ...spec.allowedMimeTypes,
+              ].join(",")}
               onChange={chooseFiles}
             />
           </label>
@@ -507,10 +517,13 @@ function SessionCaseIntake({
             <div className="mt-4 rounded-lg border border-warning/20 bg-warning/[0.045] p-4">
               <div className="flex items-center gap-2 text-xs font-semibold text-warning">
                 <Info size={15} aria-hidden="true" />
-                {openQuestions.length} open{" "}
-                {openQuestions.length === 1 ? "question" : "questions"} to
-                resolve
+                {openQuestions.length} optional{" "}
+                {openQuestions.length === 1 ? "document" : "documents"}{" "}
+                suggested
               </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                These suggestions do not block case creation.
+              </p>
               <ul className="mt-2 space-y-1.5 pl-5 text-xs text-muted-foreground">
                 {openQuestions.map((question) => (
                   <li className="list-disc" key={question.id}>
@@ -540,12 +553,26 @@ function SessionCaseIntake({
         )}
 
         <div className="flex flex-wrap items-center justify-between gap-3">
+          {!title.trim() && (
+            <p
+              id="case-creation-help"
+              className="w-full text-xs text-warning"
+              role="status"
+            >
+              Add a case title in Case context above to enable Create private
+              case.
+            </p>
+          )}
           <p className="text-[11px] text-muted-foreground">
             {createdCaseId
               ? "The case already exists. Retrying sends only documents that have not uploaded successfully."
               : "Uploads go to private storage. No analysis starts until you choose to run it."}
           </p>
-          <Button type="submit" disabled={pending || !title.trim()}>
+          <Button
+            type="submit"
+            disabled={pending || !title.trim()}
+            aria-describedby={!title.trim() ? "case-creation-help" : undefined}
+          >
             {pending
               ? createdCaseId
                 ? "Uploading documents..."
