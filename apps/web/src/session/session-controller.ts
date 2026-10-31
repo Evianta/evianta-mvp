@@ -95,6 +95,31 @@ export class SessionController {
     this.storage?.removeItem(SESSION_STORAGE_KEY);
   }
 
+  clearIfToken(accessToken: string): void {
+    if (this.session?.accessToken === accessToken) {
+      this.session = null;
+      this.notify();
+    }
+
+    const saved = this.storage?.getItem(SESSION_STORAGE_KEY);
+    if (saved === null || saved === undefined) return;
+
+    let value: unknown;
+    try {
+      value = JSON.parse(saved);
+    } catch {
+      return;
+    }
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "accessToken" in value &&
+      value.accessToken === accessToken
+    ) {
+      this.storage?.removeItem(SESSION_STORAGE_KEY);
+    }
+  }
+
   private notify(): void {
     for (const listener of this.listeners) listener();
   }

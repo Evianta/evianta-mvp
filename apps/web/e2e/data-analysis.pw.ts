@@ -95,6 +95,10 @@ const workspace = {
                     { period: "Jan", revenue: 250 },
                     { period: "Feb", revenue: 300 },
                     { period: "Mar", revenue: 450 },
+                    ...Array.from({ length: 202 }, (_, index) => ({
+                      period: `Period ${index + 3}`,
+                      revenue: index + 3,
+                    })),
                   ],
                   source: {
                     documentId: "sales-document",
@@ -309,10 +313,17 @@ test("reopens a completed analysis and renders its report and charts", async ({
   await expect(
     page.getByText("Revenue by month", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByRole("table")).toHaveCount(0);
   await page.getByText("View chart data", { exact: true }).click();
   const chartTable = page.getByRole("table").first();
   await expect(chartTable).toContainText("Jan");
   await expect(chartTable).toContainText("250");
+  await expect(chartTable.getByRole("row")).toHaveCount(101);
+  await expect(page.getByText("Rows 1–100 of 205")).toBeVisible();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(chartTable.getByRole("row")).toHaveCount(101);
+  await expect(chartTable).toContainText("Period 103");
+  await expect(page.getByText("Rows 101–200 of 205")).toBeVisible();
   await expect(page.getByText("quarterly-sales.csv")).toBeVisible();
   await expect(page.getByText("rows 2–7")).toBeVisible();
 });

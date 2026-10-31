@@ -119,4 +119,20 @@ describe("SessionController", () => {
     );
     expect(controller.getSnapshot()).toBeNull();
   });
+
+  it("only clears the persisted session when its token still matches", () => {
+    const saved = storage();
+    const controller = new SessionController(() => 1000);
+    controller.restore(saved);
+    controller.setSession("session-a", 2000);
+    controller.clearIfToken("session-a");
+    controller.setSession("session-b", 3000);
+
+    controller.clearIfToken("session-a");
+
+    expect(controller.getToken()).toBe("session-b");
+    expect(JSON.parse(saved.getItem(SESSION_STORAGE_KEY)!)).toMatchObject({
+      accessToken: "session-b",
+    });
+  });
 });

@@ -268,6 +268,62 @@ test("revokes the server session when local storage cleanup fails", async ({
   expect(revocations).toBe(1);
 });
 
+test("retries logout for a replacement session restored from another tab", async ({
+  page,
+  context,
+}) => {
+  await mockAuth(page);
+  const revokedTokens: string[] = [];
+  await page.route("**/auth/logout", async (route) => {
+    const token = route.request().headers().authorization;
+    revokedTokens.push(token ?? "");
+    if (revokedTokens.length === 1) {
+      await route.fulfill({
+        status: 503,
+        json: { error: { message: "Session service unavailable." } },
+      });
+      return;
+    }
+    await route.fulfill({ status: 204 });
+  });
+
+  await page.goto("/");
+  await enterKey(page);
+  await page
+    .getByRole("button", { name: "Sign out and revoke this session" })
+    .click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Sign-out could not finish" }),
+  ).toBeVisible();
+
+  const secondTab = await context.newPage();
+  await secondTab.goto("/");
+  await secondTab.evaluate((key) => {
+    localStorage.setItem(
+      key,
+      JSON.stringify({
+        accessToken: "replacement-session",
+        expiresAt: Date.now() + 30 * 60 * 1000,
+      }),
+    );
+  }, SESSION_STORAGE_KEY);
+  await expect(
+    page.getByRole("button", { name: "Sign out and revoke this session" }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Sign out and revoke this session" })
+    .click();
+  await expect.poll(() => savedSession(page)).toBeNull();
+  await expect(
+    page.getByRole("button", { name: "Sign in", exact: true }),
+  ).toBeVisible();
+  expect(revokedTokens).toHaveLength(3);
+  expect(revokedTokens[0]).toBe(revokedTokens[1]);
+  expect(revokedTokens[2]).not.toBe(revokedTokens[0]);
+  await secondTab.close();
+});
+
 test("logout in another tab clears the active session and private draft", async ({
   page,
   context,

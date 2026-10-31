@@ -14,6 +14,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { useState } from "react";
 import {
   DataAnalysisDashboardSchema,
   DataAnalysisReportSchema,
@@ -45,8 +46,18 @@ function ChartView({
 }: {
   chart: ReturnType<typeof DataAnalysisDashboardSchema.parse>["charts"][number];
 }) {
+  const [dataPage, setDataPage] = useState(0);
+  const [showData, setShowData] = useState(false);
   const axisClass = "fill-muted-foreground text-[10px]";
   const labelKey = chart.type === "pie" ? chart.nameKey : chart.categoryKey;
+  const pageSize = 100;
+  const pageCount = Math.ceil(chart.data.length / pageSize);
+  const pageRows = chart.data.slice(
+    dataPage * pageSize,
+    (dataPage + 1) * pageSize,
+  );
+  const firstRow = dataPage * pageSize + 1;
+  const lastRow = Math.min((dataPage + 1) * pageSize, chart.data.length);
   return (
     <figure className="rounded-lg border border-border bg-background p-4">
       <figcaption className="mb-3 text-xs font-semibold">
@@ -113,46 +124,76 @@ function ChartView({
           )}
         </ResponsiveContainer>
       </div>
-      <details className="mt-3 text-xs">
+      <details
+        className="mt-3 text-xs"
+        onToggle={(event) => setShowData(event.currentTarget.open)}
+      >
         <summary className="cursor-pointer text-muted-foreground">
           View chart data
         </summary>
-        <div className="mt-2 overflow-x-auto">
-          <table className="w-full border-collapse text-left">
-            <caption className="sr-only">{chart.title} data</caption>
-            <thead>
-              <tr className="border-b border-border">
-                <th scope="col" className="py-1 pr-3 font-medium">
-                  {labelKey}
-                </th>
-                <th scope="col" className="py-1 text-right font-medium">
-                  {chart.valueKey}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {chart.data.map((entry, index) => {
-                const label = entry[labelKey];
-                const value = entry[chart.valueKey];
-                return (
-                  <tr
-                    className="border-b border-border/50"
-                    key={`${String(label ?? "")}-${index}`}
+        {showData && (
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full border-collapse text-left">
+              <caption className="sr-only">{chart.title} data</caption>
+              <thead>
+                <tr className="border-b border-border">
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    {labelKey}
+                  </th>
+                  <th scope="col" className="py-1 text-right font-medium">
+                    {chart.valueKey}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageRows.map((entry, index) => {
+                  const label = entry[labelKey];
+                  const value = entry[chart.valueKey];
+                  return (
+                    <tr
+                      className="border-b border-border/50"
+                      key={`${String(label ?? "")}-${firstRow + index}`}
+                    >
+                      <th scope="row" className="py-1 pr-3 font-normal">
+                        {String(label ?? "Unknown")}
+                      </th>
+                      <td className="py-1 text-right">
+                        {typeof value === "number"
+                          ? formatNumber(value)
+                          : String(value ?? "—")}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {pageCount > 1 && (
+              <div className="mt-2 flex items-center justify-between gap-3">
+                <p aria-live="polite" className="text-muted-foreground">
+                  Rows {firstRow}–{lastRow} of {chart.data.length}
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    className="rounded border border-border px-2 py-1 disabled:opacity-50"
+                    disabled={dataPage === 0}
+                    onClick={() => setDataPage((page) => page - 1)}
+                    type="button"
                   >
-                    <th scope="row" className="py-1 pr-3 font-normal">
-                      {String(label ?? "Unknown")}
-                    </th>
-                    <td className="py-1 text-right">
-                      {typeof value === "number"
-                        ? formatNumber(value)
-                        : String(value ?? "—")}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                    Previous
+                  </button>
+                  <button
+                    className="rounded border border-border px-2 py-1 disabled:opacity-50"
+                    disabled={dataPage + 1 >= pageCount}
+                    onClick={() => setDataPage((page) => page + 1)}
+                    type="button"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </details>
       <p className="mt-2 text-[10px] text-muted-foreground">
         Source: {chart.source.documentId}
