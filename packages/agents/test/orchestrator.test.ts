@@ -5,6 +5,12 @@ import {
   RunConflictError,
   RunNotFoundError,
   deliverableIdFor,
+  createTaxNoticePlan,
+  createTaxNoticeSpecialists,
+  TAX_NOTICE_ANALYST_ROLE,
+  TAX_RECONCILIATION_ROLE,
+  TAX_RESPONSE_DRAFTER_ROLE,
+  TAX_RESEARCH_ROLE,
   summarizeUsage,
   WorkerAbortedError,
   toTaskRecords,
@@ -89,6 +95,128 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
+  it("runs the tax response-pack DAG with unavailable research safely flagged", async () => {
+    const plan = createTaxNoticePlan();
+    const provider = new ScriptedProvider({
+      ...routes("case-analysis", "response-preparation"),
+      coordinator: () => ({
+        tasks: plan.tasks.map((task) => ({
+          key: task.key,
+          assignedRole: task.role,
+          dependsOn: task.dependsOn,
+          instructions: task.instructions,
+        })),
+      }),
+      "case-analysis": () => ({
+        summary: "Extracted synthetic source figures.",
+        findings: [
+          {
+            ...specialistOutput("return").findings[0]!,
+            title: "Return figures",
+            claims: [
+              {
+                label: "return income",
+                value: 1_200_000,
+                components: null,
+                date: null,
+              },
+              {
+                label: "claimed credit",
+                value: 80_000,
+                components: null,
+                date: null,
+              },
+            ],
+          },
+          {
+            ...specialistOutput("notice").findings[0]!,
+            title: "Notice figures",
+            claims: [
+              {
+                label: "notice income",
+                value: 1_350_000,
+                components: null,
+                date: null,
+              },
+              {
+                label: "available credit",
+                value: 75_000,
+                components: null,
+                date: null,
+              },
+            ],
+          },
+        ],
+        inputRequired: null,
+      }),
+      "tax-search": () => ({ summary: "No search citations returned." }),
+    });
+    const h = harness({
+      provider,
+      plan,
+      specialists: createTaxNoticeSpecialists(),
+      coordinator: true,
+    });
+    const taxCase = makeCase("tax-workflow-case", { useCase: "tax-notice" });
+    await store.repositories.cases.insert(taxCase);
+    const run = await h.orchestrator.createRunAsync({
+      ownerId: OWNER,
+      caseId: taxCase.id,
+    });
+
+    const result = await h.worker.runOnceAsync();
+
+    const tasks = await store.repositories.tasks.listForRun(run.id, {
+      ownerId: OWNER,
+      caseId: taxCase.id,
+    });
+    expect(
+      tasks.map((task) => [task.role, task.status, task.lastError]),
+    ).toEqual(
+      expect.arrayContaining(
+        [
+          TAX_NOTICE_ANALYST_ROLE,
+          TAX_RECONCILIATION_ROLE,
+          TAX_RESEARCH_ROLE,
+          TAX_RESPONSE_DRAFTER_ROLE,
+          "independent-reviewer",
+        ].map((role) => [role, "completed", null]),
+      ),
+    );
+    expect(result?.run?.status).toBe("completed");
+    expect(tasks.map((task) => task.role).sort()).toEqual(
+      [
+        TAX_NOTICE_ANALYST_ROLE,
+        TAX_RECONCILIATION_ROLE,
+        TAX_RESEARCH_ROLE,
+        TAX_RESPONSE_DRAFTER_ROLE,
+        "independent-reviewer",
+      ].sort(),
+    );
+    expect(provider.calls).toContain("coordinator");
+    const deliverables = await store.repositories.deliverables.listForRun(
+      run.id,
+      { ownerId: OWNER, caseId: taxCase.id },
+    );
+    const deliverable = deliverables[0];
+    expect(deliverable).toMatchObject({
+      format: "document",
+      title: "Tax notice response pack",
+    });
+    expect(
+      deliverable?.sections.some((section) =>
+        JSON.stringify(section).includes("150000"),
+      ),
+    ).toBe(true);
+    expect(
+      deliverable?.sections.some((section) =>
+        JSON.stringify(section).includes(
+          "No legal research sources were verified",
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it("rejects a changed reference version before planning or dispatch", async () => {
     const provider = new ScriptedProvider(routes("a"));
     const plan = planOf([{ key: "a" }]);

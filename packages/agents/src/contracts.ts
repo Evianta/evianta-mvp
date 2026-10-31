@@ -79,6 +79,25 @@ export const PriorFindingSchema = z.object({
   description: z.string(),
   severity: z.string(),
   evidenceIds: z.array(z.string()),
+  sourceEvidence: z
+    .array(
+      z.object({
+        kind: z.enum(["document", "research"]),
+        sourceRef: z.string().min(1),
+        confidence: z.enum(["high", "medium", "low", "unassessed"]),
+        documentId: z.string().nullable(),
+        location: EvidenceLocationSchema.optional(),
+        citation: z
+          .object({
+            url: z.string().url(),
+            title: z.string().min(1),
+            claim: z.string().min(1),
+            span: z.string().nullable(),
+          })
+          .optional(),
+      }),
+    )
+    .optional(),
   claims: z.array(NumericClaimSchema),
 });
 export type PriorFinding = z.infer<typeof PriorFindingSchema>;

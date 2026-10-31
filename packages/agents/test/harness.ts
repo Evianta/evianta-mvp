@@ -85,7 +85,9 @@ export class ScriptedProvider implements ModelProvider {
         ? "review"
         : request.system.startsWith("You are a careful business data analyst.")
           ? "business-data-analyst"
-          : (input.task as { key: string }).key;
+          : request.system.startsWith("You are a tax research assistant")
+            ? "tax-search"
+            : (input.task as { key: string }).key;
     this.calls.push(route);
     this.inputs.set(route, [...(this.inputs.get(route) ?? []), input]);
     this.active += 1;

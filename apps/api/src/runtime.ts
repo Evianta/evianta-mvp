@@ -13,6 +13,11 @@ import {
   createBusinessDataAnalystAgent,
   createGenericAnalystAgent,
   createMongoCheckpointerAsync,
+  createCoordinatorAgent,
+  createReviewAgent,
+  createTaxNoticePlan,
+  createTaxNoticeSpecialists,
+  taxNoticeProfiles,
   seedAgentDirectoryAsync,
   createTrivialReferencePlan,
 } from "@evianta/agents";
@@ -61,6 +66,10 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       dbName: store.databaseName,
     });
     await seedAgentDirectoryAsync(store.repositories.agentProfiles);
+    await seedAgentDirectoryAsync(
+      store.repositories.agentProfiles,
+      taxNoticeProfiles.map((profile) => ({ profile })),
+    );
 
     const accounting: UsageAccounting =
       usage.mode === "enforced"
@@ -126,7 +135,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
     ];
     const plans = new PlanRegistry()
       .register(dataAnalysisPlan)
-      .register(createTrivialReferencePlan("tax-notice"))
+      .register(createTaxNoticePlan())
       .register(createTrivialReferencePlan("msme-payment"));
     const ingestion = createDocumentIngestion({
       documents: store.repositories.documents,
@@ -152,7 +161,10 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       specialists: [
         createBusinessDataAnalystAgent(),
         createGenericAnalystAgent(),
+        ...createTaxNoticeSpecialists(),
       ],
+      coordinator: createCoordinatorAgent(),
+      reviewer: createReviewAgent(),
       checkpointer,
       userRunLimit: usage.userMaxConcurrentRuns,
       globalRunLimit: usage.globalMaxConcurrentRuns,

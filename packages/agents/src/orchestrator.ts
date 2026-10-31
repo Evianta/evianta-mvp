@@ -1384,10 +1384,13 @@ export class Orchestrator {
     return tasks.filter((item) => seen.has(item.id));
   }
 
-  private priorFindings(
+  private async priorFindings(
+    execution: Execution,
     sources: readonly Task[],
     state: TaskGraphStateValue,
-  ): PriorFinding[] {
+  ): Promise<PriorFinding[]> {
+    const evidence = await this.repos.evidence.listForCase(execution.scope);
+    const evidenceById = new Map(evidence.map((item) => [item.id, item]));
     return sources.flatMap((source) => {
       const outcome = state.results[source.id];
       if (outcome?.status !== "completed") return [];
@@ -1399,6 +1402,32 @@ export class Orchestrator {
         description: finding.description,
         severity: finding.severity,
         evidenceIds: finding.evidenceIds,
+        sourceEvidence: finding.evidenceIds.flatMap((id) => {
+          const item = evidenceById.get(id);
+          if (!item) return [];
+          return [
+            item.kind === "document"
+              ? {
+                  kind: item.kind,
+                  sourceRef: item.sourceRef,
+                  confidence: item.confidence,
+                  documentId: item.documentId,
+                  location: item.location,
+                }
+              : {
+                  kind: item.kind,
+                  sourceRef: item.sourceRef,
+                  confidence: item.confidence,
+                  documentId: null,
+                  citation: {
+                    url: item.citation.url,
+                    title: item.citation.title,
+                    claim: item.citation.claim,
+                    span: item.citation.span,
+                  },
+                },
+          ];
+        }),
         claims: finding.claims,
       }));
     });
@@ -1753,7 +1782,7 @@ export class Orchestrator {
       const context = this.contextFor(execution, task.id, humanInput);
       if (isReview) {
         const ancestors = this.ancestorsOf(task, tasks);
-        const findings = this.priorFindings(ancestors, state);
+        const findings = await this.priorFindings(execution, ancestors, state);
         flags = runDeterministicChecks(
           findings.map((finding) => ({
             id: finding.findingId,
@@ -1785,7 +1814,7 @@ export class Orchestrator {
             role: task.role,
             instructions: this.instructionsFor(execution, task, state),
           },
-          priorFindings: this.priorFindings(sources, state),
+          priorFindings: await this.priorFindings(execution, sources, state),
           documents: [],
           humanInput: humanInput ?? null,
         };

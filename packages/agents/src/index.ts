@@ -10,6 +10,7 @@ export * from "./orchestrator.js";
 export * from "./plan.js";
 export * from "./planning.js";
 export * from "./roles.js";
+export * from "./tax-notice.js";
 export * from "./usage.js";
 export * from "./verification.js";
 export * from "./worker.js";
