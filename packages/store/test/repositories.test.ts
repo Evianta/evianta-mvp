@@ -1254,6 +1254,19 @@ function repositoryContract(
           ownerScope,
         ),
       ).toBeNull();
+      expect(
+        await repositories.deliverables.replaceOwned(
+          makeDeliverable(deliverable.id, 3),
+          ownerScope,
+          { expectedVersion: 1 },
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.deliverables.findOwnedById(
+          deliverable.id,
+          ownerScope,
+        ),
+      ).toMatchObject({ version: 2 });
     });
 
     it("rejects out-of-order events and preserves monotonic visibility", async () => {

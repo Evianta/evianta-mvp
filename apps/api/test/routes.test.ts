@@ -665,8 +665,12 @@ describe("case API routes", () => {
     });
     const body = (await details.json()) as {
       deliverables: Array<{
+        id: string;
+        version: number;
         format: string;
         sections: Array<{
+          id: string;
+          reviewStatus: string;
           content: {
             report: { metrics: { total: number } };
             dashboard: { charts: unknown[] };
@@ -695,6 +699,142 @@ describe("case API routes", () => {
           item.location.rowRange.end === 7,
       ),
     ).toBe(true);
+
+    if (!deliverable || !deliverable.sections[0]) {
+      throw new Error("The analyst run did not produce a reviewable section.");
+    }
+    const section = deliverable.sections[0];
+    const missingComment = await fetch(
+      `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          ...authHeaders(),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          expectedVersion: deliverable.version,
+          reviewStatus: "changes-requested",
+        }),
+      },
+    );
+    expect(missingComment.status).toBe(400);
+
+    const review = await fetch(
+      `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          ...authHeaders(),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          expectedVersion: deliverable.version,
+          reviewStatus: "accepted",
+          reviewerContent: "Reviewer-adjusted summary.",
+        }),
+      },
+    );
+    expect(review.status).toBe(200);
+    const reviewedDeliverable = (
+      (await review.json()) as {
+        deliverable: {
+          version: number;
+          sections: Array<{
+            reviewStatus: string;
+            reviewerContent: string | null;
+            reviewerId: string | null;
+          }>;
+        };
+      }
+    ).deliverable;
+    expect(reviewedDeliverable.version).toBe(deliverable.version + 1);
+    expect(reviewedDeliverable.sections[0]).toMatchObject({
+      reviewStatus: "accepted",
+      reviewerContent: "Reviewer-adjusted summary.",
+      reviewerId: user.id,
+    });
+
+    const staleApproval = await fetch(
+      `${baseUrl}/cases/${created.case.id}/approve`,
+      {
+        method: "POST",
+        headers: {
+          ...authHeaders(),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          deliverableId: deliverable.id,
+          deliverableVersion: deliverable.version,
+        }),
+      },
+    );
+    expect(staleApproval.status).toBe(409);
+
+    const approvalResponse = await fetch(
+      `${baseUrl}/cases/${created.case.id}/approve`,
+      {
+        method: "POST",
+        headers: {
+          ...authHeaders(),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          deliverableId: deliverable.id,
+          deliverableVersion: reviewedDeliverable.version,
+          note: "Reviewed the analyst output.",
+        }),
+      },
+    );
+    expect(approvalResponse.status).toBe(201);
+    expect(await approvalResponse.json()).toMatchObject({
+      approval: {
+        caseId: created.case.id,
+        deliverableId: deliverable.id,
+        deliverableVersion: reviewedDeliverable.version,
+        actorId: user.id,
+        unresolvedQuestionIds: [],
+        note: "Reviewed the analyst output.",
+      },
+    });
+    const duplicateApproval = await fetch(
+      `${baseUrl}/cases/${created.case.id}/approve`,
+      {
+        method: "POST",
+        headers: {
+          ...authHeaders(),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          deliverableId: deliverable.id,
+          deliverableVersion: reviewedDeliverable.version,
+          note: "Reviewed the analyst output.",
+        }),
+      },
+    );
+    expect(duplicateApproval.status).toBe(200);
+
+    const nextReview = await fetch(
+      `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          ...authHeaders(),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          expectedVersion: reviewedDeliverable.version,
+          reviewStatus: "pending",
+        }),
+      },
+    );
+    expect(nextReview.status).toBe(200);
+    const updatedDetails = await fetch(`${baseUrl}/cases/${created.case.id}`, {
+      headers: authHeaders(),
+    });
+    expect(
+      ((await updatedDetails.json()) as { approvals: unknown[] }).approvals,
+    ).toEqual([]);
   });
 
   it("requests case deletion without overwriting concurrent usage updates", async () => {

@@ -208,8 +208,10 @@ function ChartView({
 
 export function DataAnalysisResults({
   workspace,
+  onOpenEvidence,
 }: {
   workspace: CaseWorkspace | null;
+  onOpenEvidence: (evidenceId: string) => void;
 }) {
   const deliverable = workspace?.deliverables
     .filter((item) => item.format === "dashboard")
@@ -362,17 +364,25 @@ export function DataAnalysisResults({
                       const document = documentsById.get(source.documentId);
                       const location = source.location;
                       return (
-                        <li
-                          className="text-[10px] text-muted-foreground"
-                          key={id}
-                        >
-                          Evidence: {document?.name ?? source.documentId}
-                          {location.sheet ? ` · ${location.sheet}` : ""}
-                          {location.cellRange ? ` · ${location.cellRange}` : ""}
-                          {location.rowRange
-                            ? ` · rows ${location.rowRange.start}–${location.rowRange.end}`
-                            : ""}
-                          {location.textQuote ? ` · ${location.textQuote}` : ""}
+                        <li key={id}>
+                          <button
+                            type="button"
+                            className="text-left text-[10px] text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                            onClick={() => onOpenEvidence(source.id)}
+                          >
+                            Evidence: {document?.name ?? source.documentId}
+                            {location.sheet ? ` · ${location.sheet}` : ""}
+                            {location.cellRange
+                              ? ` · ${location.cellRange}`
+                              : ""}
+                            {location.rowRange
+                              ? ` · rows ${location.rowRange.start}–${location.rowRange.end}`
+                              : ""}
+                            {location.page ? ` · page ${location.page}` : ""}
+                            {location.textQuote
+                              ? ` · ${location.textQuote}`
+                              : ""}
+                          </button>
                         </li>
                       );
                     })}

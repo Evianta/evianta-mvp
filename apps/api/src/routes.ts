@@ -1,4 +1,5 @@
 import {
+  ApprovalSchema,
   AgentProfileSetSchema,
   CaseSchema,
   CreateCaseRequestSchema,
@@ -7,9 +8,12 @@ import {
   RunDtoSchema,
   RunEventSchema,
   UsageSummarySchema,
+  isApprovalCurrent,
   syntheticWorkflowFixtures,
   liveWorkflows,
+  type Approval,
   type AgentProfileRepository,
+  type ApprovalRepository,
   type Case,
   type CaseRepository,
   type DeliverableRepository,
@@ -34,7 +38,7 @@ import {
   type DocumentIngestion,
 } from "@evianta/ingestion";
 import type { UploadEnvironment } from "@evianta/env/server";
-import type { UsageAdminService } from "@evianta/store";
+import { StoreError, type UsageAdminService } from "@evianta/store";
 import Busboy from "busboy";
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
@@ -58,6 +62,7 @@ type CaseRepositories = {
   tasks: TaskRepository;
   runs: RunRepository;
   deliverables: DeliverableRepository;
+  approvals: ApprovalRepository;
   events: RunEventRepository;
 };
 
@@ -97,6 +102,36 @@ const RetryInputSchema = z.object({ priorRunId: z.string().min(1) }).strict();
 const CancelInputSchema = z
   .object({ reason: z.string().max(500).optional() })
   .strict();
+const ReviewSectionInputSchema = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+    reviewerContent: z.string().max(50_000).optional(),
+    reviewStatus: z
+      .enum(["pending", "accepted", "changes-requested"])
+      .optional(),
+    reviewComment: z.string().max(5_000).nullable().optional(),
+  })
+  .strict()
+  .refine(
+    (input) =>
+      input.reviewerContent !== undefined ||
+      input.reviewStatus !== undefined ||
+      input.reviewComment !== undefined,
+    "At least one review field is required",
+  )
+  .refine(
+    (input) =>
+      input.reviewStatus !== "changes-requested" ||
+      Boolean(input.reviewComment?.trim()),
+    "A comment is required when requesting changes",
+  );
+const ApproveInputSchema = z
+  .object({
+    deliverableId: z.string().min(1),
+    deliverableVersion: z.number().int().positive(),
+    note: z.string().max(1_000).default(""),
+  })
+  .strict();
 
 const terminalStatuses = new Set([
   "completed",
@@ -131,6 +166,26 @@ function requireLiveWorkflow(
 
 function routeParam(value: string | string[] | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function hasPlainTextSectionContent(section: {
+  kind: string;
+  content: unknown;
+  reviewerContent: unknown;
+}): boolean {
+  if (section.kind !== "text") return false;
+  if (
+    typeof section.content === "string" ||
+    typeof section.reviewerContent === "string"
+  ) {
+    return true;
+  }
+  return (
+    typeof section.content === "object" &&
+    section.content !== null &&
+    "summary" in section.content &&
+    typeof section.content.summary === "string"
+  );
 }
 
 function sendValidationError(
@@ -943,6 +998,14 @@ export function registerCaseApiRoutes(
           return { tasks, deliverables };
         }),
       );
+      const deliverables = runChildren.flatMap((entry) => entry.deliverables);
+      const approvals = (
+        await Promise.all(
+          deliverables.map((deliverable) =>
+            repositories.approvals.findForDeliverable(deliverable.id, scope),
+          ),
+        )
+      ).filter((approval): approval is Approval => approval !== null);
       response.status(200).json({
         case: record,
         state: record.status,
@@ -954,7 +1017,8 @@ export function registerCaseApiRoutes(
         tasks: runChildren.flatMap((entry) => entry.tasks),
         findings,
         evidence,
-        deliverables: runChildren.flatMap((entry) => entry.deliverables),
+        deliverables,
+        approvals,
       });
     },
   );
@@ -1617,6 +1681,180 @@ export function registerCaseApiRoutes(
         return;
       }
       response.status(200).json({ deliverable });
+    },
+  );
+
+  app.patch(
+    "/cases/:caseId/deliverables/:deliverableId/sections/:sectionId",
+    authenticate,
+    requireCase(repositories, true),
+    async (request, response) => {
+      const principal = authContext(request)?.principal;
+      const record = requestCase(request);
+      const deliverableId = routeParam(request.params.deliverableId);
+      const sectionId = routeParam(request.params.sectionId);
+      const input = parseInput(
+        ReviewSectionInputSchema,
+        request.body,
+        response,
+      );
+      if (!principal || !record || !deliverableId || !sectionId || !input)
+        return;
+      const scope = { ownerId: principal.userId, caseId: record.id };
+      const deliverable = await repositories.deliverables.findOwnedById(
+        deliverableId,
+        scope,
+      );
+      const section = deliverable?.sections.find(
+        (item) => item.id === sectionId,
+      );
+      if (!deliverable || !section) {
+        sendApiError(response, 404, "not-found", "Resource not found");
+        return;
+      }
+      if (deliverable.version !== input.expectedVersion) {
+        sendApiError(
+          response,
+          409,
+          "conflict",
+          "This deliverable changed. Reload it before saving your review.",
+        );
+        return;
+      }
+      if (
+        input.reviewerContent !== undefined &&
+        !hasPlainTextSectionContent(section)
+      ) {
+        sendApiError(
+          response,
+          400,
+          "validation-failed",
+          "Only plain-text sections can be edited inline.",
+        );
+        return;
+      }
+      const reviewedAt = new Date().toISOString();
+      const updated = {
+        ...deliverable,
+        version: deliverable.version + 1,
+        updatedAt: reviewedAt,
+        sections: deliverable.sections.map((item) =>
+          item.id !== sectionId
+            ? item
+            : {
+                ...item,
+                ...(input.reviewerContent === undefined
+                  ? {}
+                  : { reviewerContent: input.reviewerContent }),
+                reviewStatus: input.reviewStatus ?? item.reviewStatus,
+                reviewComment:
+                  input.reviewComment === undefined
+                    ? item.reviewComment
+                    : input.reviewComment,
+                reviewerId: principal.userId,
+                reviewedAt,
+              },
+        ),
+      };
+      const saved = await repositories.deliverables.replaceOwned(
+        updated,
+        scope,
+        { expectedVersion: input.expectedVersion },
+      );
+      if (!saved) {
+        sendApiError(
+          response,
+          409,
+          "conflict",
+          "This deliverable changed. Reload it before saving your review.",
+        );
+        return;
+      }
+      response.status(200).json({ deliverable: updated });
+    },
+  );
+
+  app.post(
+    "/cases/:caseId/approve",
+    authenticate,
+    requireCase(repositories, true),
+    async (request, response) => {
+      const principal = authContext(request)?.principal;
+      const record = requestCase(request);
+      const input = parseInput(ApproveInputSchema, request.body, response);
+      if (!principal || !record || !input) return;
+      const scope = { ownerId: principal.userId, caseId: record.id };
+      const deliverable = await repositories.deliverables.findOwnedById(
+        input.deliverableId,
+        scope,
+      );
+      if (!deliverable) {
+        sendApiError(response, 404, "not-found", "Resource not found");
+        return;
+      }
+      if (deliverable.version !== input.deliverableVersion) {
+        sendApiError(
+          response,
+          409,
+          "conflict",
+          "This deliverable changed. Reload it before approving.",
+        );
+        return;
+      }
+      const existing = await repositories.approvals.findForDeliverable(
+        deliverable.id,
+        scope,
+      );
+      if (existing && isApprovalCurrent(existing, deliverable)) {
+        response.status(200).json({ approval: existing });
+        return;
+      }
+      const findings = await repositories.findings.listForCase(scope);
+      const approval = ApprovalSchema.parse({
+        id: randomUUID(),
+        caseId: record.id,
+        deliverableId: deliverable.id,
+        deliverableVersion: deliverable.version,
+        actorId: principal.userId,
+        approvedAt: new Date().toISOString(),
+        unresolvedQuestionIds: findings.flatMap((finding) =>
+          finding.openQuestions
+            .filter((question) => question.status === "open")
+            .map((question) => question.id),
+        ),
+        note: input.note,
+      });
+      if (existing) {
+        await repositories.approvals.invalidateForDeliverable(
+          deliverable.id,
+          scope,
+        );
+      }
+      try {
+        await repositories.approvals.insert(approval, scope);
+      } catch (error) {
+        if (error instanceof StoreError && error.code === "stale-approval") {
+          sendApiError(
+            response,
+            409,
+            "conflict",
+            "This deliverable changed before approval could be recorded.",
+          );
+          return;
+        }
+        if (error instanceof StoreError && error.code === "duplicate-key") {
+          const current = await repositories.approvals.findForDeliverable(
+            deliverable.id,
+            scope,
+          );
+          if (current && isApprovalCurrent(current, deliverable)) {
+            response.status(200).json({ approval: current });
+            return;
+          }
+        }
+        throw error;
+      }
+      response.status(201).json({ approval });
     },
   );
 

@@ -199,7 +199,11 @@ export interface DeliverableRepository {
   findOwnedById(id: string, scope: OwnerScope): Promise<Deliverable | null>;
   listForRun(runId: string, scope: OwnerScope): Promise<Deliverable[]>;
   insert(deliverable: Deliverable, scope: OwnerScope): Promise<void>;
-  replaceOwned(deliverable: Deliverable, scope: OwnerScope): Promise<boolean>;
+  replaceOwned(
+    deliverable: Deliverable,
+    scope: OwnerScope,
+    options?: { expectedVersion?: number },
+  ): Promise<boolean>;
 }
 
 export interface ApprovalRepository {

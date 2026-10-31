@@ -387,8 +387,8 @@ export class MongoStore {
         findOwnedById: (id, scope) => this.deliverableFindOwnedById(id, scope),
         listForRun: (id, scope) => this.deliverableListForRun(id, scope),
         insert: (record, scope) => this.deliverableInsert(record, scope),
-        replaceOwned: (record, scope) =>
-          this.deliverableReplaceOwned(record, scope),
+        replaceOwned: (record, scope, options) =>
+          this.deliverableReplaceOwned(record, scope, options),
       },
       approvals: {
         findForDeliverable: (id, scope) =>
@@ -1765,6 +1765,7 @@ export class MongoStore {
   async deliverableReplaceOwned(
     deliverable: Deliverable,
     scope: OwnerScope,
+    options?: { expectedVersion?: number },
   ): Promise<boolean> {
     const parsed = DeliverableSchema.parse(deliverable);
     if (parsed.caseId !== scope.caseId || !(await this.ownsCase(scope))) {
@@ -1791,7 +1792,14 @@ export class MongoStore {
         );
       }
       const result = await this.deliverables.replaceOne(
-        { _id: parsed.id, caseId: scope.caseId, ownerId: scope.ownerId },
+        {
+          _id: parsed.id,
+          caseId: scope.caseId,
+          ownerId: scope.ownerId,
+          ...(options?.expectedVersion === undefined
+            ? {}
+            : { version: options.expectedVersion }),
+        },
         { ...documentFor(parsed), ownerId: scope.ownerId },
         { session },
       );

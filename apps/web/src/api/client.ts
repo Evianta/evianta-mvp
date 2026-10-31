@@ -1,4 +1,5 @@
 import {
+  ApprovalSchema,
   CaseResponseSchema,
   CaseSchema,
   CreateCaseRequestSchema,
@@ -15,6 +16,9 @@ import {
   type Case,
   type CaseResponse,
   type CreateCaseRequest,
+  type Approval,
+  type Deliverable,
+  type DeliverableSection,
   type DocumentResponse,
   type ListCasesResponse,
   type LatestRunResponse,
@@ -41,7 +45,11 @@ const CaseWorkspaceResponseSchema = z.object({
   findings: z.array(FindingSchema),
   evidence: z.array(EvidenceSchema),
   deliverables: z.array(DeliverableSchema),
+  approvals: z.array(ApprovalSchema),
 });
+
+const DeliverableResponseSchema = z.object({ deliverable: DeliverableSchema });
+const ApprovalResponseSchema = z.object({ approval: ApprovalSchema });
 
 const AdminUsageResponseSchema = z.object({
   rows: z.array(
@@ -66,6 +74,12 @@ const AdminUsageResponseSchema = z.object({
 export type AdminUsageResponse = z.infer<typeof AdminUsageResponseSchema>;
 export type AuthToken = z.infer<typeof TokenResponseSchema>;
 export type CaseWorkspace = z.infer<typeof CaseWorkspaceResponseSchema>;
+export type ReviewSectionUpdate = {
+  expectedVersion: number;
+  reviewerContent?: string;
+  reviewStatus?: DeliverableSection["reviewStatus"];
+  reviewComment?: string | null;
+};
 
 type ResponseSchema<T> = {
   safeParse(
@@ -78,6 +92,19 @@ export interface WebApiClient {
   listCases(): Promise<Case[]>;
   getCase(caseId: string): Promise<Case>;
   getCaseWorkspace(caseId: string): Promise<CaseWorkspace>;
+  downloadDocument(caseId: string, documentId: string): Promise<Blob>;
+  updateDeliverableSection(
+    caseId: string,
+    deliverableId: string,
+    sectionId: string,
+    update: ReviewSectionUpdate,
+  ): Promise<Deliverable>;
+  approveDeliverable(
+    caseId: string,
+    deliverableId: string,
+    deliverableVersion: number,
+    note?: string,
+  ): Promise<Approval>;
   getLatestRun(caseId: string): Promise<RunDto | null>;
   createCase(request: CreateCaseRequest): Promise<Case>;
   uploadDocument(
@@ -154,6 +181,53 @@ export class FetchWebApiClient implements WebApiClient {
       `/cases/${encodeURIComponent(caseId)}`,
       CaseWorkspaceResponseSchema,
     );
+  }
+
+  async downloadDocument(caseId: string, documentId: string): Promise<Blob> {
+    const token = this.options.getToken();
+    if (!token) throw new ApiError(401, "Sign in to continue.");
+    const response = await this.fetcher(
+      `${this.baseUrl}/cases/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(documentId)}/download`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+        credentials: "omit",
+      },
+    );
+    if (response.status === 401 && this.options.getToken() === token) {
+      this.clearPrivateState();
+      this.options.onUnauthorized();
+    }
+    if (!response.ok) throw await this.errorFromResponse(response);
+    return response.blob();
+  }
+
+  async updateDeliverableSection(
+    caseId: string,
+    deliverableId: string,
+    sectionId: string,
+    update: ReviewSectionUpdate,
+  ): Promise<Deliverable> {
+    const response = await this.request(
+      `/cases/${encodeURIComponent(caseId)}/deliverables/${encodeURIComponent(deliverableId)}/sections/${encodeURIComponent(sectionId)}`,
+      DeliverableResponseSchema,
+      this.jsonInit("PATCH", update),
+    );
+    return response.deliverable;
+  }
+
+  async approveDeliverable(
+    caseId: string,
+    deliverableId: string,
+    deliverableVersion: number,
+    note = "",
+  ): Promise<Approval> {
+    const response = await this.request(
+      `/cases/${encodeURIComponent(caseId)}/approve`,
+      ApprovalResponseSchema,
+      this.jsonInit("POST", { deliverableId, deliverableVersion, note }),
+    );
+    return response.approval;
   }
 
   async createCase(request: CreateCaseRequest): Promise<Case> {

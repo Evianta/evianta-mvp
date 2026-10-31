@@ -996,13 +996,19 @@ export class InMemoryStore {
           }
           this.deliverables.set(record.id, record);
         },
-        replaceOwned: async (deliverable, scope) => {
+        replaceOwned: async (deliverable, scope, options) => {
           const record = parse(DeliverableSchema, deliverable);
           if (!this.ownsCase(scope) || record.caseId !== scope.caseId) {
             return false;
           }
           const current = this.deliverables.get(record.id);
           if (!current || current.caseId !== scope.caseId) return false;
+          if (
+            options?.expectedVersion !== undefined &&
+            current.version !== options.expectedVersion
+          ) {
+            return false;
+          }
           const run = this.runs.get(record.runId);
           if (
             !run ||
