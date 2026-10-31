@@ -34,6 +34,7 @@ import {
   StoreError,
 } from "@evianta/store";
 import type { CaseApiServices } from "./routes.js";
+import { respondToMockRequest } from "./mock-responses.js";
 
 export interface ApiRuntime {
   services: CaseApiServices;
@@ -96,18 +97,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
             apiKey: aiEnvironment.modelApiKey ?? "",
             baseUrl: aiEnvironment.museBaseUrl,
           })
-        : new MockProvider({
-            responses: [
-              JSON.stringify({
-                summary: "Analysis completed using the supplied case record.",
-                findings: [],
-                inputRequired: null,
-                interpretation:
-                  "No significant trend was identified in the supplied records.",
-                insights: [],
-              }),
-            ],
-          });
+        : new MockProvider({ respond: respondToMockRequest });
     const ai = createAi({
       provider,
       accounting,

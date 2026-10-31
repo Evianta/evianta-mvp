@@ -96,8 +96,16 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
+  const MSME_DOCUMENT_ID = "msme-document-1";
   it("runs the MSME case-pack DAG with unavailable research safely flagged", async () => {
     const plan = createMsmePaymentPlan();
+    const invoiceEvidence = specialistOutput(
+      "invoices",
+    ).findings[0]!.evidence.map((item) => ({
+      ...item,
+      sourceRef: `${MSME_DOCUMENT_ID}#page=1`,
+      documentId: MSME_DOCUMENT_ID,
+    }));
     const provider = new ScriptedProvider({
       ...routes("document-analysis", "evidence-analysis", "case-preparation"),
       coordinator: () => ({
@@ -109,14 +117,15 @@ describe("orchestrator", () => {
         })),
       }),
       "document-analysis": () => ({
-        summary: "Extracted synthetic invoice and payment totals.",
+        summary: "Extracted synthetic invoice and payment amounts.",
         findings: [
           {
             ...specialistOutput("invoices").findings[0]!,
             title: "Invoice records",
+            evidence: invoiceEvidence,
             claims: [
               {
-                label: "invoice total",
+                label: "invoice amount: INV-1",
                 value: 150_000,
                 components: null,
                 date: null,
@@ -126,9 +135,10 @@ describe("orchestrator", () => {
           {
             ...specialistOutput("payments").findings[0]!,
             title: "Payment records",
+            evidence: invoiceEvidence,
             claims: [
               {
-                label: "payments total",
+                label: "payment amount: PAY-1",
                 value: 60_000,
                 components: null,
                 date: null,
@@ -138,7 +148,10 @@ describe("orchestrator", () => {
         ],
         inputRequired: null,
       }),
-      "legal-search": () => ({ summary: "No search citations returned." }),
+      "legal-search": () => ({
+        summary: "No search citations returned.",
+        sources: [],
+      }),
     });
     const h = harness({
       provider,
@@ -146,10 +159,15 @@ describe("orchestrator", () => {
       specialists: createMsmePaymentSpecialists(),
       coordinator: true,
     });
+    await seedAsync(
+      store.repositories,
+      "msme-workflow-case",
+      { useCase: "msme-payment" },
+      MSME_DOCUMENT_ID,
+    );
     const msmeCase = makeCase("msme-workflow-case", {
       useCase: "msme-payment",
     });
-    await store.repositories.cases.insert(msmeCase);
     const run = await h.orchestrator.createRunAsync({
       ownerId: OWNER,
       caseId: msmeCase.id,

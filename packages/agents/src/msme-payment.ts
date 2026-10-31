@@ -1,4 +1,4 @@
-import { AiError } from "@evianta/ai";
+import { AiError, type Citation } from "@evianta/ai";
 import type { AgentProfile, UsageUnits } from "@evianta/core";
 import { z } from "zod";
 import type { AgentResult } from "./agent.js";
@@ -153,7 +153,7 @@ export function createMsmePaymentPlan(): ReferencePlan {
         dependsOn: ["document-analysis"],
         required: true,
         instructions:
-          "Use the exact claim labels 'invoice total' and 'payments total' from source-linked findings. Compute outstanding as invoice total minus payments total, accounting for partial payments and unmatched records.",
+          "Use the exact claim labels 'invoice amount: <identifier>' and 'payment amount: <identifier>' from source-linked findings. Sum one amount per distinct record and compute outstanding as invoices minus payments, accounting for partial payments and unmatched records.",
       },
       {
         key: "evidence-analysis",
@@ -200,36 +200,93 @@ export function createMsmePaymentPlan(): ReferencePlan {
 }
 
 const zeroUsage: UsageUnits = { input: 0, output: 0, total: 0 };
-const researchResultSchema = z.object({ summary: z.string() });
+const researchResultSchema = z.object({
+  summary: z.string(),
+  sources: z
+    .array(z.object({ url: z.string(), claim: z.string() }))
+    .describe("A short statement of what each cited official source says"),
+});
 const researchQuery =
   "Find current official Indian government guidance on delayed payments to micro and small enterprises, including official routes for seeking assistance. Return only verifiable official sources; do not infer facts about a supplier or transaction.";
 
-function canonicalClaim(
+type RecordKind = "invoice" | "payment";
+
+interface RecordSet {
+  total: number;
+  count: number;
+  sources: PriorFinding[];
+  problems: string[];
+}
+
+const recordLabelPattern = /^(invoice|payment) amount\s*:\s*(.+)$/;
+
+const roundMoney = (value: number) => Math.round(value * 100) / 100;
+
+/**
+ * Sums one amount per distinct record. A record is identified by the label
+ * "<invoice|payment> amount: <identifier>", so repeated extractions of the same
+ * record count once while distinct records with equal amounts both count.
+ */
+function collectRecords(
   findings: readonly PriorFinding[],
-  label: string,
-): { value: number; sources: PriorFinding[] } | null {
-  const matches = findings.filter((finding) =>
-    finding.claims.some(
-      (claim) =>
-        claim.label.trim().toLowerCase() === label &&
-        claim.value !== null &&
-        Number.isFinite(claim.value),
-    ),
-  );
-  const values = new Set(
-    matches.flatMap((finding) =>
-      finding.claims
-        .filter(
-          (claim) =>
-            claim.label.trim().toLowerCase() === label &&
-            claim.value !== null &&
-            Number.isFinite(claim.value),
-        )
-        .map((claim) => claim.value!),
-    ),
-  );
-  if (values.size !== 1) return null;
-  return { value: [...values][0]!, sources: matches };
+  kind: RecordKind,
+): RecordSet {
+  const records = new Map<
+    string,
+    {
+      identifier: string;
+      amounts: Set<number>;
+      sources: Set<PriorFinding>;
+    }
+  >();
+  for (const finding of findings) {
+    const documentSources = (finding.sourceEvidence ?? []).filter(
+      (source) => source.kind === "document",
+    );
+    for (const claim of finding.claims) {
+      const match = recordLabelPattern.exec(
+        claim.label.trim().toLowerCase().replace(/\s+/g, " "),
+      );
+      if (!match || match[1] !== kind) continue;
+      const identifier = claim.label.slice(claim.label.indexOf(":") + 1).trim();
+      const key = identifier.toLowerCase().replace(/\s+/g, " ");
+      const record = records.get(key) ?? {
+        identifier,
+        amounts: new Set<number>(),
+        sources: new Set<PriorFinding>(),
+      };
+      if (claim.value !== null && Number.isFinite(claim.value)) {
+        record.amounts.add(claim.value);
+      }
+      if (documentSources.length) record.sources.add(finding);
+      records.set(key, record);
+    }
+  }
+  const problems: string[] = [];
+  let total = 0;
+  let count = 0;
+  const sources = new Set<PriorFinding>();
+  for (const record of records.values()) {
+    const name = `${kind} "${record.identifier}"`;
+    if (record.amounts.size === 0) {
+      problems.push(`The amount of ${name} is missing or unreadable.`);
+      continue;
+    }
+    if (record.amounts.size > 1) {
+      problems.push(
+        `${name} has conflicting amounts (${[...record.amounts].join(", ")}).`,
+      );
+      continue;
+    }
+    if (record.sources.size === 0) {
+      problems.push(`The amount of ${name} has no source-linked evidence.`);
+      continue;
+    }
+    total += [...record.amounts][0]!;
+    count += 1;
+    for (const source of record.sources) sources.add(source);
+  }
+  return { total: roundMoney(total), count, sources: [...sources], problems };
 }
 
 function sourceEvidenceDrafts(
@@ -276,56 +333,47 @@ function formatAmount(value: number): string {
 }
 
 function paymentReconciliationFinding(
-  invoiceTotal: ReturnType<typeof canonicalClaim>,
-  paymentsTotal: ReturnType<typeof canonicalClaim>,
+  invoices: RecordSet,
+  payments: RecordSet,
 ): SpecialistOutput["findings"][number] {
-  if (!invoiceTotal || !paymentsTotal) {
-    const sources = [invoiceTotal, paymentsTotal].flatMap(
-      (source) => source?.sources ?? [],
-    );
+  const problems = [...invoices.problems, ...payments.problems];
+  if (!invoices.count) problems.push("No source-linked invoice records found.");
+  if (!payments.count) problems.push("No source-linked payment records found.");
+  const evidence = sourceEvidenceDrafts([
+    ...invoices.sources,
+    ...payments.sources,
+  ]);
+  if (problems.length) {
     return {
       title: "Outstanding balance cannot yet be calculated",
-      description:
-        "Both source-linked invoice and payment totals are required before calculating an outstanding balance.",
+      description: `Every invoice and payment record needs one source-linked amount before a balance is calculated. ${problems.join(" ")}`,
       severity: "low",
       confidence: 1,
-      evidence: sourceEvidenceDrafts(sources),
+      evidence,
       assumptions: [],
       openQuestions: [
         {
-          text: "Provide or confirm the invoice total and the payments recorded against those invoices.",
+          text: "Provide or confirm each invoice amount and the payments recorded against those invoices, resolving the listed record issues.",
           severity: "high",
         },
       ],
       claims: [],
     };
   }
-  const outstanding = invoiceTotal.value - paymentsTotal.value;
-  const evidence = sourceEvidenceDrafts([
-    ...invoiceTotal.sources,
-    ...paymentsTotal.sources,
-  ]);
+  const outstanding = roundMoney(invoices.total - payments.total);
   return {
     title: "Outstanding payment balance",
-    description: `Confirmed invoice total is ${formatAmount(invoiceTotal.value)} and confirmed payments total is ${formatAmount(paymentsTotal.value)}. Outstanding balance (invoice total minus payments total) is ${formatAmount(outstanding)}.`,
+    description: `${invoices.count} invoice record(s) total ${formatAmount(invoices.total)} and ${payments.count} payment record(s) total ${formatAmount(payments.total)}. Outstanding balance (invoices minus payments) is ${formatAmount(outstanding)}.`,
     severity: outstanding > 0 ? "medium" : "info",
     confidence: 1,
     evidence,
     assumptions: [],
-    openQuestions:
-      evidence.length < 2
-        ? [
-            {
-              text: "Confirm the invoice and payment totals against their original records before relying on this balance.",
-              severity: "high",
-            },
-          ]
-        : [],
+    openQuestions: [],
     claims: [
       {
         label: "outstanding balance",
         value: outstanding,
-        components: [invoiceTotal.value, -paymentsTotal.value],
+        components: [invoices.total, -payments.total],
         date: null,
       },
     ],
@@ -338,14 +386,14 @@ function createMsmePaymentReconciliationAgent(): SpecialistAgent {
     role: MSME_PAYMENT_RECONCILIATION_ROLE,
     modelTier: agentProfile.modelTier,
     systemPrompt:
-      "Deterministically calculate the outstanding balance from canonical source figures. Never estimate or infer a missing or ambiguous amount.",
+      "Deterministically calculate the outstanding balance from per-record source amounts. Never estimate or infer a missing, ambiguous, or unsourced amount.",
     inputSchema: SpecialistInputSchema,
     outputSchema: SpecialistModelOutputSchema,
     profile: agentProfile,
     async run(input: SpecialistInput): Promise<AgentResult<SpecialistOutput>> {
       const finding = paymentReconciliationFinding(
-        canonicalClaim(input.priorFindings, "invoice total"),
-        canonicalClaim(input.priorFindings, "payments total"),
+        collectRecords(input.priorFindings, "invoice"),
+        collectRecords(input.priorFindings, "payment"),
       );
       const output = SpecialistOutputSchema.parse({
         summary:
@@ -392,6 +440,37 @@ function unavailableResearch(): SpecialistOutput {
   });
 }
 
+/** Keeps only citations that can be persisted as research evidence. */
+function researchEvidence(
+  citations: readonly Citation[],
+  claimsByUrl: ReadonlyMap<string, string>,
+): EvidenceDraft[] {
+  const byUrl = new Map<string, EvidenceDraft>();
+  for (const citation of citations) {
+    const url = citation.url.trim();
+    const title = citation.title.trim();
+    if (!title || !z.string().url().safeParse(url).success) continue;
+    if (byUrl.has(url)) continue;
+    const span = citation.span?.trim() || null;
+    byUrl.set(url, {
+      kind: "research",
+      sourceRef: url,
+      confidence: "medium",
+      documentId: null,
+      page: null,
+      textQuote: span,
+      url,
+      title,
+      claim:
+        citation.claim?.trim() ||
+        claimsByUrl.get(url) ||
+        span ||
+        `Returned by official-source search as: ${title}`,
+    });
+  }
+  return [...byUrl.values()];
+}
+
 function isUnavailableSearch(error: unknown): error is AiError {
   return (
     error instanceof AiError &&
@@ -410,6 +489,7 @@ function createMsmeLegalResearchAgent(): SpecialistAgent {
     "Search only for authoritative official sources. Do not make a legal determination or assert that a route applies to this supplier.",
     "The query is deliberately generic and contains no case or personal data.",
     "Citations are captured separately from provider search results.",
+    "For every cited URL, return a short claim in sources describing what that source says; do not state that it applies to this supplier.",
   ].join("\n");
   return {
     role: MSME_LEGAL_RESEARCH_ROLE,
@@ -433,7 +513,14 @@ function createMsmeLegalResearchAgent(): SpecialistAgent {
           signal: context.signal,
           webSearch: true,
         });
-        const output = result.citations.length
+        const claimsByUrl = new Map(
+          result.output.sources.map((source) => [
+            source.url.trim(),
+            source.claim.trim(),
+          ]),
+        );
+        const evidence = researchEvidence(result.citations, claimsByUrl);
+        const output = evidence.length
           ? SpecialistOutputSchema.parse({
               summary:
                 "General official sources were found; applicability requires professional verification.",
@@ -444,17 +531,7 @@ function createMsmeLegalResearchAgent(): SpecialistAgent {
                     "Confirm that each result is current and applies to the specific enterprise, transaction, and jurisdiction.",
                   severity: "medium",
                   confidence: 1,
-                  evidence: result.citations.map((citation) => ({
-                    kind: "research",
-                    sourceRef: citation.url,
-                    confidence: "medium",
-                    documentId: null,
-                    page: null,
-                    textQuote: citation.span ?? null,
-                    url: citation.url,
-                    title: citation.title,
-                    claim: citation.claim ?? null,
-                  })),
+                  evidence,
                   assumptions: [],
                   openQuestions: [
                     {
@@ -503,7 +580,7 @@ export function createMsmePaymentSpecialists(): SpecialistAgent[] {
       [
         "You organize records for a delayed-payment case pack.",
         "Use only supplied document slices and prior findings.",
-        "For figures, use one source-linked claim per source record with the exact labels 'invoice total' or 'payments total'.",
+        "For each invoice and each payment, report one source-linked claim whose label is exactly 'invoice amount: <invoice number>' or 'payment amount: <payment reference>'. The identifier must uniquely name the record; never combine records into one claim.",
         "Cite the document ID and page or cell for every material item.",
         "Flag uncertain extraction, partial payments, unmatched records, and disputed invoices.",
       ].join("\n"),
