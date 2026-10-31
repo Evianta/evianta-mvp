@@ -37,7 +37,7 @@ const source = {
   buffer: Buffer.from("month,revenue\nJan,100\nFeb,200"),
 };
 const settings = {
-  workflows: ["data-analysis"],
+  workflows: ["data-analysis", "msme-payment"],
   uploadMaxBytes: 1024,
   uploadMaxFiles: 2,
   documentMaxPages: 20,
@@ -277,35 +277,38 @@ test("conflicting message and data ask for selection; choosing never replaces th
   ).toBeVisible();
   await page
     .getByRole("button", {
-      name: "Choose MSME delayed payment - Coming next",
+      name: "Choose MSME delayed payment",
       exact: true,
     })
     .click();
   await expect(
     page.getByRole("button", { name: "Start task", exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
   await expect(prompt).toHaveValue("Review my overdue invoices");
   expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
 });
 
-test("clear tax and MSME messages are detected but cannot start unavailable work", async ({
+test("MSME messages are available while tax remains unavailable", async ({
   page,
 }) => {
   const calls = await setup(page);
   await page.goto("/");
   await signIn(page);
-  for (const [message, label] of [
-    ["Reply to a 143(1) intimation about TDS", "Tax notice"],
-    ["Reconcile my overdue invoices", "MSME delayed payment"],
-  ]) {
-    await page.getByLabel("Task prompt", { exact: true }).fill(message);
-    await expect(
-      page.getByRole("status").filter({ hasText: `Detected: ${label}` }),
-    ).toContainText("Coming next");
-    await expect(
-      page.getByRole("button", { name: "Start task", exact: true }),
-    ).toBeDisabled();
-  }
+  const prompt = page.getByLabel("Task prompt", { exact: true });
+  const start = page.getByRole("button", { name: "Start task", exact: true });
+  await prompt.fill("Reply to a 143(1) intimation about TDS");
+  await expect(
+    page.getByRole("status").filter({ hasText: "Detected: Tax notice" }),
+  ).toContainText("Coming next");
+  await expect(start).toBeDisabled();
+
+  await prompt.fill("Reconcile my overdue invoices");
+  await expect(
+    page
+      .getByRole("status")
+      .filter({ hasText: "Detected: MSME delayed payment" }),
+  ).not.toContainText("Coming next");
+  await expect(start).toBeEnabled();
   expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
 });
 

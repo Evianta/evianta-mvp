@@ -163,57 +163,38 @@ describe("case API routes", () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      workflows: ["data-analysis"],
+      workflows: ["data-analysis", "msme-payment"],
       ...services.uploads,
     });
   });
 
-  it.each(["tax-notice", "msme-payment"] as const)(
-    "blocks live %s creation, upload and run admission",
-    async (useCase) => {
-      const response = await fetch(`${baseUrl}/cases`, {
-        method: "POST",
-        headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ title: "Not available", useCase }),
-      });
-      expect(response.status).toBe(409);
-      expect(await repositories.cases.listOwned(user.id)).toEqual([]);
-      const record = {
-        ...syntheticWorkflowFixtures.dataAnalysis.case,
-        id: `disabled-${useCase}`,
-        ownerId: user.id,
-        isSample: false,
-        synthetic: false,
-        useCase,
-      };
-      await repositories.cases.insert(record);
-      for (const [path, body] of [
-        ["/runs", { caseId: record.id }],
-        [`/cases/${record.id}/run`, {}],
-        [`/cases/${record.id}/retry`, { priorRunId: "absent" }],
-        [`/cases/${record.id}/documents`, {}],
-      ] as const) {
-        const blocked = await fetch(`${baseUrl}${path}`, {
-          method: "POST",
-          headers: { ...authHeaders(), "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        expect(blocked.status).toBe(409);
-        expect(await blocked.json()).toMatchObject({
-          error: { message: expect.stringContaining("coming next") },
-        });
-      }
-      expect(
-        await repositories.documents.listOwned({
-          ownerId: user.id,
-          caseId: record.id,
-        }),
-      ).toEqual([]);
-      expect(await repositories.runs.listForCase(record.id, user.id)).toEqual(
-        [],
-      );
-    },
-  );
+  it("allows MSME-payment cases to be created", async () => {
+    const response = await fetch(`${baseUrl}/cases`, {
+      method: "POST",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Synthetic MSME payment",
+        description: "Reconcile invoices and payments",
+        useCase: "msme-payment",
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      case: { useCase: "msme-payment", title: "Synthetic MSME payment" },
+    });
+  });
+
+  it("keeps tax notice creation disabled until its workflow is merged", async () => {
+    const response = await fetch(`${baseUrl}/cases`, {
+      method: "POST",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Not available",
+        useCase: "tax-notice",
+      }),
+    });
+    expect(response.status).toBe(409);
+  });
 
   it.each([undefined, null, "sample-sales-quarter"])(
     "accepts the web client's case-creation request with source %s",

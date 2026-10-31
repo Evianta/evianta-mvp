@@ -10,6 +10,11 @@ import {
   RunWorker,
   Orchestrator,
   BUSINESS_DATA_ANALYST_ROLE,
+  createCoordinatorAgent,
+  createReviewAgent,
+  createMsmePaymentPlan,
+  createMsmePaymentSpecialists,
+  msmePaymentProfiles,
   createBusinessDataAnalystAgent,
   createGenericAnalystAgent,
   createMongoCheckpointerAsync,
@@ -61,6 +66,10 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       dbName: store.databaseName,
     });
     await seedAgentDirectoryAsync(store.repositories.agentProfiles);
+    await seedAgentDirectoryAsync(
+      store.repositories.agentProfiles,
+      msmePaymentProfiles.map((profile) => ({ profile })),
+    );
 
     const accounting: UsageAccounting =
       usage.mode === "enforced"
@@ -127,7 +136,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
     const plans = new PlanRegistry()
       .register(dataAnalysisPlan)
       .register(createTrivialReferencePlan("tax-notice"))
-      .register(createTrivialReferencePlan("msme-payment"));
+      .register(createMsmePaymentPlan());
     const ingestion = createDocumentIngestion({
       documents: store.repositories.documents,
       extractions: store.repositories.extractions,
@@ -152,7 +161,10 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       specialists: [
         createBusinessDataAnalystAgent(),
         createGenericAnalystAgent(),
+        ...createMsmePaymentSpecialists(),
       ],
+      coordinator: createCoordinatorAgent(),
+      reviewer: createReviewAgent(),
       checkpointer,
       userRunLimit: usage.userMaxConcurrentRuns,
       globalRunLimit: usage.globalMaxConcurrentRuns,

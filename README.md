@@ -102,8 +102,9 @@ need a choice. Sample-origin entry uses Start at `/?source=<sample-id>`.
 Enter submits, Shift+Enter adds a line, and IME composition does not submit.
 Starting authorizes private case creation, upload/extraction and execution under
 existing model limits. File limits and enabled workflows come from the authenticated
-`GET /intake/configuration` endpoint. Tax and MSME suggestions are **Coming next**;
-the API also rejects live creation, uploads and execution for those workflows.
+`GET /intake/configuration` endpoint. MSME delayed-payment work is live; tax notices
+remain **Coming next**. The API rejects creation, uploads and execution for tax-notice
+cases until that workflow is enabled.
 
 Ready sources start a run automatically. Sources still being read open in the case
 workspace with preparation status and **Start analysis** when ready. Completed

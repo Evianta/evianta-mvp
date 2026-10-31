@@ -13,7 +13,10 @@ export const UseCaseSchema = z.enum([
 ]);
 export type UseCase = z.infer<typeof UseCaseSchema>;
 
-export const liveWorkflows: readonly UseCase[] = ["data-analysis"];
+export const liveWorkflows: readonly UseCase[] = [
+  "data-analysis",
+  "msme-payment",
+];
 
 export const IntakeConfigurationSchema = z.object({
   workflows: z.array(UseCaseSchema),

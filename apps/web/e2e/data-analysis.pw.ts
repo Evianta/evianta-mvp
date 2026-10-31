@@ -134,7 +134,7 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/intake/configuration", (route) =>
     route.fulfill({
       json: {
-        workflows: ["data-analysis"],
+        workflows: ["data-analysis", "msme-payment"],
         uploadMaxBytes: 25 * 1024 * 1024,
         uploadMaxFiles: 5,
         documentMaxPages: 80,
@@ -143,7 +143,7 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test("shows dataset formats without PDF limits in data-analysis intake", async ({
+test("shows each supported workflow's file limits in task intake", async ({
   page,
 }) => {
   await page.route("**/auth/token", (route) =>
@@ -175,10 +175,10 @@ test("shows dataset formats without PDF limits in data-analysis intake", async (
   await expect(page.getByRole("combobox")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Start task", exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
   await expect(
     page.getByRole("status").filter({ hasText: "Coming next" }),
-  ).toBeVisible();
+  ).toHaveCount(0);
 });
 
 test("creates a case with two CSVs without optional supporting documents", async ({
