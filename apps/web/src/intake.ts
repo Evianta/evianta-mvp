@@ -1,4 +1,58 @@
-import type { UseCase } from "@evianta/core";
+import { CreateCaseRequestSchema, type UseCase } from "@evianta/core";
+
+export const starterPrompts: Record<UseCase, string> = {
+  "data-analysis":
+    "Analyze my sales spreadsheet, highlight trends and anomalies, and create a dashboard.",
+  "tax-notice":
+    "Help me review an income-tax notice, reconcile the records, and prepare a response for professional review.",
+  "msme-payment":
+    "Reconcile my invoices and payments, identify overdue amounts, and prepare a follow-up case pack.",
+};
+
+export interface IntakeAttachmentHint {
+  name: string;
+  header?: string;
+}
+
+export function inferIntakeWorkflow(
+  prompt: string,
+  attachments: IntakeAttachmentHint[],
+): UseCase | null {
+  const signals: Record<UseCase, RegExp> = {
+    "data-analysis":
+      /\b(sales|revenue|dashboard|data\s+analysis|analy[sz]e.{0,30}(?:data|spreadsheet)|dataset|trends|anomalies)\b/i,
+    "tax-notice":
+      /\b(tax|tds|itr|ais|form\s*26as|intimation|assessment|143\s*\(\s*1\s*\)|income.tax)\b/i,
+    "msme-payment":
+      /\b(msme|invoice|invoices|overdue|delayed.payment|payment|payments|receivable|receivables)\b/i,
+  };
+  const text = [
+    prompt,
+    ...attachments.map(({ name, header }) =>
+      `${name} ${header ?? ""}`.replaceAll(/[_-]/g, " "),
+    ),
+  ].join("\n");
+  const matches = (Object.keys(signals) as UseCase[]).filter((workflow) =>
+    signals[workflow].test(text),
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
+export function intakeCaseDetails(prompt: string, title: string) {
+  const derivedTitle =
+    prompt
+      .split(/\r?\n/)
+      .find((line) => line.trim())
+      ?.trim()
+      .slice(0, 200) ?? "";
+  return CreateCaseRequestSchema.pick({
+    title: true,
+    description: true,
+  }).safeParse({
+    title: title.trim() || derivedTitle,
+    description: prompt,
+  });
+}
 
 export interface WorkflowSpec {
   label: string;
@@ -7,6 +61,7 @@ export interface WorkflowSpec {
   recommendedDocuments: string[];
   maxFileBytes: number;
   maxPdfPages: number;
+  allowedExtensions: string[];
   allowedMimeTypes: string[];
 }
 
@@ -18,6 +73,7 @@ export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
     recommendedDocuments: ["Data dictionary", "Reporting-period notes"],
     maxFileBytes: 25 * 1024 * 1024,
     maxPdfPages: 80,
+    allowedExtensions: [".csv", ".xlsx"],
     allowedMimeTypes: [
       "text/csv",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -30,6 +86,7 @@ export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
     recommendedDocuments: ["Credit statements", "Prior correspondence"],
     maxFileBytes: 25 * 1024 * 1024,
     maxPdfPages: 120,
+    allowedExtensions: [".pdf", ".csv"],
     allowedMimeTypes: ["application/pdf", "text/csv"],
   },
   "msme-payment": {
@@ -39,6 +96,7 @@ export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
     recommendedDocuments: ["Delivery confirmation", "Correspondence"],
     maxFileBytes: 25 * 1024 * 1024,
     maxPdfPages: 120,
+    allowedExtensions: [".pdf", ".csv"],
     allowedMimeTypes: ["application/pdf", "text/csv"],
   },
 };
@@ -67,8 +125,9 @@ export function validateUploadFile(
   file: Pick<File, "name" | "size" | "type">,
   spec: WorkflowSpec,
 ): string | null {
+  if (file.size === 0) return "Empty files are not allowed.";
   if (file.size > spec.maxFileBytes) {
-    return `Each file must be smaller than ${formatFileSize(spec.maxFileBytes)}.`;
+    return `Each file must be at most ${formatFileSize(spec.maxFileBytes)}.`;
   }
   const extension = file.name.split(".").at(-1)?.toLowerCase();
   const inferredMimeType =
@@ -94,6 +153,8 @@ function normalizeDocumentName(name: string): string {
     .replace(/\s+/g, " ");
 }
 
-function formatFileSize(bytes: number): string {
-  return `${Math.round(bytes / (1024 * 1024))} MB`;
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round((bytes / 1024) * 10) / 10} KB`;
+  return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
 }

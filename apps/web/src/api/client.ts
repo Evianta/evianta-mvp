@@ -1,7 +1,13 @@
 import {
   CaseResponseSchema,
+  CaseSchema,
   CreateCaseRequestSchema,
-  DocumentResponseSchema,
+  DeliverableSchema,
+  DocumentMetadataDtoSchema,
+  EvidenceSchema,
+  FindingSchema,
+  IntakeConfigurationSchema,
+  type IntakeConfiguration,
   type ExtractionMethod,
   ListCasesResponseSchema,
   LatestRunResponseSchema,
@@ -23,6 +29,18 @@ import type { RunEvent } from "@evianta/core";
 const TokenResponseSchema = z.object({
   accessToken: z.string().min(1),
   expiresAt: z.string().datetime({ offset: true }),
+});
+
+const UploadedDocumentsResponseSchema = z.object({
+  documents: z.array(DocumentMetadataDtoSchema).min(1),
+});
+
+const CaseWorkspaceResponseSchema = z.object({
+  case: CaseSchema,
+  documents: z.array(DocumentMetadataDtoSchema),
+  findings: z.array(FindingSchema),
+  evidence: z.array(EvidenceSchema),
+  deliverables: z.array(DeliverableSchema),
 });
 
 const AdminUsageResponseSchema = z.object({
@@ -47,6 +65,7 @@ const AdminUsageResponseSchema = z.object({
 
 export type AdminUsageResponse = z.infer<typeof AdminUsageResponseSchema>;
 export type AuthToken = z.infer<typeof TokenResponseSchema>;
+export type CaseWorkspace = z.infer<typeof CaseWorkspaceResponseSchema>;
 
 type ResponseSchema<T> = {
   safeParse(
@@ -55,8 +74,10 @@ type ResponseSchema<T> = {
 };
 
 export interface WebApiClient {
+  getIntakeConfiguration(): Promise<IntakeConfiguration>;
   listCases(): Promise<Case[]>;
   getCase(caseId: string): Promise<Case>;
+  getCaseWorkspace(caseId: string): Promise<CaseWorkspace>;
   getLatestRun(caseId: string): Promise<RunDto | null>;
   createCase(request: CreateCaseRequest): Promise<Case>;
   uploadDocument(
@@ -73,6 +94,7 @@ export interface WebApiClient {
     options: {
       afterSequence?: number;
       signal: AbortSignal;
+      caseId: string;
       onEvent: (event: RunEvent) => void;
       onResync?: (lastSequence: number, nextSequence: number) => void;
       replayOnly?: boolean;
@@ -96,6 +118,10 @@ export class FetchWebApiClient implements WebApiClient {
   constructor(private readonly options: WebApiClientOptions) {
     this.baseUrl = (options.baseUrl ?? "").replace(/\/$/, "");
     this.fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
+  }
+
+  async getIntakeConfiguration(): Promise<IntakeConfiguration> {
+    return this.request("/intake/configuration", IntakeConfigurationSchema);
   }
 
   async listCases(): Promise<Case[]> {
@@ -123,6 +149,13 @@ export class FetchWebApiClient implements WebApiClient {
     return response.case;
   }
 
+  async getCaseWorkspace(caseId: string): Promise<CaseWorkspace> {
+    return this.request<CaseWorkspace>(
+      `/cases/${encodeURIComponent(caseId)}`,
+      CaseWorkspaceResponseSchema,
+    );
+  }
+
   async createCase(request: CreateCaseRequest): Promise<Case> {
     const input = CreateCaseRequestSchema.parse(request);
     const response = await this.request<CaseResponse>(
@@ -147,14 +180,16 @@ export class FetchWebApiClient implements WebApiClient {
     extractionMethod: ExtractionMethod,
   ): Promise<DocumentResponse["document"]> {
     const formData = new FormData();
-    formData.set("file", file);
-    formData.set("extractionMethod", extractionMethod);
-    const response = await this.request<DocumentResponse>(
+    formData.set("files", file);
+    const response = await this.request<
+      z.infer<typeof UploadedDocumentsResponseSchema>
+    >(
       `/cases/${encodeURIComponent(caseId)}/documents`,
-      DocumentResponseSchema,
+      UploadedDocumentsResponseSchema,
       { method: "POST", body: formData },
     );
-    return response.document;
+    void extractionMethod;
+    return response.documents[0]!;
   }
 
   async startRun(
@@ -199,6 +234,7 @@ export class FetchWebApiClient implements WebApiClient {
     options: {
       afterSequence?: number;
       signal: AbortSignal;
+      caseId: string;
       onEvent: (event: RunEvent) => void;
       onResync?: (lastSequence: number, nextSequence: number) => void;
       replayOnly?: boolean;
@@ -213,7 +249,7 @@ export class FetchWebApiClient implements WebApiClient {
     this.activeStreams.add(controller);
     try {
       await streamRunEvents({
-        url: `${this.baseUrl}/runs/${encodeURIComponent(runId)}/events`,
+        url: `${this.baseUrl}/cases/${encodeURIComponent(options.caseId)}/stream?runId=${encodeURIComponent(runId)}`,
         token,
         afterSequence: options.afterSequence,
         signal: controller.signal,
@@ -245,6 +281,7 @@ export class FetchWebApiClient implements WebApiClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ accessKey }),
       cache: "no-store",
+      credentials: "omit",
     });
     if (!response.ok) {
       throw new ApiError(
@@ -262,8 +299,10 @@ export class FetchWebApiClient implements WebApiClient {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
+      credentials: "omit",
     });
-    if (!response.ok) throw await this.errorFromResponse(response);
+    if (!response.ok && response.status !== 401)
+      throw await this.errorFromResponse(response);
   }
 
   private jsonInit(method: string, body: unknown): RequestInit {

@@ -1,4 +1,7 @@
 export const MAX_SESSION_AGE_MS = 30 * 60 * 1000;
+export const SESSION_STORAGE_KEY = "evianta.session";
+
+type SessionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 export interface ActiveSession {
   accessToken: string;
@@ -8,8 +11,47 @@ export interface ActiveSession {
 export class SessionController {
   private session: ActiveSession | null = null;
   private readonly listeners = new Set<() => void>();
+  private storage: SessionStorage | undefined;
 
   constructor(private readonly now: () => number = Date.now) {}
+
+  restore(storage: SessionStorage): void {
+    this.storage = storage;
+    this.session = null;
+    this.notify();
+    const saved = storage.getItem(SESSION_STORAGE_KEY);
+    if (saved === null) return;
+    let value: unknown;
+    try {
+      value = JSON.parse(saved);
+    } catch {
+      storage.removeItem(SESSION_STORAGE_KEY);
+      throw new Error("Saved sign-in is invalid. Enter your access key again.");
+    }
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !("accessToken" in value) ||
+      typeof value.accessToken !== "string" ||
+      !value.accessToken.trim() ||
+      !("expiresAt" in value) ||
+      typeof value.expiresAt !== "number" ||
+      !Number.isFinite(value.expiresAt) ||
+      value.expiresAt > this.now() + MAX_SESSION_AGE_MS
+    ) {
+      storage.removeItem(SESSION_STORAGE_KEY);
+      throw new Error("Saved sign-in is invalid. Enter your access key again.");
+    }
+    if (value.expiresAt <= this.now()) {
+      storage.removeItem(SESSION_STORAGE_KEY);
+      return;
+    }
+    this.session = {
+      accessToken: value.accessToken,
+      expiresAt: value.expiresAt,
+    };
+    this.notify();
+  }
 
   readonly getSnapshot = (): ActiveSession | null => {
     if (this.session && this.session.expiresAt <= this.now()) return null;
@@ -27,7 +69,12 @@ export class SessionController {
     return current?.accessToken ?? null;
   }
 
-  setSession(accessToken: string, expiresAt: number): void {
+  setSession(
+    accessToken: string,
+    expiresAt: number,
+    storage?: SessionStorage,
+  ): void {
+    if (storage) this.storage = storage;
     if (!accessToken.trim() || !Number.isFinite(expiresAt)) {
       throw new Error("A valid access token and expiry are required.");
     }
@@ -36,14 +83,41 @@ export class SessionController {
     if (effectiveExpiry <= this.now()) {
       throw new Error("The access token is already expired.");
     }
-    this.session = { accessToken, expiresAt: effectiveExpiry };
+    const session = { accessToken, expiresAt: effectiveExpiry };
+    this.storage?.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+    this.session = session;
     this.notify();
   }
 
   clear(): void {
-    if (!this.session) return;
     this.session = null;
     this.notify();
+    this.storage?.removeItem(SESSION_STORAGE_KEY);
+  }
+
+  clearIfToken(accessToken: string): void {
+    if (this.session?.accessToken === accessToken) {
+      this.session = null;
+      this.notify();
+    }
+
+    const saved = this.storage?.getItem(SESSION_STORAGE_KEY);
+    if (saved === null || saved === undefined) return;
+
+    let value: unknown;
+    try {
+      value = JSON.parse(saved);
+    } catch {
+      return;
+    }
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "accessToken" in value &&
+      value.accessToken === accessToken
+    ) {
+      this.storage?.removeItem(SESSION_STORAGE_KEY);
+    }
   }
 
   private notify(): void {

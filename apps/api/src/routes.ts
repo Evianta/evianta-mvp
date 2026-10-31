@@ -1,12 +1,14 @@
 import {
   AgentProfileSetSchema,
   CaseSchema,
+  CreateCaseRequestSchema,
+  CreateRunRequestSchema,
   DocumentMetadataDtoSchema,
   RunDtoSchema,
   RunEventSchema,
   UsageSummarySchema,
-  UseCaseSchema,
   syntheticWorkflowFixtures,
+  liveWorkflows,
   type AgentProfileRepository,
   type Case,
   type CaseRepository,
@@ -86,13 +88,7 @@ interface UploadedFile {
   bytes: Buffer;
 }
 
-const CaseCreateInputSchema = z
-  .object({
-    title: z.string().min(1).max(200),
-    description: z.string().max(5000).default(""),
-    useCase: UseCaseSchema,
-  })
-  .strict();
+const CaseCreateInputSchema = CreateCaseRequestSchema.strict();
 const CopyInputSchema = z
   .object({ title: z.string().min(1).max(200).optional() })
   .strict();
@@ -117,6 +113,20 @@ function authContext(request: Request): AuthContext | undefined {
 
 function requestCase(request: Request): Case | undefined {
   return (request as AuthenticatedRequest).caseRecord;
+}
+
+function requireLiveWorkflow(
+  record: Pick<Case, "useCase">,
+  response: Response,
+): boolean {
+  if (liveWorkflows.includes(record.useCase)) return true;
+  sendApiError(
+    response,
+    409,
+    "conflict",
+    "This workflow is coming next and is not available for live work.",
+  );
+  return false;
 }
 
 function routeParam(value: string | string[] | undefined): string | undefined {
@@ -563,7 +573,11 @@ function registerStreamRoute(
         typeof request.query.runId === "string" ? request.query.runId : null;
       const lastEventId = request.get("last-event-id");
       const queryCursor =
-        typeof request.query.cursor === "string" ? request.query.cursor : null;
+        typeof request.query.cursor === "string"
+          ? request.query.cursor
+          : typeof request.query.afterSequence === "string"
+            ? request.query.afterSequence
+            : null;
       const rawCursor = lastEventId ?? queryCursor ?? "0";
       if (
         !principal ||
@@ -827,6 +841,10 @@ export function registerCaseApiRoutes(
   const repositories = services.repositories;
   registerSampleRoutes(app);
 
+  app.get("/intake/configuration", authenticate, (_request, response) => {
+    response.json({ workflows: liveWorkflows, ...services.uploads });
+  });
+
   app.get("/agents", authenticate, async (_request, response) => {
     const profiles = AgentProfileSetSchema.parse(
       await repositories.agentProfiles.listEnabled(),
@@ -850,6 +868,19 @@ export function registerCaseApiRoutes(
     const input = parseInput(CaseCreateInputSchema, request.body, response);
     const principal = authContext(request)?.principal;
     if (!input || !principal) return;
+    if (!requireLiveWorkflow(input, response)) return;
+    if (input.sourceCaseId) {
+      const source = sampleById(input.sourceCaseId);
+      if (!source) {
+        sendApiError(
+          response,
+          400,
+          "validation-failed",
+          "Choose a public sample as the case source",
+        );
+        return;
+      }
+    }
     const at = new Date().toISOString();
     const record = CaseSchema.parse({
       id: randomUUID(),
@@ -857,7 +888,7 @@ export function registerCaseApiRoutes(
       ownerId: principal.userId,
       isSample: false,
       synthetic: false,
-      sourceCaseId: null,
+      sourceCaseId: input.sourceCaseId ?? null,
       status: "active",
       usage: emptyUsage(),
       createdAt: at,
@@ -924,6 +955,29 @@ export function registerCaseApiRoutes(
         findings,
         evidence,
         deliverables: runChildren.flatMap((entry) => entry.deliverables),
+      });
+    },
+  );
+
+  app.get(
+    "/cases/:caseId/runs/latest",
+    authenticate,
+    requireCase(repositories),
+    async (request, response) => {
+      const principal = authContext(request)?.principal;
+      const record = requestCase(request);
+      if (!principal || !record) return;
+      const runs = await repositories.runs.listForCase(
+        record.id,
+        principal.userId,
+      );
+      const latest = runs.reduce<RunRecord | null>(
+        (current, run) =>
+          !current || run.createdAt > current.createdAt ? run : current,
+        null,
+      );
+      response.status(200).json({
+        run: latest ? RunDtoSchema.parse(latest) : null,
       });
     },
   );
@@ -1073,6 +1127,7 @@ export function registerCaseApiRoutes(
       const record = requestCase(request);
       const principal = authContext(request)?.principal;
       if (!record || !principal) return;
+      if (!requireLiveWorkflow(record, response)) return;
       if (record.deletionRequestedAt || record.status !== "active") {
         sendApiError(
           response,
@@ -1349,6 +1404,7 @@ export function registerCaseApiRoutes(
       const record = requestCase(request);
       const input = parseInput(RunInputSchema, request.body ?? {}, response);
       if (!principal || !record || !input) return;
+      if (!requireLiveWorkflow(record, response)) return;
       if (record.deletionRequestedAt || record.status !== "active") {
         sendApiError(
           response,
@@ -1366,6 +1422,84 @@ export function registerCaseApiRoutes(
     },
   );
 
+  app.post("/runs", authenticate, async (request, response) => {
+    const principal = authContext(request)?.principal;
+    const input = parseInput(CreateRunRequestSchema, request.body, response);
+    if (!principal || !input) return;
+    const record = await repositories.cases.findOwnedById(
+      input.caseId,
+      principal.userId,
+    );
+    if (!record) {
+      sendApiError(response, 404, "not-found", "Resource not found");
+      return;
+    }
+    if (record.deletionRequestedAt || record.status !== "active") {
+      sendApiError(response, 409, "conflict", "Case is not accepting new runs");
+      return;
+    }
+    if (!requireLiveWorkflow(record, response)) return;
+    const run = input.priorRunId
+      ? await services.orchestrator.retryFailedAsync({
+          ownerId: principal.userId,
+          caseId: record.id,
+          priorRunId: input.priorRunId,
+        })
+      : await services.orchestrator.createRunAsync({
+          ownerId: principal.userId,
+          caseId: record.id,
+        });
+    sendRun(response, run);
+  });
+
+  app.post("/runs/:runId/retry", authenticate, async (request, response) => {
+    const principal = authContext(request)?.principal;
+    const runId = routeParam(request.params.runId);
+    if (!principal || !runId) return;
+    const prior = await repositories.runs.findOwnedById(
+      runId,
+      principal.userId,
+    );
+    if (!prior) {
+      sendApiError(response, 404, "not-found", "Resource not found");
+      return;
+    }
+    const record = await repositories.cases.findOwnedById(
+      prior.caseId,
+      principal.userId,
+    );
+    if (!record || record.status !== "active" || record.deletionRequestedAt) {
+      sendApiError(response, 404, "not-found", "Resource not found");
+      return;
+    }
+    if (!requireLiveWorkflow(record, response)) return;
+    const run = await services.orchestrator.retryFailedAsync({
+      ownerId: principal.userId,
+      caseId: record.id,
+      priorRunId: prior.id,
+    });
+    sendRun(response, run);
+  });
+
+  app.post("/runs/:runId/cancel", authenticate, async (request, response) => {
+    const principal = authContext(request)?.principal;
+    const runId = routeParam(request.params.runId);
+    if (!principal || !runId) return;
+    const existing = await repositories.runs.findOwnedById(
+      runId,
+      principal.userId,
+    );
+    if (!existing) {
+      sendApiError(response, 404, "not-found", "Resource not found");
+      return;
+    }
+    const run = await services.orchestrator.cancelRunAsync({
+      ownerId: principal.userId,
+      runId,
+    });
+    response.status(200).json({ run: RunDtoSchema.parse(run) });
+  });
+
   app.post(
     "/cases/:caseId/retry",
     authenticate,
@@ -1375,6 +1509,7 @@ export function registerCaseApiRoutes(
       const record = requestCase(request);
       const input = parseInput(RetryInputSchema, request.body, response);
       if (!principal || !record || !input) return;
+      if (!requireLiveWorkflow(record, response)) return;
       if (record.deletionRequestedAt || record.status !== "active") {
         sendApiError(
           response,
@@ -1432,6 +1567,7 @@ export function registerCaseApiRoutes(
       if (!principal || !record) return;
       const input = parseInput(ResumeRequestSchema, request.body, response);
       if (!input) return;
+      if (!requireLiveWorkflow(record, response)) return;
       if (record.deletionRequestedAt || record.status !== "active") {
         sendApiError(
           response,

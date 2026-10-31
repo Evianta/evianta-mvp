@@ -125,7 +125,7 @@ export function SampleResult({
           </p>
         </div>
         <Link
-          href={`/cases/new?source=${encodeURIComponent(fixture.case.id)}`}
+          href={`/?source=${encodeURIComponent(fixture.case.id)}`}
           className="button-link button-link-secondary"
         >
           Try this workflow <ArrowRight size={15} aria-hidden="true" />

@@ -1,17 +1,22 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
-test("public sample landing page is accessible in both themes", async ({
+test("public task starter is accessible in both themes and on mobile", async ({
   page,
 }) => {
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "Make the evidence easier to see." }),
+    page.getByRole("heading", { name: "What would you like to work on?" }),
   ).toBeVisible();
   await expect(
-    page.getByText("No model calls · No live records"),
+    page.getByText(
+      "Read-only synthetic previews. No model calls or live records.",
+    ),
   ).toBeVisible();
-  await expect(page.locator(".hero-panel")).toHaveCSS("opacity", "1");
+  await expect(page.getByLabel("Task prompt", { exact: true })).toBeDisabled();
+  await expect(
+    page.getByLabel("Attach records", { exact: true }),
+  ).toBeDisabled();
 
   const lightViolations = await new AxeBuilder({ page }).analyze();
   expect(lightViolations.violations).toEqual([]);
@@ -25,6 +30,14 @@ test("public sample landing page is accessible in both themes", async ({
   await expect(page.locator(".command-trigger")).toHaveAccessibleName(
     "Search workspace K shortcut",
   );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
 });
 
 test("sample pages are read-only and copying asks for a key", async ({
@@ -41,7 +54,9 @@ test("sample pages are read-only and copying asks for a key", async ({
     "type",
     "password",
   );
-  await expect(page.getByText("Your key is never saved.")).toBeVisible();
+  await expect(
+    page.getByText("Your key is never saved.", { exact: false }),
+  ).toBeVisible();
 });
 
 test("copying asks for a session and admin access is checked by the server", async ({
@@ -75,9 +90,9 @@ test("copying asks for a session and admin access is checked by the server", asy
   await page.getByRole("button", { name: "Copy to a private case" }).click();
   await page.getByLabel("Access key").fill("fixture-test-key");
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page).toHaveURL(/\/cases\/new\?source=sample-msme-overdue/);
+  await expect(page).toHaveURL(/\/\?source=sample-msme-overdue/);
   await expect(
-    page.getByRole("heading", { name: "Start with the context." }),
+    page.getByRole("heading", { name: "What would you like to work on?" }),
   ).toBeVisible();
   expect(submittedKey).toBe("fixture-test-key");
   expect(
@@ -87,7 +102,7 @@ test("copying asks for a session and admin access is checked by the server", asy
   ).toBe(false);
 
   await page.getByRole("link", { name: "Usage overview" }).click();
-  await expect(page).toHaveURL(/\/admin\/usage$/);
+  await expect(page).toHaveURL(/\/admin\/usage$/, { timeout: 15000 });
   await expect(
     page.getByRole("heading", { name: "Administrator access required" }),
   ).toBeVisible();

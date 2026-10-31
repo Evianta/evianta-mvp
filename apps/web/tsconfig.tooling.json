@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false
+  },
+  "include": ["next-env.d.ts", "test/**/*.ts", "e2e/**/*.ts", "*.config.ts"]
+}

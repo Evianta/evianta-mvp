@@ -13,6 +13,16 @@ export const UseCaseSchema = z.enum([
 ]);
 export type UseCase = z.infer<typeof UseCaseSchema>;
 
+export const liveWorkflows: readonly UseCase[] = ["data-analysis"];
+
+export const IntakeConfigurationSchema = z.object({
+  workflows: z.array(UseCaseSchema),
+  uploadMaxBytes: z.number().int().positive(),
+  uploadMaxFiles: z.number().int().positive(),
+  documentMaxPages: z.number().int().positive(),
+});
+export type IntakeConfiguration = z.infer<typeof IntakeConfigurationSchema>;
+
 export const UserRoleSchema = z.enum(["user", "admin"]);
 export type UserRole = z.infer<typeof UserRoleSchema>;
 
@@ -533,11 +543,129 @@ export const ExtractedTableSchema = z.object({
   pageIndex: NonNegativeIntegerSchema.nullable(),
   headers: z.array(z.string()),
   rows: z.array(z.array(z.string().nullable())),
+  sourceRowNumbers: z.array(z.number().int().positive()).optional(),
   columnTypes: z.array(ExtractedColumnTypeSchema).optional(),
   sheet: z.string().min(1).optional(),
   cellRange: z.string().min(1).optional(),
 });
 export type ExtractedTable = z.infer<typeof ExtractedTableSchema>;
+
+const DataAnalysisSourceSchema = z.object({
+  documentId: IdSchema,
+  tableId: IdSchema,
+  sheet: z.string().nullable(),
+  cellRange: z.string().nullable(),
+  rowRange: z.object({
+    start: z.number().int().positive(),
+    end: z.number().int().positive(),
+  }),
+});
+
+const DashboardRowSchema = z.record(
+  z.string(),
+  z.union([z.string(), z.number(), z.null()]),
+);
+
+const BarChartSchema = z.object({
+  id: IdSchema,
+  title: z.string().min(1),
+  type: z.literal("bar"),
+  categoryKey: z.string().min(1),
+  valueKey: z.string().min(1),
+  data: z.array(DashboardRowSchema),
+  source: DataAnalysisSourceSchema,
+});
+
+const LineChartSchema = z.object({
+  id: IdSchema,
+  title: z.string().min(1),
+  type: z.literal("line"),
+  categoryKey: z.string().min(1),
+  valueKey: z.string().min(1),
+  data: z.array(DashboardRowSchema),
+  source: DataAnalysisSourceSchema,
+});
+
+const PieChartSchema = z.object({
+  id: IdSchema,
+  title: z.string().min(1),
+  type: z.literal("pie"),
+  nameKey: z.string().min(1),
+  valueKey: z.string().min(1),
+  data: z.array(DashboardRowSchema),
+  source: DataAnalysisSourceSchema,
+});
+
+export const DataAnalysisDashboardSchema = z.object({
+  charts: z.array(
+    z.discriminatedUnion("type", [
+      BarChartSchema,
+      LineChartSchema,
+      PieChartSchema,
+    ]),
+  ),
+});
+export type DataAnalysisDashboard = z.infer<typeof DataAnalysisDashboardSchema>;
+
+export const DataQualityIssueSchema = z.object({
+  code: z.enum([
+    "missing-values",
+    "duplicate-rows",
+    "type-mismatch",
+    "out-of-range",
+    "inconsistent-date-formats",
+    "unordered-periods",
+  ]),
+  severity: z.enum(["high", "medium", "low"]),
+  message: z.string().min(1),
+  columns: z.array(z.string()),
+  rows: z.array(
+    z.object({
+      start: z.number().int().positive(),
+      end: z.number().int().positive(),
+    }),
+  ),
+  count: z.number().int().positive(),
+});
+export type DataQualityIssue = z.infer<typeof DataQualityIssueSchema>;
+
+export const DataAnalysisMetricsSchema = z.object({
+  rowCount: NonNegativeIntegerSchema,
+  valueColumn: z.string().min(1),
+  total: z.number().finite(),
+  average: z.number().finite(),
+  periodColumn: z.string().nullable(),
+  byPeriod: z.array(
+    z.object({
+      label: z.string(),
+      value: z.number().finite(),
+      growthPercent: z.number().finite().nullable(),
+    }),
+  ),
+  segmentColumn: z.string().nullable(),
+  bySegment: z.array(
+    z.object({ label: z.string(), value: z.number().finite() }),
+  ),
+  topSegment: z
+    .object({ label: z.string(), value: z.number().finite() })
+    .nullable(),
+});
+export type DataAnalysisMetrics = z.infer<typeof DataAnalysisMetricsSchema>;
+
+export const DataAnalysisReportSchema = z.object({
+  summary: z.string(),
+  interpretation: z.string(),
+  metrics: DataAnalysisMetricsSchema,
+  dataQuality: z.array(DataQualityIssueSchema),
+  assumptions: z.array(z.string()),
+  openQuestions: z.array(
+    z.object({
+      text: z.string().min(1),
+      severity: z.enum(["high", "medium", "low"]),
+    }),
+  ),
+});
+export type DataAnalysisReport = z.infer<typeof DataAnalysisReportSchema>;
 
 export const ExtractionWarningSchema = z.object({
   code: IdSchema,

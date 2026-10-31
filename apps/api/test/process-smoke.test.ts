@@ -1,10 +1,11 @@
-import { MongoMemoryServer } from "mongodb-memory-server";
-import { spawn, type ChildProcess } from "node:child_process";
+import { MongoMemoryReplSet, MongoMemoryServer } from "mongodb-memory-server";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 function freePort(): Promise<number> {
@@ -78,9 +79,54 @@ async function stopChild(child: ChildProcess | undefined): Promise<void> {
 }
 
 describe("production process entrypoints", () => {
+  it("explains admin arguments before connecting to MongoDB", async () => {
+    for (const args of [
+      ["issue-key"],
+      ["create-user"],
+      ["disable-user"],
+      ["revoke-key"],
+      ["unknown-command"],
+    ]) {
+      await expect(
+        promisify(execFile)(
+          process.execPath,
+          [
+            fileURLToPath(new URL("../dist/admin.js", import.meta.url)),
+            ...args,
+          ],
+          {
+            cwd: fileURLToPath(new URL("..", import.meta.url)),
+            env: { ...process.env, MONGODB_URI: "invalid-uri", MONGODB_DB: "" },
+            timeout: 30_000,
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringContaining("issue-key <user-id>"),
+      });
+    }
+  }, 180_000);
+
+  it("reports missing configuration before connecting to the database", async () => {
+    await expect(
+      promisify(execFile)(
+        process.execPath,
+        [fileURLToPath(new URL("../dist/server.js", import.meta.url))],
+        {
+          cwd: fileURLToPath(new URL("..", import.meta.url)),
+          env: { ...process.env, JWT_SIGNING_KEY: "" },
+          timeout: 30_000,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("JWT_SIGNING_KEY"),
+    });
+  }, 45_000);
+
   it("starts the API and independent worker against a local MongoDB", async () => {
-    const mongo = await MongoMemoryServer.create({
-      instance: { ip: "127.0.0.1" },
+    const mongo = await MongoMemoryReplSet.create({
+      replSet: { count: 1 },
     });
     const storageDir = await mkdtemp(join(tmpdir(), "evianta-api-smoke-"));
     const port = await freePort();
@@ -140,4 +186,35 @@ describe("production process entrypoints", () => {
       await rm(storageDir, { recursive: true, force: true });
     }
   }, 90_000);
+
+  it("rejects standalone MongoDB before starting usage recovery or the worker", async () => {
+    const mongo = await MongoMemoryServer.create();
+    try {
+      await expect(
+        promisify(execFile)(
+          process.execPath,
+          [fileURLToPath(new URL("../dist/worker.js", import.meta.url))],
+          {
+            cwd: fileURLToPath(new URL("..", import.meta.url)),
+            env: {
+              ...process.env,
+              MONGODB_URI: mongo.getUri(),
+              MONGODB_DB: "standalone_rejected",
+              DOCUMENT_STORE: "filesystem",
+              LOCAL_STORAGE_DIR: ".data/test",
+              EVIANTA_AI_PROVIDER: "mock",
+              EVIANTA_USAGE_MODE: "test",
+            },
+            timeout: 30_000,
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringContaining("mongodb-transactions-required"),
+        stdout: expect.not.stringContaining("Evianta worker started"),
+      });
+    } finally {
+      await mongo.stop();
+    }
+  }, 60_000);
 });

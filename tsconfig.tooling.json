@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@evianta/core": ["packages/core/src/index.ts"],
+      "@evianta/env/server": ["packages/env/src/server.ts"],
+      "@evianta/store": ["packages/store/src/index.ts"],
+      "@evianta/ai": ["packages/ai/src/index.ts"],
+      "@evianta/agents": ["packages/agents/src/index.ts"],
+      "@evianta/ingestion": ["packages/ingestion/src/index.ts"]
+    }
+  },
+  "include": [
+    "*.config.ts",
+    "test/**/*.ts",
+    "packages/*/test/**/*.ts",
+    "apps/api/test/**/*.ts"
+  ]
+}

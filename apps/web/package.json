@@ -10,18 +10,21 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
+    "cross-env": "10.1.0",
     "framer-motion": "^14.5.0",
     "lucide-react": "^1.61.0",
     "next": "15.5.28",
     "next-themes": "^0.4.6",
     "react": "19.1.1",
     "react-dom": "19.1.1",
+    "recharts": "^3.10.1",
     "tailwind-merge": "^3.7.0",
     "zod": "4.4.3"
   },
   "scripts": {
     "predev": "pnpm --filter @evianta/core build",
-    "dev": "next dev",
+    "dev": "concurrently --kill-others --names core,web \"pnpm --filter @evianta/core watch\" \"pnpm dev:server\"",
+    "dev:server": "node --env-file-if-exists=../../.env node_modules/next/dist/bin/next dev",
     "pretypecheck": "pnpm --filter @evianta/core build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "pretest": "pnpm --filter @evianta/core build",
@@ -29,8 +32,8 @@
     "pretest:e2e": "pnpm --filter @evianta/core build",
     "test:e2e": "playwright test",
     "prebuild": "pnpm --filter @evianta/core build",
-    "build": "next build",
-    "start": "next start"
+    "build": "cross-env NODE_ENV=production node --env-file-if-exists=../../.env node_modules/next/dist/bin/next build",
+    "start": "cross-env NODE_ENV=production node --env-file-if-exists=../../.env node_modules/next/dist/bin/next start"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",

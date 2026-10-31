@@ -1,13 +1,168 @@
 # Evianta MVP
 
-The repository is a pnpm TypeScript monorepo. It currently provides the build,
-test and package boundaries for the implementation roadmap; workflow features
-are added in their respective work packages.
+The repository is a pnpm TypeScript monorepo with a Next.js web app, an Express
+API and a separate background worker.
 
 ## Requirements
 
 - Node.js `24.3.0` (see `.node-version`)
 - pnpm `10.18.3` (pinned by the root `package.json`)
+- MongoDB 7+ running as a replica set for local application use (transactions
+  are required). API, worker and admin connections reject standalone MongoDB
+  before initializing repositories or background recovery.
+
+## Local development
+
+```sh
+corepack enable
+pnpm install --frozen-lockfile
+```
+
+Copy `.env.example` to `.env` in the repository root (`Copy-Item .env.example .env`
+in PowerShell). Generate a signing key and put it in `JWT_SIGNING_KEY`:
+
+```sh
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
+
+Keep the key private. The example supplies local rate limits and uses the mock
+model provider, so no model credentials or paid requests are needed. Never use
+the local settings or test usage mode for a live deployment.
+
+For a local MongoDB installation, create a dedicated data directory first, then
+start a single-node replica set in a separate terminal:
+
+```sh
+mongod --replSet rs0 --bind_ip 127.0.0.1 --port 27017 --dbpath <absolute-data-directory>
+mongosh --eval "rs.initiate({_id:'rs0',members:[{_id:0,host:'127.0.0.1:27017'}]})"
+```
+
+Run the initialization command once, after the server is listening. Set
+`MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0` in `.env`, or use an
+existing transaction-capable development database. Do not initialize or
+reconfigure a shared database.
+
+If API or worker output reports `mongodb-transactions-required`, stop
+`pnpm dev` and configure the database as above. Adding `replicaSet=rs0` to a
+URI alone does not turn a standalone server into a replica set. If an existing
+MongoDB service already owns port 27017, do not start a second server on that
+port; use a separate development port/data directory and update `MONGODB_URI`.
+Restart `pnpm dev` after the replica set is ready.
+
+```sh
+pnpm dev
+```
+
+This builds the API dependency graph, then starts compiler watchers, the web app
+at `http://localhost:3000`, API at `http://127.0.0.1:3001`, and the worker.
+App and shared-package edits rebuild/reload automatically. Stop the group with
+Ctrl+C. Initial build errors prevent launch; compiler errors during watch are
+shown in the terminal and must be fixed before relying on the running app.
+Compiler caches live inside each package's generated `dist` directory, so
+removing generated output also invalidates its build cache.
+
+The browser connects directly to `NEXT_PUBLIC_API_BASE_URL`, which defaults in
+the example to `http://localhost:3001`. The API binds to IPv4 loopback.
+`WEB_ORIGIN` must exactly match the web origin, including the hostname and port;
+opening the web app with `127.0.0.1` instead of `localhost` also requires updating
+`WEB_ORIGIN`. Login is saved per web origin, so switching hostnames uses a
+different browser storage area. The API URL can use either loopback hostname;
+session persistence does not depend on cookies. API health is available at
+`http://127.0.0.1:3001/healthz`.
+The web commands and API/worker/admin commands load the root `.env`; exported
+environment variables take precedence. Restart development after changing
+environment values, and rebuild the web app after changing public values used
+in a production build. Web build/start commands explicitly use production mode,
+even when the local `.env` sets development mode. Only `NEXT_PUBLIC_*` values
+are exposed to the browser.
+
+Create a local user and issue a key, using the user ID printed by the first
+command:
+
+```sh
+pnpm --filter @evianta/api admin create-user developer@example.test "Local Developer"
+pnpm --filter @evianta/api admin issue-key <user-id>
+```
+
+The admin command requires the API build (`pnpm dev` prepares it, or run
+`pnpm --filter @evianta/api... build`). The issued key is printed only once.
+Enter it in the web sign-in dialog; do not put it in a URL, source file or log.
+The worker must be running for submitted analyses to complete.
+
+To check the data-analysis flow, open **Start** at `/`, sign in, and choose
+the **Data analysis** suggestion or write your own prompt.
+Attach a `.csv` or `.xlsx` dataset and choose **Start task**. The prompt stays
+editable; the title is derived from its first nonempty line. There is no workflow
+dropdown or optional-details form. Local rules use the message, attachment names
+and up to 8 KB of CSV header text to detect one of the three supported task types.
+Unclear or conflicting intent asks you to choose, without changing your message
+or files and without creating a case. No model or upload is used for detection.
+PDF/Excel contents are not read for classification; ambiguous filenames/messages
+need a choice. Sample-origin entry uses Start at `/?source=<sample-id>`.
+Enter submits, Shift+Enter adds a line, and IME composition does not submit.
+Starting authorizes private case creation, upload/extraction and execution under
+existing model limits. File limits and enabled workflows come from the authenticated
+`GET /intake/configuration` endpoint. Tax and MSME suggestions are **Coming next**;
+the API also rejects live creation, uploads and execution for those workflows.
+
+Ready sources start a run automatically. Sources still being read open in the case
+workspace with preparation status and **Start analysis** when ready. Completed
+reports retain computed metrics, data-quality checks and source-linked charts.
+Workbook analysis uses underlying numeric cell values, not rounded currency or
+percentage display strings. Date cells use canonical ISO dates or timestamps
+regardless of their display format; source row references are preserved.
+Periods are sorted chronologically when their labels can be ordered reliably.
+Otherwise, period totals retain source order, growth rates and the trend chart
+are omitted, and the report includes a data-quality warning.
+Amounts support decimal points, scientific notation, Western comma grouping
+(`1,234.56`) and Indian comma grouping (`12,34,567.89`). Decimal-comma and malformed
+amounts are excluded with a data-quality warning when valid amounts remain.
+If the highest-ranked measure has no valid amounts, the analysis fails explicitly
+instead of using years, identifiers or a lower-ranked measure as sales.
+Categorical sales columns such as sales representatives, teams and channels are
+not treated as measures. Revenue ranks above sales, generic amounts, values,
+prices and quantities.
+Reopen saved work through **Cases**, without resubmitting. Upload failures retain
+the created case and successful files; rejected uploads can be retried in
+the composer. Ambiguous create/upload/run responses are checked against persisted
+state and never blindly resubmitted: follow the recovery link to inspect the case
+or register. The create/upload APIs have no idempotency key, so an unconfirmed
+outcome requires inspection rather than an automatic retry.
+
+Private drafts/files stay in memory and clear with the session. Signed-out
+visitors can select a static suggestion but cannot enter private data or files.
+Public replay remains read-only. Sample-origin intake copies only the workflow
+setup, not synthetic files or results. Case-grounded Ask remains later work.
+The supplied Evianta logo is bundled locally from `https://evianta.com/logo.svg`;
+opening private work does not request the logo from a third-party host.
+
+From `apps/api`, the equivalent command is `pnpm admin issue-key <user-id>`.
+`issue-key` requires an existing user ID, not an email address. An optional
+second argument sets the key expiry as an ISO timestamp. Without one, the key
+remains valid until revoked. Missing arguments are rejected before connecting
+to MongoDB.
+
+| Command             | Purpose                                      |
+| ------------------- | -------------------------------------------- |
+| `pnpm dev`          | Web, API, worker and shared-package watchers |
+| `pnpm dev:web`      | Web and core watcher only                    |
+| `pnpm dev:api`      | API and dependency watchers only             |
+| `pnpm dev:worker`   | Worker and dependency watchers only          |
+| `pnpm build`        | Production workspace builds                  |
+| `pnpm typecheck`    | Application, test and tooling types          |
+| `pnpm lint`         | ESLint plus formatting check                 |
+| `pnpm lint:fix`     | Apply ESLint fixes                           |
+| `pnpm format:check` | Check formatting without writing             |
+| `pnpm format`       | Apply Prettier formatting                    |
+| `pnpm test`         | Build all workspaces, then run Vitest        |
+| `pnpm test:e2e`     | Run mocked Playwright browser tests          |
+
+Use the full `pnpm dev` group when running API and worker together; do not run
+both focused backend commands simultaneously, since each owns compiler
+watchers. The focused commands also prepare their dependencies from a fresh
+checkout.
+
+## Quality checks
 
 Install dependencies and run the repository gates:
 
@@ -20,9 +175,33 @@ pnpm test
 pnpm build
 ```
 
-`pnpm test` builds workspace packages first so tests also verify imports through
-their public package entry points. Tests use local fixtures and do not contact
-cloud services or model providers.
+`pnpm test` includes `pnpm build`, so a separate build is optional when running
+all gates. Tests use local fixtures and do not contact cloud services or model
+providers. MongoDB tests download a local test binary on first use; no
+application database is required. ESLint includes Next.js and React Hooks
+rules. Prettier and EditorConfig use two-space indentation and LF line endings;
+Git preserves LF on checkout, including Windows. CSV byte fixtures retain their
+original bytes. Vitest and Playwright each use at most two workers to avoid
+oversubscribing local databases and the Next.js development server. There are
+no Git hooks.
+
+Install Chromium once before running browser tests:
+
+```sh
+pnpm --filter @evianta/web exec playwright install chromium
+pnpm test:e2e
+```
+
+Browser tests use a separate `.next-e2e` build directory so they do not overwrite
+an active development server's `.next` output. Navigation assertions allow cold
+Next.js compilation; they are functional checks, not latency measurements.
+
+The browser suite owns port 3100 and starts a dedicated fixture-backed web server;
+it never reuses a running development server. Free that port before testing.
+Next.js commands still share generated TypeScript entry files; avoid concurrent
+Next.js commands when validating types or production builds.
+CI runs the same quality gates and a separate Chromium browser job, retaining
+browser reports and traces on failure.
 
 ## Workspace responsibilities
 
@@ -109,7 +288,10 @@ the persisted task instructions.
 `.env.example` contains only non-secret local defaults. Copy it to `.env` when
 local configuration is needed; `.env` files (except the example) and generated
 build/test output are ignored by Git. Local document bytes are stored under
-`.data/documents`; production must use a private S3 bucket configured with
+`apps/api/.data/documents` when using the example with the API package commands
+(relative paths resolve from `apps/api`). API, worker and admin share that
+working directory. Use an absolute `LOCAL_STORAGE_DIR` to choose another
+location. Production must use a private S3 bucket configured with
 `AWS_REGION`, `S3_BUCKET`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
 S3 download URLs are short-lived and capped at one hour. Add settings to the
 example alongside the work package that introduces them. Secrets must be read
@@ -125,8 +307,23 @@ behind a known proxy chain. JWTs last 30 minutes and are checked against the
 current user, access key and revocable session on each request.
 The API, worker and admin commands load the repository-root `.env` automatically;
 environment variables already exported by the process take precedence.
-Clients must hold tokens in memory only and ask users to re-enter their key
-after a reload or token expiry; there are no refresh tokens.
+Access keys are never saved in the browser. For this demo, `localStorage` under
+`evianta.session` holds only the JWT and its absolute expiry. Reload restores an
+unexpired session without renewing it. API/SSE requests use bearer authorization;
+there is no authentication cookie or cookie restoration endpoint. The server
+still checks user, access-key and session revocation on every protected request.
+Logout, expiry and authentication rejection remove the saved token and clear
+private state. Logout also revokes the server session; a failed revocation is
+reported with a retry action even though the local login is already removed.
+Tabs follow changes to the saved session so signing out in one clears the others.
+Invalid saved data is removed and reported; unavailable browser storage is an
+explicit error, not a successful persistent sign-in. There are no refresh tokens.
+
+This is a demo trade-off: scripts running on the web origin, including injected
+scripts from an XSS flaw, can read localStorage tokens. Keep HTTPS and XSS
+prevention for deployment. Server rate limits, revocation and spending limits
+remain enforced independently of browser persistence. CORS still permits only
+the exact `WEB_ORIGIN`; credentialed cookie CORS is not enabled.
 
 Build and run the API with `pnpm --filter @evianta/api build` and
 `pnpm --filter @evianta/api start`. Run durable case execution in a separate

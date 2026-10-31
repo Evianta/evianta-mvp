@@ -1,0 +1,864 @@
+import { readFileSync } from "node:fs";
+import { createAi, inputTokenAllowance, MockProvider } from "@evianta/ai";
+import { syntheticWorkflowFixtures, type ExtractedTable } from "@evianta/core";
+import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import {
+  analyzeSalesTables,
+  createBusinessDataAnalystAgent,
+} from "../src/data-analysis.js";
+import type { AgentContext } from "../src/agent.js";
+import {
+  SpecialistModelOutputSchema,
+  type SpecialistInput,
+} from "../src/contracts.js";
+
+const table: ExtractedTable = {
+  id: "sales-table",
+  pageIndex: null,
+  sheet: "Sales",
+  cellRange: "A1:C7",
+  headers: ["month", "product", "revenue"],
+  columnTypes: ["string", "string", "number"],
+  rows: [
+    ["Jan", "A", "100"],
+    ["Jan", "B", "150"],
+    ["Feb", "A", "120"],
+    ["Feb", "B", "180"],
+    ["Mar", "A", "200"],
+    ["Mar", "B", "250"],
+  ],
+};
+
+const sourceTables = [
+  {
+    documentId: "sales-document",
+    name: "quarterly-sales.csv",
+    table,
+  },
+];
+const narrativeFixture = readFileSync(
+  new URL("./fixtures/data-analysis-narrative.json", import.meta.url),
+  "utf8",
+);
+
+describe("business data analyst", () => {
+  it("computes exact sales metrics and dashboard values deterministically", () => {
+    const result = analyzeSalesTables(sourceTables);
+
+    expect(result.metrics).toEqual({
+      rowCount: 6,
+      valueColumn: "revenue",
+      total: 1000,
+      average: 1000 / 6,
+      periodColumn: "month",
+      byPeriod: [
+        { label: "Jan", value: 250, growthPercent: null },
+        { label: "Feb", value: 300, growthPercent: 20 },
+        { label: "Mar", value: 450, growthPercent: 50 },
+      ],
+      segmentColumn: "product",
+      bySegment: [
+        { label: "B", value: 580 },
+        { label: "A", value: 420 },
+      ],
+      topSegment: { label: "B", value: 580 },
+    });
+    expect(result.dashboard.charts.map((chart) => chart.type)).toEqual([
+      "bar",
+      "line",
+      "pie",
+    ]);
+    expect(result.dashboard.charts[0]?.data).toEqual([
+      { period: "Jan", revenue: 250 },
+      { period: "Feb", revenue: 300 },
+      { period: "Mar", revenue: 450 },
+    ]);
+    expect(result.sourceEvidence.location).toMatchObject({
+      sheet: "Sales",
+      cellRange: "A2:C7",
+      rowRange: { start: 2, end: 7 },
+    });
+    expect(result.dataQuality).toEqual([]);
+  });
+
+  it("flags missing, duplicate, inconsistent, and out-of-range values", () => {
+    const messy = analyzeSalesTables([
+      {
+        documentId: "messy-doc",
+        name: "messy.csv",
+        table: {
+          ...table,
+          rows: [
+            ["2026-01-01", "A", "100"],
+            ["01/02/2026", "B", "150"],
+            ["2026-02-01", "A", "120"],
+            ["2026-02-01", "A", "120"],
+            ["2026-03-01", "B", "-20"],
+            ["2026-03-01", "C", "unknown"],
+            ["2026-03-02", "D", null],
+          ],
+        },
+      },
+    ]);
+
+    expect(messy.metrics.total).toBe(470);
+    expect(messy.dataQuality.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining([
+        "missing-values",
+        "duplicate-rows",
+        "type-mismatch",
+        "out-of-range",
+        "inconsistent-date-formats",
+      ]),
+    );
+    expect(messy.qualityEvidence.length).toBeGreaterThan(0);
+    expect(messy.qualityEvidence.every((item) => item.location?.rowRange)).toBe(
+      true,
+    );
+  });
+
+  it("uses workbook column origins when locating source evidence", () => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "workbook-doc",
+        name: "workbook.xlsx",
+        table: { ...table, cellRange: "D5:F11" },
+      },
+    ]);
+
+    expect(result.sourceEvidence.location).toMatchObject({
+      cellRange: "D6:F11",
+      rowRange: { start: 6, end: 11 },
+    });
+  });
+
+  it("uses extracted physical row numbers for quality evidence", () => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "blank-lines-doc",
+        name: "blank-lines.csv",
+        table: {
+          ...table,
+          headers: ["product", "revenue"],
+          rows: [
+            ["A", "100"],
+            ["B", "unknown"],
+            ["C", "50"],
+          ],
+          sourceRowNumbers: [2, 4, 5],
+          cellRange: "A1:B5",
+        },
+      },
+    ]);
+
+    const issue = result.dataQuality.find(
+      ({ code }) => code === "type-mismatch",
+    );
+    expect(issue?.rows).toEqual([{ start: 4, end: 4 }]);
+    expect(
+      result.qualityEvidence.find((evidence) =>
+        evidence.sourceRef.includes(":revenue:"),
+      )?.location,
+    ).toMatchObject({
+      cellRange: "B4:B4",
+      rowRange: { start: 4, end: 4 },
+    });
+  });
+
+  it("sorts supported year, quarter, and week labels before computing growth", () => {
+    for (const [header, labels, expectedLabels] of [
+      ["year", ["2026", "2025"], ["2025", "2026"]],
+      ["quarter", ["2026-Q2", "Q1 2026"], ["Q1 2026", "2026-Q2"]],
+      ["week", ["2026-W02", "W01 2026"], ["W01 2026", "2026-W02"]],
+    ] as const) {
+      const result = analyzeSalesTables([
+        {
+          documentId: "period-doc",
+          name: "periods.csv",
+          table: {
+            ...table,
+            headers: [header, "revenue"],
+            rows: [
+              [labels[0], "100"],
+              [labels[1], "50"],
+            ],
+          },
+        },
+      ]);
+
+      expect(result.metrics.byPeriod.map(({ label }) => label)).toEqual(
+        expectedLabels,
+      );
+      expect(result.metrics.byPeriod[1]?.growthPercent).toBe(100);
+    }
+
+    const unknownOrder = analyzeSalesTables([
+      {
+        documentId: "unknown-period-doc",
+        name: "unknown-periods.csv",
+        table: {
+          ...table,
+          headers: ["period", "revenue"],
+          rows: [
+            ["FY26", "100"],
+            ["FY25", "50"],
+          ],
+        },
+      },
+    ]);
+    expect(
+      unknownOrder.metrics.byPeriod.map(({ growthPercent }) => growthPercent),
+    ).toEqual([null, null]);
+  });
+
+  it("selects revenue over IDs and unit prices and reports tied measures", () => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "measure-doc",
+        name: "measures.csv",
+        table: {
+          ...table,
+          headers: [
+            "month",
+            "sales_rep_id",
+            "unit_price",
+            "quantity",
+            "revenue",
+          ],
+          rows: [
+            ["Jan", "10001", "5", "2", "10"],
+            ["Feb", "10002", "7", "3", "21"],
+          ],
+        },
+      },
+    ]);
+    expect(result.metrics.valueColumn).toBe("revenue");
+    expect(result.metrics.total).toBe(31);
+
+    const ambiguous = analyzeSalesTables([
+      {
+        documentId: "ambiguous-doc",
+        name: "ambiguous.csv",
+        table: {
+          ...table,
+          headers: ["month", "revenue", "net revenue"],
+          rows: [
+            ["Jan", "10", "9"],
+            ["Feb", "20", "18"],
+          ],
+        },
+      },
+    ]);
+    expect(ambiguous.assumptions[0]).toContain("net revenue");
+    expect(ambiguous.openQuestions[0]?.severity).toBe("medium");
+  });
+
+  it.each([
+    "Sales Rep",
+    "Sales Rep Name",
+    "Sales Representative",
+    "Sales Person",
+    "Salesperson",
+    "sales_team",
+    "Sales Channel",
+    "Sales Region",
+  ])("does not select categorical %s instead of Amount", (header) => {
+    for (const categories of [
+      ["Alice", "Bob"],
+      ["10001", "10002"],
+    ]) {
+      const result = analyzeSalesTables([
+        {
+          documentId: "sales-doc",
+          name: "sales.csv",
+          table: {
+            ...table,
+            headers: [header, "Month", "Amount"],
+            rows: [
+              [categories[0]!, "Jan", "100"],
+              [categories[1]!, "Feb", "200"],
+            ],
+          },
+        },
+      ]);
+      expect(result.metrics.valueColumn).toBe("Amount");
+      expect(result.metrics.total).toBe(300);
+    }
+  });
+
+  it("preserves measure priorities regardless of column order", () => {
+    const rankedHeaders = [
+      "Revenue",
+      "Net sales",
+      "Sales",
+      "Amount",
+      "Total value",
+      "Price",
+      "Unit price",
+      "Quantity",
+    ];
+    for (let index = 0; index < rankedHeaders.length; index++) {
+      const headers = rankedHeaders.slice(index).reverse();
+      const result = analyzeSalesTables([
+        {
+          documentId: "measure-doc",
+          name: "measures.csv",
+          table: {
+            ...table,
+            headers,
+            rows: [headers.map((_, column) => String(column + 1))],
+          },
+        },
+      ]);
+      expect(result.metrics.valueColumn).toBe(rankedHeaders[index]);
+      expect(result.metrics.total).toBe(headers.length);
+    }
+  });
+
+  it.each(["Sales Rep Revenue", "Sales Region Amount"])(
+    "keeps %s as a measure rather than a categorical header",
+    (header) => {
+      const result = analyzeSalesTables([
+        {
+          documentId: "measure-doc",
+          name: "sales.csv",
+          table: {
+            ...table,
+            headers: ["Month", header],
+            rows: [
+              ["Jan", "100"],
+              ["Feb", "200"],
+            ],
+          },
+        },
+      ]);
+      expect(result.metrics.valueColumn).toBe(header);
+      expect(result.metrics.total).toBe(300);
+    },
+  );
+
+  it("sorts canonical workbook dates before computing growth and the trend", () => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "workbook-doc",
+        name: "sales.xlsx",
+        table: {
+          ...table,
+          headers: ["Date", "Product", "Revenue"],
+          rows: [
+            ["2026-03-01", "A", "50"],
+            ["2026-01-01", "A", "100"],
+            ["2026-02-01", "A", "200"],
+          ],
+        },
+      },
+    ]);
+    expect(result.metrics.byPeriod).toEqual([
+      { label: "2026-01-01", value: 100, growthPercent: null },
+      { label: "2026-02-01", value: 200, growthPercent: 100 },
+      { label: "2026-03-01", value: 50, growthPercent: -75 },
+    ]);
+    expect(
+      result.dashboard.charts.find(({ type }) => type === "line")?.data,
+    ).toEqual([
+      { period: "2026-01-01", Revenue: 100 },
+      { period: "2026-02-01", Revenue: 200 },
+      { period: "2026-03-01", Revenue: 50 },
+    ]);
+  });
+
+  it.each([
+    ["3/1/26", "1/1/26", "2/1/26"],
+    ["FY26", "FY25", "FY24"],
+    ["2026-01", "Feb", "2026-03"],
+    ["Jan", "January", "Feb"],
+  ])("warns and omits a trend for unordered periods %j", (...labels) => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "unordered-doc",
+        name: "sales.csv",
+        table: {
+          ...table,
+          headers: ["Period", "Revenue"],
+          rows: labels.map((label) => [label, "100"]),
+        },
+      },
+    ]);
+    expect(result.metrics.byPeriod.map(({ label }) => label)).toEqual(labels);
+    expect(
+      result.metrics.byPeriod.every(
+        ({ growthPercent }) => growthPercent === null,
+      ),
+    ).toBe(true);
+    expect(result.dashboard.charts.some(({ type }) => type === "line")).toBe(
+      false,
+    );
+    expect(result.dashboard.charts.some(({ type }) => type === "bar")).toBe(
+      true,
+    );
+    expect(result.dataQuality).toContainEqual(
+      expect.objectContaining({
+        code: "unordered-periods",
+        columns: ["Period"],
+        rows: [{ start: 2, end: 4 }],
+        count: 3,
+      }),
+    );
+    expect(result.qualityEvidence).toContainEqual(
+      expect.objectContaining({
+        documentId: "unordered-doc",
+        location: expect.objectContaining({
+          cellRange: "A2:A4",
+          rowRange: { start: 2, end: 4 },
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    {
+      headers: ["year", "product", "revenue"],
+      rows: [
+        ["2025", "A", "unknown"],
+        ["2026", "B", null],
+      ],
+    },
+    {
+      headers: ["year", "product", "revenue", "unit_price", "quantity"],
+      rows: [
+        ["2025", "A", "unknown", "10", "2"],
+        ["2026", "B", null, "20", "3"],
+      ],
+    },
+    {
+      headers: ["Sales Rep", "Revenue", "Amount"],
+      rows: [
+        ["Alice", "unknown", "100"],
+        ["Bob", null, "200"],
+      ],
+    },
+    {
+      headers: ["sales_year", "customer_id", "product_number", "other"],
+      rows: [
+        ["2025", "1", "1001", "10"],
+        ["2026", "2", "1002", "20"],
+      ],
+    },
+  ])(
+    "rejects datasets without a usable measure: $headers",
+    ({ headers, rows }) => {
+      expect(() =>
+        analyzeSalesTables([
+          {
+            documentId: "invalid-measure",
+            name: "sales.csv",
+            table: { ...table, headers, rows },
+          },
+        ]),
+      ).toThrow(/usable numeric sales or amount column/);
+    },
+  );
+
+  it.each([
+    ["1234.56", 1234.56],
+    ["1,234.56", 1234.56],
+    ["12,34,567.89", 1234567.89],
+    ["123,456,789.01", 123456789.01],
+    ["$ 1,234.56", 1234.56],
+    ["-₹ 1,234.56", -1234.56],
+    ["(£1,234.56)", -1234.56],
+    ["1.25e3", 1250],
+    [".125", 0.125],
+  ])("parses supported amount %s", (amount, expected) => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "amount-doc",
+        name: "amount.csv",
+        table: {
+          ...table,
+          headers: ["product", "revenue"],
+          rows: [["A", String(amount)]],
+        },
+      },
+    ]);
+
+    expect(result.metrics.total).toBe(expected);
+  });
+
+  it.each(["1.234,56", "2.000,00", "12,34", "1,23,45", "1 2", "1,234,56"])(
+    "flags unsupported or malformed amount %s instead of summing it",
+    (amount) => {
+      const result = analyzeSalesTables([
+        {
+          documentId: "malformed-amount",
+          name: "sales.csv",
+          table: {
+            ...table,
+            headers: ["product", "revenue"],
+            rows: [
+              ["A", amount],
+              ["B", "100"],
+            ],
+          },
+        },
+      ]);
+
+      expect(result.metrics.total).toBe(100);
+      expect(result.dataQuality).toContainEqual(
+        expect.objectContaining({
+          code: "type-mismatch",
+          columns: ["revenue"],
+          rows: [{ start: 2, end: 2 }],
+          count: 1,
+        }),
+      );
+    },
+  );
+
+  it("rejects a revenue column containing only decimal-comma amounts", () => {
+    expect(() =>
+      analyzeSalesTables([
+        {
+          documentId: "decimal-comma",
+          name: "sales.csv",
+          table: {
+            ...table,
+            headers: ["year", "product", "revenue"],
+            rows: [
+              ["2025", "A", "1.234,56"],
+              ["2026", "B", "2.000,00"],
+            ],
+          },
+        },
+      ]),
+    ).toThrow(/usable numeric sales or amount column/);
+  });
+
+  it("rejects oversized persisted analysis results before any narrative call", () => {
+    const rows = Array.from({ length: 80_000 }, (_, index) => [
+      `segment-${String(index).padStart(6, "0")}-${"x".repeat(48)}`,
+      "1",
+    ]);
+    expect(() =>
+      analyzeSalesTables([
+        {
+          documentId: "large-doc",
+          name: "large.csv",
+          table: {
+            ...table,
+            headers: ["product", "revenue"],
+            rows,
+          },
+        },
+      ]),
+    ).toThrow(/8 MiB persistence safety limit/);
+  });
+
+  it("returns report, chart spec, and source evidence after one mock narrative call", async () => {
+    const provider = new MockProvider({
+      responses: [narrativeFixture, narrativeFixture],
+    });
+    const generate = vi.spyOn(provider, "generateStructured");
+    let tablesForAnalysis = [
+      ...sourceTables,
+      {
+        documentId: "unreferenced-document",
+        name: "unreferenced.csv",
+        table: {
+          ...table,
+          rows: [...table.rows, ...table.rows, ...table.rows],
+        },
+      },
+    ];
+    const ai = createAi({
+      provider,
+      accounting: {
+        mode: "test",
+        admit: async () => undefined,
+        record: async () => undefined,
+        cancel: async () => undefined,
+      },
+      models: {
+        provider: "mock",
+        sparkModel: "mock-spark",
+        wonderModel: "mock-wonder",
+      },
+    });
+    const context: AgentContext = {
+      ownerId: "sales-owner",
+      case: syntheticWorkflowFixtures.dataAnalysis.case,
+      runId: "sales-run",
+      taskId: "sales-task",
+      documents: {
+        listAsync: async () => [],
+        tablesAsync: vi.fn(async () => tablesForAnalysis),
+        sliceAsync: async () => null,
+      },
+      logger: {
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
+      signal: new AbortController().signal,
+      usage: {
+        userId: "sales-owner",
+        caseId: "sales-case",
+        runId: "sales-run",
+        leaseId: "sales-lease",
+        fencingToken: 1,
+      },
+      ai,
+    };
+    const input: SpecialistInput = {
+      case: {
+        title: "Quarterly sales",
+        description: "Review the quarterly revenue movement.",
+        useCase: "data-analysis",
+      },
+      task: {
+        id: "sales-task",
+        key: "sales-analysis",
+        role: "business-data-analyst",
+        instructions: "Compare periods and explain the relevant caveats.",
+      },
+      priorFindings: [],
+      documents: [
+        {
+          documentId: "sales-document",
+          name: "quarterly-sales.csv",
+          pages: [],
+          tables: [],
+          truncated: true,
+        },
+      ],
+      humanInput: null,
+    };
+
+    const result = await createBusinessDataAnalystAgent().run(input, context);
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(context.documents.tablesAsync).toHaveBeenCalledWith([
+      "sales-document",
+    ]);
+    expect(result.output.report?.metrics.total).toBe(1000);
+    expect(result.output.dashboard?.charts).toHaveLength(3);
+    expect(result.output.findings[0]?.evidence[0]?.location).toMatchObject({
+      rowRange: { start: 2, end: 7 },
+    });
+    expect(
+      result.output.findings.some(
+        (finding) => finding.title === "Revenue increased by period",
+      ),
+    ).toBe(true);
+    expect(result.output.report?.assumptions).toContain(
+      "The periods represent calendar months.",
+    );
+    expect(result.output.report?.openQuestions).toContainEqual({
+      text: "Would another period grouping be more useful?",
+      severity: "low",
+    });
+    expect(result.output.report?.metrics.rowCount).toBe(6);
+    expect(result.output.findings[0]?.evidence[0]?.documentId).toBe(
+      "sales-document",
+    );
+    const narrativeInput = generate.mock.calls[0]?.[0].input as {
+      caseContext: string;
+      analysisInstructions: string;
+    };
+    expect(narrativeInput.caseContext).toContain(
+      "Review the quarterly revenue movement.",
+    );
+    expect(narrativeInput.analysisInstructions).toContain(
+      "Compare periods and explain the relevant caveats.",
+    );
+
+    tablesForAnalysis = [
+      {
+        documentId: "sales-document",
+        name: "messy-sales.csv",
+        table: {
+          ...table,
+          rows: [
+            ["2026-01", "A", "100"],
+            ["2026-02", "B", "unknown"],
+            ["2026-03", "C", null],
+            ["2026-04", "D", "-20"],
+          ],
+        },
+      },
+    ];
+    const messyResult = await createBusinessDataAnalystAgent().run(
+      input,
+      context,
+    );
+    const evidenceRows = (title: string) =>
+      messyResult.output.findings
+        .find((finding) => finding.title === title)
+        ?.evidence.map((evidence) => evidence.location?.rowRange);
+    expect(evidenceRows("Data quality: type mismatch")).toEqual([
+      { start: 3, end: 3 },
+    ]);
+    expect(evidenceRows("Data quality: missing values")).toEqual([
+      { start: 4, end: 4 },
+    ]);
+    expect(evidenceRows("Data quality: out of range")).toEqual([
+      { start: 5, end: 5 },
+    ]);
+
+    tablesForAnalysis = [
+      {
+        ...sourceTables[0]!,
+        table: {
+          ...table,
+          headers: ["year", "product", "revenue"],
+          rows: [
+            ["2025", "A", "1.234,56"],
+            ["2026", "B", null],
+          ],
+        },
+      },
+    ];
+    await expect(
+      createBusinessDataAnalystAgent().run(input, context),
+    ).rejects.toThrow(/usable numeric sales or amount column/);
+    expect(generate).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps high-cardinality narrative inputs under the configured token budget", async () => {
+    const highCardinalityRows = Array.from({ length: 240 }, (_, index) => {
+      const year = 2020 + Math.floor(index / 12);
+      const month = String((index % 12) + 1).padStart(2, "0");
+      return [`${year}-${month}`, `segment-${index}`, String(index + 1)];
+    });
+    const highCardinalityTable: ExtractedTable = {
+      ...table,
+      headers: ["month", "product", "revenue"],
+      rows: highCardinalityRows,
+      cellRange: "A1:C241",
+    };
+    const provider = new MockProvider({ responses: [narrativeFixture] });
+    const generate = vi.spyOn(provider, "generateStructured");
+    const ai = createAi({
+      provider,
+      accounting: {
+        mode: "test",
+        admit: async () => undefined,
+        record: async () => undefined,
+        cancel: async () => undefined,
+      },
+      models: {
+        provider: "mock",
+        sparkModel: "mock-spark",
+        wonderModel: "mock-wonder",
+      },
+    });
+    const context: AgentContext = {
+      ownerId: "sales-owner",
+      case: syntheticWorkflowFixtures.dataAnalysis.case,
+      runId: "sales-run",
+      taskId: "sales-task",
+      documents: {
+        listAsync: async () => [],
+        tablesAsync: async () => [
+          {
+            documentId: "sales-document",
+            name: "high-cardinality.csv",
+            table: highCardinalityTable,
+          },
+        ],
+        sliceAsync: async () => null,
+      },
+      logger: {
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
+      signal: new AbortController().signal,
+      usage: {
+        userId: "sales-owner",
+        caseId: "sales-case",
+        runId: "sales-run",
+        leaseId: "sales-lease",
+        fencingToken: 1,
+      },
+      ai,
+    };
+    const input: SpecialistInput = {
+      case: {
+        title: "High cardinality",
+        description: "",
+        useCase: "data-analysis",
+      },
+      task: {
+        id: "sales-task",
+        key: "sales-analysis",
+        role: "business-data-analyst",
+        instructions: "Summarize the data.",
+      },
+      priorFindings: [],
+      documents: [
+        {
+          documentId: "sales-document",
+          name: "high-cardinality.csv",
+          pages: [],
+          tables: [],
+          truncated: true,
+        },
+      ],
+      humanInput: null,
+    };
+
+    const result = await createBusinessDataAnalystAgent().run(input, context);
+
+    expect(result.output.report?.metrics.byPeriod).toHaveLength(240);
+    const request = generate.mock.calls[0]?.[0];
+    expect(request).toBeDefined();
+    expect(
+      inputTokenAllowance({
+        system: request!.system,
+        input: request!.input,
+        schema: request!.schema,
+      }),
+    ).toBeLessThanOrEqual(ai.inputTokenLimit("mid") - 1024);
+    const narrative = request!.input as {
+      metrics: { byPeriod: unknown[]; bySegment: unknown[] };
+      omittedPeriodCount: number;
+      omittedSegmentCount: number;
+    };
+    expect(narrative.metrics.byPeriod.length).toBeLessThan(240);
+    expect(narrative.metrics.bySegment.length).toBeLessThan(240);
+    expect(narrative.omittedPeriodCount).toBeGreaterThan(0);
+    expect(narrative.omittedSegmentCount).toBeGreaterThan(0);
+  });
+
+  it("keeps the model-facing specialist schema strict-compatible", () => {
+    const schema = z.toJSONSchema(SpecialistModelOutputSchema) as {
+      properties: Record<string, unknown>;
+    };
+    expect(schema.properties).not.toHaveProperty("report");
+    expect(schema.properties).not.toHaveProperty("dashboard");
+    const serialized = JSON.stringify(schema);
+    expect(serialized).not.toContain("location");
+    expect(serialized).not.toContain('additionalProperties":{}');
+
+    const visit = (value: unknown) => {
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
+      if (typeof value !== "object" || value === null) return;
+      const object = value as Record<string, unknown>;
+      if (object.type === "object" && typeof object.properties === "object") {
+        const properties = object.properties as Record<string, unknown>;
+        expect(object.additionalProperties).toBe(false);
+        expect(object.required).toEqual(Object.keys(properties));
+        Object.values(properties).forEach(visit);
+      }
+      for (const key of ["items", "anyOf", "allOf", "oneOf"]) {
+        if (key in object) visit(object[key]);
+      }
+    };
+    visit(schema);
+  });
+});

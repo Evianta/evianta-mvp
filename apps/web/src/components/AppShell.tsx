@@ -1,11 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import {
-  Activity,
   ChartNoAxesCombined,
-  FilePlus2,
   Files,
   Layers3,
   LogOut,
@@ -19,14 +18,9 @@ import { ThemeToggle } from "./ThemeToggle";
 import { useSession } from "../session/SessionProvider";
 
 const navigation = [
-  { href: "/", label: "Open samples", icon: Layers3, match: "home" },
-  { href: "/cases", label: "Your cases", icon: Files, match: "/cases" },
-  {
-    href: "/cases/new",
-    label: "New case",
-    icon: FilePlus2,
-    match: "/cases/new",
-  },
+  { href: "/", label: "Start", icon: Layers3, match: "home" },
+  { href: "/cases", label: "Cases", icon: Files, match: "/cases" },
+  { href: "/#samples", label: "Samples", icon: Layers3, match: "/samples" },
   {
     href: "/admin/usage",
     label: "Usage overview",
@@ -37,7 +31,14 @@ const navigation = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const { session, signOut } = useSession();
+  const {
+    session,
+    signOut,
+    restoring,
+    restoreError,
+    signingOut,
+    signOutPending,
+  } = useSession();
   const { openAccessKeyDialog } = useAccessKeyDialog();
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -48,8 +49,8 @@ export function AppShell({ children }: { children: ReactNode }) {
     } catch (reason) {
       setAuthError(
         reason instanceof Error
-          ? `Signed out locally; server revocation failed: ${reason.message}`
-          : "Signed out locally; server revocation failed.",
+          ? `Sign-out could not finish: ${reason.message} Retry sign-out to remove saved login and revoke the session.`
+          : "Sign-out could not finish. Retry sign-out to remove saved login and revoke the session.",
       );
     }
   }
@@ -58,9 +59,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="app-frame">
       <aside className="sidebar" aria-label="Primary navigation">
         <Link className="brand-lockup" href="/">
-          <span className="brand-mark">
-            <Activity size={19} strokeWidth={2.2} aria-hidden="true" />
-          </span>
+          <Image src="/logo.svg" alt="" width={36} height={36} priority />
           <span>
             <span className="brand-name block">evianta</span>
             <span className="brand-subtitle block">Evidence Atlas</span>
@@ -71,11 +70,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           {navigation.map((item) => {
             const active =
               item.match === "home"
-                ? pathname === "/" || pathname.startsWith("/samples/")
+                ? pathname === "/"
                 : item.match === "/cases"
-                  ? pathname === "/cases" ||
-                    (/^\/cases\/[^/]+$/.test(pathname) &&
-                      pathname !== "/cases/new")
+                  ? pathname === "/cases" || /^\/cases\/[^/]+$/.test(pathname)
                   : pathname === item.match ||
                     pathname.startsWith(`${item.match}/`);
             const Icon = item.icon;
@@ -119,23 +116,40 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="topbar-actions">
             <CommandPalette />
             <ThemeToggle />
-            {session ? (
+            {session || signOutPending ? (
               <Button
                 variant="secondary"
                 size="sm"
                 onClick={handleSignOut}
                 aria-label="Sign out and revoke this session"
+                disabled={signingOut}
               >
                 <LogOut size={15} aria-hidden="true" />
-                Sign out
+                {signingOut
+                  ? "Signing out..."
+                  : signOutPending
+                    ? "Retry sign-out"
+                    : "Sign out"}
               </Button>
             ) : (
-              <Button size="sm" onClick={() => openAccessKeyDialog()}>
-                Sign in
+              <Button
+                size="sm"
+                disabled={restoring}
+                onClick={() => openAccessKeyDialog()}
+              >
+                {restoring ? "Restoring sign-in..." : "Sign in"}
               </Button>
             )}
           </div>
         </header>
+        {restoreError && (
+          <p
+            className="border-b border-warning/30 bg-warning/10 px-6 py-2 text-center text-xs text-warning"
+            role="status"
+          >
+            {restoreError}
+          </p>
+        )}
         {authError && (
           <div
             className="border-b border-warning/30 bg-warning/10 px-6 py-2 text-center text-xs text-warning"

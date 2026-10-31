@@ -4,6 +4,58 @@ import { ApiError } from "../src/api/errors.js";
 import { FetchWebApiClient } from "../src/api/client.js";
 
 describe("FetchWebApiClient", () => {
+  it("finishes sign-out when the server already invalidated the session, but surfaces revocation outages", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json(
+          { error: { message: "Session expired." } },
+          { status: 401 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          { error: { message: "Revocation unavailable." } },
+          { status: 503 },
+        ),
+      );
+    const client = new FetchWebApiClient({
+      getToken: () => null,
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+    await expect(
+      client.revokeSession("expired-session"),
+    ).resolves.toBeUndefined();
+    await expect(client.revokeSession("saved-session")).rejects.toMatchObject({
+      status: 503,
+    });
+    expect(fetcher.mock.calls[0][1]?.credentials).toBe("omit");
+  });
+  it("exchanges access keys without browser cookies", async () => {
+    const token = {
+      accessToken: "restored-token",
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json(token));
+    const client = new FetchWebApiClient({
+      getToken: () => null,
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+    expect(await client.exchangeAccessKey("test-access-key")).toEqual(token);
+    expect(fetcher.mock.calls[0]).toEqual([
+      "/auth/token",
+      expect.objectContaining({
+        credentials: "omit",
+        cache: "no-store",
+        method: "POST",
+      }),
+    ]);
+  });
+
   const run: RunDto = {
     id: "run-1",
     caseId: "case-1",
@@ -123,7 +175,7 @@ describe("FetchWebApiClient", () => {
     } as const;
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockResolvedValue(Response.json({ document }));
+      .mockResolvedValue(Response.json({ documents: [document] }));
     const client = new FetchWebApiClient({
       getToken: () => "session-token",
       onUnauthorized: vi.fn(),
@@ -137,6 +189,41 @@ describe("FetchWebApiClient", () => {
         "mixed",
       ),
     ).resolves.toEqual(document);
+    const formData = fetcher.mock.calls[0]?.[1]?.body as FormData;
+    expect(formData.has("files")).toBe(true);
+  });
+
+  it("loads private workspace results and source metadata from the API", async () => {
+    const record = syntheticWorkflowFixtures.dataAnalysis.case;
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        case: record,
+        documents: [],
+        runs: [],
+        tasks: [],
+        findings: [],
+        evidence: [],
+        deliverables: [],
+        state: "active",
+        usage: record.usage,
+      }),
+    );
+    const client = new FetchWebApiClient({
+      getToken: () => "session-token",
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+
+    await expect(client.getCaseWorkspace(record.id)).resolves.toMatchObject({
+      case: record,
+      documents: [],
+      findings: [],
+      evidence: [],
+      deliverables: [],
+    });
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      `/cases/${encodeURIComponent(record.id)}`,
+    );
   });
 
   it("clears private streams and the session on an unauthorized response", async () => {
@@ -214,11 +301,13 @@ describe("FetchWebApiClient", () => {
     await client.exchangeAccessKey("temporary-key");
     const [, authRequest] = fetcher.mock.calls[0];
     expect(authRequest?.cache).toBe("no-store");
+    expect(authRequest?.credentials).toBe("omit");
     expect(authRequest?.body).toBe(
       JSON.stringify({ accessKey: "temporary-key" }),
     );
     await client.revokeSession("memory-token");
     expect(fetcher.mock.calls[1][0]).toBe("/auth/logout");
+    expect(fetcher.mock.calls[1][1]?.credentials).toBe("omit");
     expect(
       new Headers(fetcher.mock.calls[1][1]?.headers).get("Authorization"),
     ).toBe("Bearer memory-token");

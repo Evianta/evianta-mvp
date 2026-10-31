@@ -1,6 +1,10 @@
 import { syntheticWorkflowFixtures } from "@evianta/core";
 import { InMemoryDocumentStore, createInMemoryStore } from "@evianta/store";
-import { seedAgentDirectoryAsync } from "@evianta/agents";
+import {
+  BUSINESS_DATA_ANALYST_ROLE,
+  createBusinessDataAnalystAgent,
+  seedAgentDirectoryAsync,
+} from "@evianta/agents";
 import { createDocumentIngestion } from "@evianta/ingestion";
 import type { AddressInfo } from "node:net";
 import express from "express";
@@ -11,6 +15,7 @@ import {
   type AuthenticationService,
 } from "../src/auth.js";
 import { registerCaseApiRoutes, type CaseApiServices } from "../src/routes.js";
+import { FetchWebApiClient } from "../../web/src/api/client.js";
 import {
   createHarness,
   planOf,
@@ -151,6 +156,117 @@ describe("case API routes", () => {
     };
   }
 
+  it("exposes configured intake limits only to authenticated owners", async () => {
+    expect((await fetch(`${baseUrl}/intake/configuration`)).status).toBe(401);
+    const response = await fetch(`${baseUrl}/intake/configuration`, {
+      headers: authHeaders(),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      workflows: ["data-analysis"],
+      ...services.uploads,
+    });
+  });
+
+  it.each(["tax-notice", "msme-payment"] as const)(
+    "blocks live %s creation, upload and run admission",
+    async (useCase) => {
+      const response = await fetch(`${baseUrl}/cases`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ title: "Not available", useCase }),
+      });
+      expect(response.status).toBe(409);
+      expect(await repositories.cases.listOwned(user.id)).toEqual([]);
+      const record = {
+        ...syntheticWorkflowFixtures.dataAnalysis.case,
+        id: `disabled-${useCase}`,
+        ownerId: user.id,
+        isSample: false,
+        synthetic: false,
+        useCase,
+      };
+      await repositories.cases.insert(record);
+      for (const [path, body] of [
+        ["/runs", { caseId: record.id }],
+        [`/cases/${record.id}/run`, {}],
+        [`/cases/${record.id}/retry`, { priorRunId: "absent" }],
+        [`/cases/${record.id}/documents`, {}],
+      ] as const) {
+        const blocked = await fetch(`${baseUrl}${path}`, {
+          method: "POST",
+          headers: { ...authHeaders(), "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect(blocked.status).toBe(409);
+        expect(await blocked.json()).toMatchObject({
+          error: { message: expect.stringContaining("coming next") },
+        });
+      }
+      expect(
+        await repositories.documents.listOwned({
+          ownerId: user.id,
+          caseId: record.id,
+        }),
+      ).toEqual([]);
+      expect(await repositories.runs.listForCase(record.id, user.id)).toEqual(
+        [],
+      );
+    },
+  );
+
+  it.each([undefined, null, "sample-sales-quarter"])(
+    "accepts the web client's case-creation request with source %s",
+    async (sourceCaseId) => {
+      const client = new FetchWebApiClient({
+        baseUrl,
+        getToken: () => token,
+        onUnauthorized: () => {
+          throw new Error("The test session was unexpectedly rejected");
+        },
+      });
+      const created = await client.createCase({
+        title: "Sales verification",
+        description: "Analyze the uploaded dataset",
+        useCase: "data-analysis",
+        sourceCaseId,
+      });
+      expect(created).toMatchObject({
+        ownerId: user.id,
+        useCase: "data-analysis",
+        sourceCaseId: sourceCaseId ?? null,
+        isSample: false,
+        synthetic: false,
+      });
+      expect(
+        await repositories.documents.listOwned({
+          ownerId: user.id,
+          caseId: created.id,
+        }),
+      ).toEqual([]);
+    },
+  );
+
+  it.each(["private-case", "unknown-sample"])(
+    "rejects a non-public setup source %s",
+    async (sourceCaseId) => {
+      const response = await fetch(`${baseUrl}/cases`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Sales verification",
+          useCase: "data-analysis",
+          sourceCaseId,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: "validation-failed" },
+      });
+      expect(await repositories.cases.listOwned(user.id)).toEqual([]);
+    },
+  );
+
   it("serves public synthetic samples and authenticated case/profile routes", async () => {
     const publicSamples = await fetch(`${baseUrl}/samples`);
     expect(publicSamples.status).toBe(200);
@@ -164,7 +280,7 @@ describe("case API routes", () => {
     expect(agents.status).toBe(200);
     expect(
       ((await agents.json()) as { agents: unknown[] }).agents,
-    ).toHaveLength(3);
+    ).toHaveLength(4);
 
     const created = await createCase();
     const listed = await fetch(`${baseUrl}/cases`, {
@@ -247,6 +363,7 @@ describe("case API routes", () => {
       state: "ready",
       name: "notes.txt",
     });
+
     const document = uploadBody.documents[0];
     if (!document) throw new Error("Uploaded document was not returned");
 
@@ -289,13 +406,13 @@ describe("case API routes", () => {
     expect(deniedCase.status).toBe(404);
     expect(deniedDocument.status).toBe(404);
 
-    const runResponse = await fetch(`${baseUrl}/cases/${created.case.id}/run`, {
+    const runResponse = await fetch(`${baseUrl}/runs`, {
       method: "POST",
       headers: {
         ...authHeaders(),
         "content-type": "application/json",
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ caseId: created.case.id, input: {} }),
     });
     expect(runResponse.status).toBe(202);
     const { run } = (await runResponse.json()) as {
@@ -310,6 +427,12 @@ describe("case API routes", () => {
     expect(
       await repositories.runs.findOwnedById(run.id, user.id),
     ).toMatchObject({ status: "queued" });
+    const latestRun = await fetch(
+      `${baseUrl}/cases/${created.case.id}/runs/latest`,
+      { headers: authHeaders() },
+    );
+    expect(latestRun.status).toBe(200);
+    expect(await latestRun.json()).toMatchObject({ run: { id: run.id } });
 
     await worker.runOnceAsync();
     const listAfter = repositories.events.listAfter.bind(repositories.events);
@@ -462,6 +585,116 @@ describe("case API routes", () => {
     await expect(protectedDownload.arrayBuffer()).rejects.toThrow();
     expect(authenticationChecks).toBe(2);
     releaseAuthentication?.();
+  });
+
+  it("runs an uploaded sales dataset and persists its report and chart specs", async () => {
+    const analyst = createHarness({
+      repositories,
+      provider: new ScriptedProvider({
+        "business-data-analyst": () => ({
+          interpretation:
+            "Monthly revenue increased through the quarter, led by product B.",
+          insights: [
+            {
+              title: "Revenue increased by period",
+              description:
+                "The grouped values show a rising trend across the supplied months.",
+              severity: "low",
+              assumptions: [],
+              openQuestions: [],
+            },
+          ],
+        }),
+      }),
+      plan: {
+        ...planOf([
+          { key: "sales-analysis", role: BUSINESS_DATA_ANALYST_ROLE },
+        ]),
+        title: "Sales data analysis",
+        format: "dashboard",
+      },
+      specialists: [createBusinessDataAnalystAgent()],
+      reviewer: false,
+    });
+    services.orchestrator = analyst.orchestrator;
+    worker = analyst.worker;
+
+    const created = await createCase();
+    const form = new FormData();
+    form.append(
+      "files",
+      new Blob(
+        [
+          [
+            "month,product,revenue",
+            "Jan,A,100",
+            "Jan,B,150",
+            "Feb,A,120",
+            "Feb,B,180",
+            "Mar,A,200",
+            "Mar,B,250",
+          ].join("\n"),
+        ],
+        { type: "text/csv" },
+      ),
+      "quarterly-sales.csv",
+    );
+    const uploaded = await fetch(
+      `${baseUrl}/cases/${created.case.id}/documents`,
+      { method: "POST", headers: authHeaders(), body: form },
+    );
+    expect(uploaded.status).toBe(201);
+    expect(await uploaded.json()).toMatchObject({
+      documents: [expect.objectContaining({ state: "ready" })],
+    });
+
+    const started = await fetch(`${baseUrl}/runs`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ caseId: created.case.id, input: {} }),
+    });
+    expect(started.status).toBe(202);
+    const { run } = (await started.json()) as { run: { id: string } };
+    await worker.runOnceAsync();
+
+    const details = await fetch(`${baseUrl}/cases/${created.case.id}`, {
+      headers: authHeaders(),
+    });
+    const body = (await details.json()) as {
+      deliverables: Array<{
+        format: string;
+        sections: Array<{
+          content: {
+            report: { metrics: { total: number } };
+            dashboard: { charts: unknown[] };
+          };
+          evidenceIds: string[];
+        }>;
+      }>;
+      evidence: Array<{
+        location: { rowRange?: { start: number; end: number } };
+      }>;
+      runs: Array<{ id: string; status: string }>;
+    };
+
+    expect(body.runs).toContainEqual(
+      expect.objectContaining({ id: run.id, status: "completed" }),
+    );
+    const deliverable = body.deliverables.find(
+      (item) => item.format === "dashboard",
+    );
+    expect(deliverable?.sections[0]?.content.report.metrics.total).toBe(1000);
+    expect(deliverable?.sections[0]?.content.dashboard.charts).toHaveLength(3);
+    expect(
+      body.evidence.some(
+        (item) =>
+          item.location.rowRange?.start === 2 &&
+          item.location.rowRange.end === 7,
+      ),
+    ).toBe(true);
   });
 
   it("requests case deletion without overwriting concurrent usage updates", async () => {

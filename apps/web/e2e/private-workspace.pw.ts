@@ -10,6 +10,16 @@ const record = {
 };
 
 async function mockAuth(page: Page) {
+  await page.route("**/intake/configuration", (route) =>
+    route.fulfill({
+      json: {
+        workflows: ["data-analysis"],
+        uploadMaxBytes: 25 * 1024 * 1024,
+        uploadMaxFiles: 5,
+        documentMaxPages: 80,
+      },
+    }),
+  );
   let session = 0;
   await page.route("**/auth/token", (route) =>
     route.fulfill({
@@ -71,28 +81,26 @@ for (const phase of ["create", "upload"] as const) {
             outcome === "failure"
               ? { error: { message: "Old session upload failed." } }
               : {
-                  document: syntheticWorkflowFixtures.dataAnalysis.documents[0],
+                  documents: [
+                    syntheticWorkflowFixtures.dataAnalysis.documents[0],
+                  ],
                 },
         });
       });
 
-      await page.goto("/cases/new");
+      await page.goto("/");
       await expect(
-        page.getByRole("link", { name: "New case" }),
+        page
+          .getByRole("navigation")
+          .getByRole("link", { name: "Start", exact: true }),
       ).toHaveAttribute("aria-current", "page");
       await expect(
-        page.getByRole("link", { name: "Your cases" }),
+        page.getByRole("link", { name: "Cases", exact: true }),
       ).not.toHaveAttribute("aria-current", "page");
       await signIn(page);
       await page
-        .getByLabel("Case title", { exact: true })
-        .fill("Private old title");
-      await page
-        .getByLabel("What should the review answer?")
-        .fill("Private old notes");
-      await page
-        .getByLabel("Workflow", { exact: true })
-        .selectOption("data-analysis");
+        .getByLabel("Task prompt", { exact: true })
+        .fill("Private old sales notes");
       await page.locator("#case-files").setInputFiles([
         {
           name: "old.csv",
@@ -105,23 +113,22 @@ for (const phase of ["create", "upload"] as const) {
           buffer: Buffer.from("a,b\n3,4"),
         },
       ]);
-      await page.getByRole("button", { name: "Create private case" }).click();
+      await page
+        .getByRole("button", { name: "Start task", exact: true })
+        .click();
       await pendingRequest;
       await page
         .getByRole("button", { name: "Sign out and revoke this session" })
         .click();
       await signIn(page);
-      await expect(page.getByLabel("Case title", { exact: true })).toHaveValue(
+      await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue(
         "",
       );
-      await expect(
-        page.getByLabel("What should the review answer?"),
-      ).toHaveValue("");
       await expect(
         page.getByRole("list", { name: "Selected documents" }),
       ).toHaveCount(0);
       await page
-        .getByLabel("Case title", { exact: true })
+        .getByLabel("Task prompt", { exact: true })
         .fill("New session title");
 
       const response = page.waitForResponse(
@@ -139,8 +146,8 @@ for (const phase of ["create", "upload"] as const) {
           ),
       );
 
-      await expect(page).toHaveURL(/\/cases\/new$/);
-      await expect(page.getByLabel("Case title", { exact: true })).toHaveValue(
+      await expect(page).toHaveURL("/");
+      await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue(
         "New session title",
       );
       await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0);
@@ -148,7 +155,7 @@ for (const phase of ["create", "upload"] as const) {
         page.getByRole("link", { name: "Open created case" }),
       ).toHaveCount(0);
       await expect(
-        page.getByRole("button", { name: "Create private case" }),
+        page.getByRole("button", { name: "Start task", exact: true }),
       ).toBeEnabled();
       expect(uploadCount).toBe(phase === "create" ? 0 : 1);
     });
@@ -182,31 +189,31 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
       await firstUploadCanFinish;
       await route.fulfill({
         json: {
-          document: syntheticWorkflowFixtures.dataAnalysis.documents[0],
+          documents: [syntheticWorkflowFixtures.dataAnalysis.documents[0]],
         },
       });
       return;
     }
     if (uploadCount === 2) {
       await route.fulfill({
-        status: 500,
+        status: 400,
         json: { error: { message: "Temporary upload failure." } },
       });
       return;
     }
     await route.fulfill({
       json: {
-        document: syntheticWorkflowFixtures.dataAnalysis.documents[0],
+        documents: [syntheticWorkflowFixtures.dataAnalysis.documents[0]],
       },
     });
   });
 
-  await page.goto("/cases/new");
+  await page.goto("/");
   await signIn(page);
-  await page.getByLabel("Case title", { exact: true }).fill("Recovery case");
+  await page.getByLabel("Task prompt", { exact: true }).fill("Recovery case");
   await page
-    .getByLabel("Workflow", { exact: true })
-    .selectOption("data-analysis");
+    .getByLabel("Task prompt", { exact: true })
+    .fill("Analyze sales for recovery");
   await page.locator("#case-files").setInputFiles([
     {
       name: "first.csv",
@@ -219,7 +226,7 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
       buffer: Buffer.from("a,b\n3,4"),
     },
   ]);
-  await page.getByRole("button", { name: "Create private case" }).click();
+  await page.getByRole("button", { name: "Start task", exact: true }).click();
   await firstUploadStarted;
   const firstDocument = page
     .getByRole("listitem")
@@ -236,7 +243,7 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
   finishFirstUpload();
   await expect(
     page.getByRole("alert").filter({
-      hasText: "Case created, but an upload did not finish",
+      hasText: "Case created.",
     }),
   ).toBeVisible();
   await expect(
@@ -245,7 +252,29 @@ test("resumes failed uploads in the existing case", async ({ page }) => {
   await expect(
     secondDocument.getByRole("button", { name: "Remove second.csv" }),
   ).toBeEnabled();
-  await page.getByRole("button", { name: "Retry remaining uploads" }).click();
+  await page.route("**/cases/private-case", async (route) => {
+    if (route.request().headers().accept !== "application/json") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      json: {
+        case: record,
+        documents: [
+          {
+            ...syntheticWorkflowFixtures.dataAnalysis.documents[0],
+            state: "processing",
+          },
+        ],
+        findings: [],
+        evidence: [],
+        deliverables: [],
+      },
+    });
+  });
+  await page
+    .getByRole("button", { name: "Retry second.csv", exact: true })
+    .click();
   await expect.poll(() => uploadCount).toBe(3);
   await expect(page).toHaveURL(/\/cases\/private-case$/);
   expect(createCount).toBe(1);
@@ -280,7 +309,17 @@ for (const status of ["queued", "running", "failed", "none"] as const) {
         lookups += 1;
         await route.fulfill({ json: { run: status === "none" ? null : run } });
       } else {
-        await route.fulfill({ json: { case: record } });
+        await route.fulfill({
+          json: {
+            case: record,
+            documents: [],
+            runs: [],
+            tasks: [],
+            findings: [],
+            evidence: [],
+            deliverables: [],
+          },
+        });
       }
     });
     await page.route("**/cases", async (route) => {
@@ -290,7 +329,7 @@ for (const status of ["queued", "running", "failed", "none"] as const) {
       }
       await route.fulfill({ json: { cases: [record], nextCursor: null } });
     });
-    await page.route("**/runs/existing-run/events?*", (route) => {
+    await page.route("**/cases/private-case/stream?*", (route) => {
       streams += 1;
       return route.fulfill({
         contentType: "text/event-stream",
@@ -318,7 +357,7 @@ for (const status of ["queued", "running", "failed", "none"] as const) {
       .getByRole("link", { name: "Your cases", exact: true })
       .first()
       .click();
-    await expect(page).toHaveURL(/\/cases$/);
+    await expect(page).toHaveURL(/\/cases$/, { timeout: 15000 });
     await page.getByRole("link", { name: record.title, exact: true }).click();
     await expect(page.getByRole("button", { name: action })).toBeVisible();
     expect(lookups).toBeGreaterThan(initialLookups);

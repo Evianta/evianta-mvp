@@ -9,6 +9,8 @@ import {
   PlanRegistry,
   RunWorker,
   Orchestrator,
+  BUSINESS_DATA_ANALYST_ROLE,
+  createBusinessDataAnalystAgent,
   createGenericAnalystAgent,
   createMongoCheckpointerAsync,
   seedAgentDirectoryAsync,
@@ -21,7 +23,11 @@ import {
   getUsageEnvironment,
 } from "@evianta/env/server";
 import { createDocumentIngestion } from "@evianta/ingestion";
-import { connectMongoStore, createDocumentStore } from "@evianta/store";
+import {
+  connectMongoStore,
+  createDocumentStore,
+  StoreError,
+} from "@evianta/store";
 import type { CaseApiServices } from "./routes.js";
 
 export interface ApiRuntime {
@@ -36,7 +42,18 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
   const documentStoreConfig = getDocumentStoreConfig();
   const aiEnvironment = getAiEnvironment();
   const usage = getUsageEnvironment();
-  const store = await connectMongoStore();
+  const store = await connectMongoStore().catch((error: unknown) => {
+    if (
+      error instanceof StoreError &&
+      error.code === "mongodb-transactions-required"
+    ) {
+      console.error("Database configuration invalid", {
+        code: error.code,
+        message: error.message,
+      });
+    }
+    throw error;
+  });
   try {
     const storage = createDocumentStore(documentStoreConfig);
     const checkpointer = await createMongoCheckpointerAsync({
@@ -76,6 +93,9 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
                 summary: "Analysis completed using the supplied case record.",
                 findings: [],
                 inputRequired: null,
+                interpretation:
+                  "No significant trend was identified in the supplied records.",
+                insights: [],
               }),
             ],
           });
@@ -90,20 +110,24 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
         maxOutputTokens: usage.modelMaxOutputTokens,
       },
     });
+    const dataAnalysisPlan = createTrivialReferencePlan("data-analysis");
+    dataAnalysisPlan.title = "Sales data analysis";
+    dataAnalysisPlan.format = "dashboard";
+    dataAnalysisPlan.tasks = [
+      {
+        key: "sales-analysis",
+        role: BUSINESS_DATA_ANALYST_ROLE,
+        title: "Sales analysis",
+        dependsOn: [],
+        required: true,
+        instructions:
+          "Compute sales metrics and data-quality checks deterministically, then interpret the results.",
+      },
+    ];
     const plans = new PlanRegistry()
-      .register(createTrivialReferencePlan("data-analysis"))
+      .register(dataAnalysisPlan)
       .register(createTrivialReferencePlan("tax-notice"))
       .register(createTrivialReferencePlan("msme-payment"));
-    const orchestrator = new Orchestrator({
-      repositories: store.repositories,
-      ai,
-      plans,
-      specialists: [createGenericAnalystAgent()],
-      checkpointer,
-      userRunLimit: usage.userMaxConcurrentRuns,
-      globalRunLimit: usage.globalMaxConcurrentRuns,
-      leaseTtlSeconds: 120,
-    });
     const ingestion = createDocumentIngestion({
       documents: store.repositories.documents,
       extractions: store.repositories.extractions,
@@ -115,6 +139,24 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
           maxPages: uploads.documentMaxPages,
         },
       },
+    });
+    const orchestrator = new Orchestrator({
+      repositories: store.repositories,
+      refreshTabularExtraction: async (documentId, scope) => {
+        const result = await ingestion.ingest({ scope, documentId });
+        if (result.status !== "ready")
+          throw new Error("The tabular source could not be refreshed.");
+      },
+      ai,
+      plans,
+      specialists: [
+        createBusinessDataAnalystAgent(),
+        createGenericAnalystAgent(),
+      ],
+      checkpointer,
+      userRunLimit: usage.userMaxConcurrentRuns,
+      globalRunLimit: usage.globalMaxConcurrentRuns,
+      leaseTtlSeconds: 120,
     });
     const services: CaseApiServices = {
       repositories: store.repositories,

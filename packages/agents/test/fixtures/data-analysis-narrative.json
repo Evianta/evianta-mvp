@@ -1,0 +1,17 @@
+{
+  "interpretation": "Monthly revenue increased through the quarter, with product B leading.",
+  "insights": [
+    {
+      "title": "Revenue increased by period",
+      "description": "The grouped values show a rising trend across the supplied months.",
+      "severity": "low",
+      "assumptions": ["The periods represent calendar months."],
+      "openQuestions": [
+        {
+          "text": "Would another period grouping be more useful?",
+          "severity": "low"
+        }
+      ]
+    }
+  ]
+}

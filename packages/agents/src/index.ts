@@ -2,6 +2,7 @@ export * from "./agent.js";
 export * from "./checkpointer.js";
 export * from "./concurrency.js";
 export * from "./contracts.js";
+export * from "./data-analysis.js";
 export * from "./documents.js";
 export * from "./errors.js";
 export * from "./graph.js";

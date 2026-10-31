@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   AdmissionRejectedError,
   createAi,
@@ -29,6 +30,8 @@ import {
   isIncomplete,
   lowConfidenceWarningCode,
   pageNotExtractedWarningCode,
+  parseDelimited,
+  parseWorkbook,
   requiresReview,
   type IngestionOptions,
   type OcrBackend,
@@ -58,6 +61,12 @@ const mimeTypes = {
 
 const ocrResponse = (text: string, method = "ocr", confidence = 0.95) =>
   JSON.stringify({ text, method, confidence });
+const quarterlySalesFixture = readFileSync(
+  new URL("./fixtures/quarterly-sales.csv", import.meta.url),
+);
+const messySalesFixture = readFileSync(
+  new URL("./fixtures/messy-sales.csv", import.meta.url),
+);
 
 interface HarnessOptions {
   responses?: string[];
@@ -241,6 +250,208 @@ describe("deterministic extraction", () => {
     expect(extraction.tables[0].rows[1][2]).toBe("3,400");
     expect(await h.stateOf(doc.id)).toBe("ready");
   });
+
+  it("extracts the synthetic quarterly-sales workflow fixture", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(
+      quarterlySalesFixture,
+      mimeTypes.csv,
+      "quarterly-sales.csv",
+    );
+
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+
+    expect(result.extraction?.tables[0]).toMatchObject({
+      headers: ["month", "product", "revenue"],
+      rows: [
+        ["Jan", "A", "100"],
+        ["Jan", "B", "150"],
+        ["Feb", "A", "120"],
+        ["Feb", "B", "180"],
+        ["Mar", "A", "200"],
+        ["Mar", "B", "250"],
+      ],
+      cellRange: "A1:C7",
+    });
+  });
+
+  it("preserves physical CSV row numbers while omitting blank records", () => {
+    const result = parseDelimited(
+      "date,amount\n2026-01,10\n\n2026-02,unknown\n",
+      ",",
+      resolveIngestionSettings().limits,
+    );
+
+    expect(result.tables[0]).toMatchObject({
+      rows: [
+        ["2026-01", "10"],
+        ["2026-02", "unknown"],
+      ],
+      sourceRowNumbers: [2, 4],
+      cellRange: "A1:B4",
+    });
+  });
+
+  it("preserves physical worksheet row numbers while omitting blank records", () => {
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ["date", "amount"],
+      ["2026-01", "10"],
+      [null, null],
+      ["2026-02", "unknown"],
+    ]);
+    XLSX.utils.book_append_sheet(workbook, sheet, "Sales");
+    const bytes = XLSX.write(workbook, {
+      type: "buffer",
+      bookType: "xlsx",
+    }) as Buffer;
+    const result = parseWorkbook(
+      bytes,
+      resolveIngestionSettings().limits,
+      true,
+    );
+
+    expect(result.tables[0]).toMatchObject({
+      rows: [
+        ["2026-01", "10"],
+        ["2026-02", "unknown"],
+      ],
+      sourceRowNumbers: [2, 4],
+      cellRange: "A1:B4",
+    });
+  });
+
+  it("preserves messy sales values for deterministic quality checks", async () => {
+    const h = await setup();
+    const doc = await h.addDocument(
+      messySalesFixture,
+      mimeTypes.csv,
+      "messy-sales.csv",
+    );
+
+    const result = await h.ingestion.ingest(ingestRequest(doc.id));
+
+    expect(result.extraction?.tables[0]?.rows).toHaveLength(7);
+    expect(result.extraction?.tables[0]?.rows[5]).toEqual([
+      "2026-03-01",
+      "C",
+      "unknown",
+    ]);
+    expect(result.extraction?.tables[0]?.rows[6]).toEqual([
+      "2026-03-02",
+      "D",
+      null,
+    ]);
+  });
+
+  it.each(["xlsx", "xls"] as const)(
+    "preserves underlying numeric values and canonical dates in %s workbooks",
+    (bookType) => {
+      const sheet = XLSX.utils.aoa_to_sheet(
+        [
+          ["date", "revenue", "rate", "active"],
+          [new Date("2026-01-01T00:00:00Z"), 1234.56, 0.125, true],
+          [new Date("2026-02-01T00:00:00Z"), 2000.49, 0.25, false],
+        ],
+        { UTC: true },
+      );
+      sheet.A2.z = sheet.A3.z = "yyyy-mm-dd";
+      sheet.B2.z = "#,##0";
+      sheet.B3.z = "$#,##0";
+      sheet.C2.z = sheet.C3.z = "0%";
+      const book = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(book, sheet, "Sales");
+      const bytes = XLSX.write(book, { type: "buffer", bookType }) as Buffer;
+
+      const result = parseWorkbook(
+        bytes,
+        resolveIngestionSettings().limits,
+        bookType === "xlsx",
+      );
+
+      expect(result.tables[0]).toMatchObject({
+        rows: [
+          ["2026-01-01", "1234.56", "0.125", "TRUE"],
+          ["2026-02-01", "2000.49", "0.25", "FALSE"],
+        ],
+        columnTypes: ["date", "number", "number", "boolean"],
+        sourceRowNumbers: [2, 3],
+        cellRange: "A1:D3",
+      });
+    },
+  );
+
+  it.each(["xlsx", "xls"] as const)(
+    "canonicalizes dates independently of their display format in %s",
+    (bookType) => {
+      const sheet = XLSX.utils.aoa_to_sheet(
+        [
+          ["Date", "Product", "Revenue"],
+          [new Date("2026-03-01T00:00:00Z"), "A", 50],
+          [new Date("2026-01-01T00:00:00Z"), "A", 100],
+          [new Date("2026-02-01T00:00:00Z"), "A", 200],
+          [new Date("2026-02-01T12:30:00Z"), "A", 25],
+        ],
+        { UTC: true },
+      );
+      sheet.A3.z = "dd/mm/yyyy";
+      sheet.A4.z = "mmm d, yyyy";
+      sheet.A5.z = "m/d/yy h:mm";
+      const book = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(book, sheet, "Sales");
+      const result = parseWorkbook(
+        XLSX.write(book, { type: "buffer", bookType }) as Buffer,
+        resolveIngestionSettings().limits,
+        bookType === "xlsx",
+      );
+      expect(result.tables[0]).toMatchObject({
+        rows: [
+          ["2026-03-01", "A", "50"],
+          ["2026-01-01", "A", "100"],
+          ["2026-02-01", "A", "200"],
+          ["2026-02-01T12:30:00.000Z", "A", "25"],
+        ],
+        columnTypes: ["date", "string", "number"],
+        sourceRowNumbers: [2, 3, 4, 5],
+        cellRange: "A1:C5",
+      });
+    },
+  );
+
+  it.each(["UTC", "Asia/Kolkata", "America/Los_Angeles"])(
+    "keeps native Excel date cells unchanged in %s",
+    (timezone) => {
+      const previousTimezone = process.env.TZ;
+      process.env.TZ = timezone;
+      try {
+        for (const bookType of ["xlsx", "xls"] as const) {
+          const sheet: XLSX.WorkSheet = {
+            "!ref": "A1:B3",
+            A1: { t: "s", v: "Date" },
+            B1: { t: "s", v: "Revenue" },
+            A2: { t: "n", v: 46023, z: "m/d/yy" },
+            B2: { t: "n", v: 100 },
+            A3: { t: "n", v: 46054, z: "dd/mm/yyyy" },
+            B3: { t: "n", v: 200 },
+          };
+          const book = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(book, sheet, "Sales");
+          const result = parseWorkbook(
+            XLSX.write(book, { type: "buffer", bookType }) as Buffer,
+            resolveIngestionSettings().limits,
+            bookType === "xlsx",
+          );
+          expect(result.tables[0]?.rows).toEqual([
+            ["2026-01-01", "100"],
+            ["2026-02-01", "200"],
+          ]);
+        }
+      } finally {
+        if (previousTimezone === undefined) delete process.env.TZ;
+        else process.env.TZ = previousTimezone;
+      }
+    },
+  );
 
   it("parses every XLSX sheet with sheet names and cell ranges", async () => {
     const h = await setup();

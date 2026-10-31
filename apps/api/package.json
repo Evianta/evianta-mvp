@@ -15,6 +15,11 @@
     "zod": "4.4.3"
   },
   "scripts": {
+    "dev": "pnpm build && concurrently --kill-others --names packages,api-build,api \"pnpm -w watch:packages\" \"pnpm watch\" \"pnpm dev:server\"",
+    "dev:worker": "pnpm build && concurrently --kill-others --names packages,api-build,worker \"pnpm -w watch:packages\" \"pnpm watch\" \"pnpm dev:worker:server\"",
+    "dev:server": "node --watch --watch-preserve-output --env-file-if-exists=../../.env dist/server.js",
+    "dev:worker:server": "node --watch --watch-preserve-output --env-file-if-exists=../../.env dist/worker.js",
+    "watch": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "start": "node --env-file-if-exists=../../.env dist/server.js",
     "start:worker": "node --env-file-if-exists=../../.env dist/worker.js",
     "admin": "node --env-file-if-exists=../../.env dist/admin.js",

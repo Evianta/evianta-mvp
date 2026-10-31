@@ -75,11 +75,11 @@ export function CasesClient() {
           </p>
         </div>
         <Link
-          href="/cases/new"
+          href="/"
           className="button-link bg-primary text-primary-foreground shadow-soft hover:brightness-105"
         >
           <FilePlus2 size={15} aria-hidden="true" />
-          New case
+          Start a task
         </Link>
       </div>
 
@@ -131,7 +131,7 @@ export function CasesClient() {
             description="Create a private case to organize documents and review findings."
             action={
               <Link
-                href="/cases/new"
+                href="/"
                 className="button-link bg-primary text-primary-foreground"
               >
                 Create a case <ArrowRight size={14} aria-hidden="true" />
