@@ -148,10 +148,16 @@ function parseNumber(value: string | null | undefined): number | null {
   if (value === null || value === undefined || value.trim() === "") return null;
   const cleaned = value
     .trim()
-    .replace(/[₹$€£,\s]/g, "")
-    .replace(/^\((.*)\)$/, "-$1");
-  if (!/^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i.test(cleaned)) return null;
-  const result = Number(cleaned);
+    .replace(/^\((.*)\)$/, "-$1")
+    .replace(/^([+-]?)\s*[₹$€£]\s*/, "$1")
+    .replace(/\s*[₹$€£]$/, "");
+  if (
+    !/^[-+]?(?:(?:\d+|\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})*,\d{3})(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?$/i.test(
+      cleaned,
+    )
+  )
+    return null;
+  const result = Number(cleaned.replaceAll(",", ""));
   return Number.isFinite(result) ? result : null;
 }
 
@@ -324,7 +330,11 @@ function dataQualityIssues(
       issues.push({
         code: "type-mismatch",
         severity: "medium",
-        message: `Values in “${header}” mix numeric and non-numeric types.`,
+        message:
+          `Values in “${header}” mix numeric and non-numeric types.` +
+          (columnIndex === valueIndex
+            ? " Non-numeric or unsupported amounts were excluded from computed totals. Use decimal points and valid Western or Indian comma grouping."
+            : ""),
         columns: [header],
         rows: rowGroups(
           populated
@@ -412,11 +422,9 @@ function chooseTable(tables: readonly SourceTable[]): {
     const table = source.table;
     const measures = table.headers
       .map((header, index) => ({ header: normalized(header), index }))
-      .filter(({ index }) =>
-        table.rows.some((row) => parseNumber(row[index]) !== null),
-      )
       .filter(
         ({ header }) =>
+          !/\b(date|month|period|week|quarter|year)\b/.test(header) &&
           !/(^| )(id|identifier|code|sku|key)($| )/.test(header) &&
           !/(^| )(product|account|customer|sales rep|representative) (number|no)($| )/.test(
             header,
@@ -447,16 +455,20 @@ function chooseTable(tables: readonly SourceTable[]): {
                         ? 20
                         : 0;
         return { ...column, score };
-      });
+      })
+      .filter(({ score }) => score > 0);
     if (!measures.length) return [];
     measures.sort(
       (left, right) => right.score - left.score || left.index - right.index,
     );
     const highestScore = measures[0]!.score;
     const leadingMeasures = measures.filter(
-      (measure) => measure.score === highestScore,
+      (measure) =>
+        measure.score === highestScore &&
+        table.rows.some((row) => parseNumber(row[measure.index]) !== null),
     );
-    const valueIndex = measures[0]!.index;
+    if (!leadingMeasures.length) return [];
+    const valueIndex = leadingMeasures[0]!.index;
     const periodIndex = table.headers.findIndex((header) =>
       /date|month|period|week|quarter|year/.test(normalized(header)),
     );
@@ -495,7 +507,7 @@ function chooseTable(tables: readonly SourceTable[]): {
   )[0];
   if (!candidate) {
     throw new Error(
-      "The uploaded records do not contain a usable numeric sales or amount column.",
+      "The uploaded records do not contain a usable numeric sales or amount column. Use decimal points and valid Western or Indian comma grouping.",
     );
   }
   return candidate;

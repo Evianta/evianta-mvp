@@ -242,6 +242,7 @@ export function parseWorkbook(
       cellFormula: false,
       cellHTML: false,
       cellStyles: false,
+      cellDates: true,
       bookVBA: false,
       sheetRows: limits.maxRows + 2,
     });
@@ -281,13 +282,18 @@ export function parseWorkbook(
     const availableCells = remainingCells;
     assertCellLimit(rowCount, columnCount, availableCells);
     remainingCells -= rowCount * columnCount;
-    const grid = XLSX.utils.sheet_to_json<(string | null)[]>(sheet, {
-      header: 1,
-      raw: false,
-      defval: null,
-      blankrows: true,
-      range: full,
-    });
+    const grid = XLSX.utils
+      .sheet_to_json<(string | number | null)[]>(sheet, {
+        header: 1,
+        raw: false,
+        rawNumbers: true,
+        defval: null,
+        blankrows: true,
+        range: full,
+      })
+      .map((row) =>
+        row.map((value) => (typeof value === "number" ? String(value) : value)),
+      );
     const range = XLSX.utils.decode_range(sheet["!ref"] ?? fullRange);
     const table = buildTable(
       `sheet-${index + 1}`,

@@ -108,6 +108,13 @@ the API also rejects live creation, uploads and execution for those workflows.
 Ready sources start a run automatically. Sources still being read open in the case
 workspace with preparation status and **Start analysis** when ready. Completed
 reports retain computed metrics, data-quality checks and source-linked charts.
+Workbook analysis uses underlying numeric cell values, not rounded currency or
+percentage display strings; date display and source row references are preserved.
+Amounts support decimal points, scientific notation, Western comma grouping
+(`1,234.56`) and Indian comma grouping (`12,34,567.89`). Decimal-comma and malformed
+amounts are excluded with a data-quality warning when valid amounts remain.
+If the highest-ranked measure has no valid amounts, the analysis fails explicitly
+instead of using years, identifiers or a lower-ranked measure as sales.
 Reopen saved work through **Cases**, without resubmitting. Upload failures retain
 the created case and successful files; rejected uploads can be retried in
 the composer. Ambiguous create/upload/run responses are checked against persisted

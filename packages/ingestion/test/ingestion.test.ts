@@ -344,6 +344,40 @@ describe("deterministic extraction", () => {
     ]);
   });
 
+  it.each(["xlsx", "xls"] as const)(
+    "preserves underlying numeric values and date display in %s workbooks",
+    (bookType) => {
+      const sheet = XLSX.utils.aoa_to_sheet([
+        ["date", "revenue", "rate", "active"],
+        [new Date("2026-01-01T00:00:00Z"), 1234.56, 0.125, true],
+        [new Date("2026-02-01T00:00:00Z"), 2000.49, 0.25, false],
+      ]);
+      sheet.A2.z = sheet.A3.z = "yyyy-mm-dd";
+      sheet.B2.z = "#,##0";
+      sheet.B3.z = "$#,##0";
+      sheet.C2.z = sheet.C3.z = "0%";
+      const book = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(book, sheet, "Sales");
+      const bytes = XLSX.write(book, { type: "buffer", bookType }) as Buffer;
+
+      const result = parseWorkbook(
+        bytes,
+        resolveIngestionSettings().limits,
+        bookType === "xlsx",
+      );
+
+      expect(result.tables[0]).toMatchObject({
+        rows: [
+          ["2026-01-01", "1234.56", "0.125", "TRUE"],
+          ["2026-02-01", "2000.49", "0.25", "FALSE"],
+        ],
+        columnTypes: ["date", "number", "number", "boolean"],
+        sourceRowNumbers: [2, 3],
+        cellRange: "A1:D3",
+      });
+    },
+  );
+
   it("parses every XLSX sheet with sheet names and cell ranges", async () => {
     const h = await setup();
     const doc = await h.addDocument(

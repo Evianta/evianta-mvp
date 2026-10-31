@@ -254,6 +254,118 @@ describe("business data analyst", () => {
     expect(ambiguous.openQuestions[0]?.severity).toBe("medium");
   });
 
+  it.each([
+    {
+      headers: ["year", "product", "revenue"],
+      rows: [
+        ["2025", "A", "unknown"],
+        ["2026", "B", null],
+      ],
+    },
+    {
+      headers: ["year", "product", "revenue", "unit_price", "quantity"],
+      rows: [
+        ["2025", "A", "unknown", "10", "2"],
+        ["2026", "B", null, "20", "3"],
+      ],
+    },
+    {
+      headers: ["sales_year", "customer_id", "product_number", "other"],
+      rows: [
+        ["2025", "1", "1001", "10"],
+        ["2026", "2", "1002", "20"],
+      ],
+    },
+  ])(
+    "rejects datasets without a usable measure: $headers",
+    ({ headers, rows }) => {
+      expect(() =>
+        analyzeSalesTables([
+          {
+            documentId: "invalid-measure",
+            name: "sales.csv",
+            table: { ...table, headers, rows },
+          },
+        ]),
+      ).toThrow(/usable numeric sales or amount column/);
+    },
+  );
+
+  it.each([
+    ["1234.56", 1234.56],
+    ["1,234.56", 1234.56],
+    ["12,34,567.89", 1234567.89],
+    ["123,456,789.01", 123456789.01],
+    ["$ 1,234.56", 1234.56],
+    ["-₹ 1,234.56", -1234.56],
+    ["(£1,234.56)", -1234.56],
+    ["1.25e3", 1250],
+    [".125", 0.125],
+  ])("parses supported amount %s", (amount, expected) => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "amount-doc",
+        name: "amount.csv",
+        table: {
+          ...table,
+          headers: ["product", "revenue"],
+          rows: [["A", String(amount)]],
+        },
+      },
+    ]);
+
+    expect(result.metrics.total).toBe(expected);
+  });
+
+  it.each(["1.234,56", "2.000,00", "12,34", "1,23,45", "1 2", "1,234,56"])(
+    "flags unsupported or malformed amount %s instead of summing it",
+    (amount) => {
+      const result = analyzeSalesTables([
+        {
+          documentId: "malformed-amount",
+          name: "sales.csv",
+          table: {
+            ...table,
+            headers: ["product", "revenue"],
+            rows: [
+              ["A", amount],
+              ["B", "100"],
+            ],
+          },
+        },
+      ]);
+
+      expect(result.metrics.total).toBe(100);
+      expect(result.dataQuality).toContainEqual(
+        expect.objectContaining({
+          code: "type-mismatch",
+          columns: ["revenue"],
+          rows: [{ start: 2, end: 2 }],
+          count: 1,
+        }),
+      );
+    },
+  );
+
+  it("rejects a revenue column containing only decimal-comma amounts", () => {
+    expect(() =>
+      analyzeSalesTables([
+        {
+          documentId: "decimal-comma",
+          name: "sales.csv",
+          table: {
+            ...table,
+            headers: ["year", "product", "revenue"],
+            rows: [
+              ["2025", "A", "1.234,56"],
+              ["2026", "B", "2.000,00"],
+            ],
+          },
+        },
+      ]),
+    ).toThrow(/usable numeric sales or amount column/);
+  });
+
   it("rejects oversized persisted analysis results before any narrative call", () => {
     const rows = Array.from({ length: 80_000 }, (_, index) => [
       `segment-${String(index).padStart(6, "0")}-${"x".repeat(48)}`,
@@ -424,6 +536,24 @@ describe("business data analyst", () => {
     expect(evidenceRows("Data quality: out of range")).toEqual([
       { start: 5, end: 5 },
     ]);
+
+    tablesForAnalysis = [
+      {
+        ...sourceTables[0]!,
+        table: {
+          ...table,
+          headers: ["year", "product", "revenue"],
+          rows: [
+            ["2025", "A", "1.234,56"],
+            ["2026", "B", null],
+          ],
+        },
+      },
+    ];
+    await expect(
+      createBusinessDataAnalystAgent().run(input, context),
+    ).rejects.toThrow(/usable numeric sales or amount column/);
+    expect(generate).toHaveBeenCalledTimes(2);
   });
 
   it("keeps high-cardinality narrative inputs under the configured token budget", async () => {
