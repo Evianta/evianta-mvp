@@ -223,12 +223,6 @@ export function DataAnalysisResults({
   const content = section ? asRecord(section.content) : null;
   const report = DataAnalysisReportSchema.safeParse(content?.report);
   const dashboard = DataAnalysisDashboardSchema.safeParse(content?.dashboard);
-  const interpretation =
-    typeof section?.reviewerContent === "string"
-      ? section.reviewerContent
-      : report.success
-        ? report.data.interpretation
-        : null;
 
   if (!workspace?.documents.length) {
     return (
@@ -274,10 +268,14 @@ export function DataAnalysisResults({
     <div className="mt-5 space-y-5">
       <section className="rounded-lg border border-border bg-background p-4">
         <h3 className="text-xs font-semibold">Executive summary</h3>
-        <p className="mt-2 text-xs leading-relaxed">{report.data.summary}</p>
-        {interpretation && (
+        <p className="mt-2 text-xs leading-relaxed">
+          {typeof section?.reviewerContent === "string"
+            ? section.reviewerContent
+            : report.data.summary}
+        </p>
+        {report.data.interpretation && (
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-            {interpretation}
+            {report.data.interpretation}
           </p>
         )}
         <dl className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">

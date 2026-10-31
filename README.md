@@ -212,10 +212,12 @@ section preserves unsaved work in other sections; save all edits and comments
 before approving the deliverable. Editing accepted content resets its section
 to pending unless the same request includes a new review decision.
 
-Reviewer edits replace the narrative interpretation in the data-analysis
-report, not its computed metrics or charts. Any saved review changes increment
-the deliverable version and invalidate its previous approval. Concurrent edits
-or approvals against an older version return a conflict; reload before retrying.
+Reviewer edits replace the executive summary text in the data-analysis report,
+not its computed metrics, narrative interpretation, or charts. Any saved review
+changes increment the deliverable version and invalidate its previous approval.
+A deliverable cannot be approved while any section has requested changes.
+Concurrent edits or approvals against an older version return a conflict;
+reload before retrying.
 
 ## Workspace responsibilities
 

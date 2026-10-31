@@ -106,6 +106,8 @@ export function ReviewEvidenceWorkspace({
   const citationUrl = selectedEvidence
     ? httpCitationUrl(selectedEvidence)
     : null;
+  const sourceDocumentId = selectedDocument?.id ?? null;
+  const sourceMimeType = selectedDocument?.mimeType ?? null;
 
   useEffect(() => {
     setDrafts({});
@@ -114,7 +116,7 @@ export function ReviewEvidenceWorkspace({
   }, [deliverable?.id]);
 
   useEffect(() => {
-    if (!selectedEvidence || !selectedDocument) {
+    if (!sourceDocumentId) {
       setSourceUrl(null);
       setSourceText(null);
       setSourceError(null);
@@ -128,13 +130,10 @@ export function ReviewEvidenceWorkspace({
     setSourceLoading(true);
     setSourceError(null);
     void api
-      .downloadDocument(caseId, selectedDocument.id)
+      .downloadDocument(caseId, sourceDocumentId)
       .then(async (blob) => {
         if (!active) return;
-        if (
-          selectedDocument.mimeType === "text/csv" ||
-          selectedDocument.mimeType === "text/plain"
-        ) {
+        if (sourceMimeType === "text/csv" || sourceMimeType === "text/plain") {
           const text = await blob.text();
           if (!active) return;
           setSourceText(text.slice(0, 40_000));
@@ -159,7 +158,7 @@ export function ReviewEvidenceWorkspace({
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [api, caseId, selectedDocument, selectedEvidence]);
+  }, [api, caseId, sourceDocumentId, sourceMimeType]);
 
   async function saveSection(
     section: DeliverableSection,
@@ -203,6 +202,13 @@ export function ReviewEvidenceWorkspace({
     } finally {
       setPending(false);
     }
+  }
+
+  function changedDraft(section: DeliverableSection): string | undefined {
+    const draft = drafts[section.id];
+    return draft === undefined || draft === initialDraft(section)
+      ? undefined
+      : draft;
   }
 
   function hasSectionChanges(section: DeliverableSection): boolean {
@@ -334,12 +340,12 @@ export function ReviewEvidenceWorkspace({
                         variant="secondary"
                         disabled={
                           pending ||
-                          (drafts[section.id] ?? initialDraft(section)) ===
-                            initialDraft(section)
+                          changedDraft(section) === undefined ||
+                          !drafts[section.id]?.trim()
                         }
                         onClick={() =>
                           void saveSection(section, {
-                            reviewerContent: drafts[section.id] ?? "",
+                            reviewerContent: changedDraft(section),
                           })
                         }
                       >
@@ -382,7 +388,7 @@ export function ReviewEvidenceWorkspace({
                     }
                     onClick={() =>
                       void saveSection(section, {
-                        reviewerContent: drafts[section.id],
+                        reviewerContent: changedDraft(section),
                         reviewStatus: "accepted",
                         reviewComment:
                           (
@@ -402,7 +408,7 @@ export function ReviewEvidenceWorkspace({
                     }
                     onClick={() =>
                       void saveSection(section, {
-                        reviewerContent: drafts[section.id],
+                        reviewerContent: changedDraft(section),
                         reviewStatus: "changes-requested",
                         reviewComment:
                           (

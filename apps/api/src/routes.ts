@@ -105,7 +105,7 @@ const CancelInputSchema = z
 const ReviewSectionInputSchema = z
   .object({
     expectedVersion: z.number().int().positive(),
-    reviewerContent: z.string().max(50_000).optional(),
+    reviewerContent: z.string().trim().min(1).max(50_000).optional(),
     reviewStatus: z
       .enum(["pending", "accepted", "changes-requested"])
       .optional(),
@@ -1823,6 +1823,19 @@ export function registerCaseApiRoutes(
       );
       if (existing && isApprovalCurrent(existing, deliverable)) {
         response.status(200).json({ approval: existing });
+        return;
+      }
+      if (
+        deliverable.sections.some(
+          (section) => section.reviewStatus === "changes-requested",
+        )
+      ) {
+        sendApiError(
+          response,
+          409,
+          "conflict",
+          "Resolve sections with requested changes before approving.",
+        );
         return;
       }
       if (existing) {

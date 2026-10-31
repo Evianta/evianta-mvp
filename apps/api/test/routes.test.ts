@@ -879,6 +879,28 @@ describe("case API routes", () => {
       reviewerContent: "Stale content must not overwrite the saved draft.",
     });
     expect(staleEdit.status).toBe(409);
+    const emptyEdit = await patchReview({
+      expectedVersion: reviewedDeliverable.version + 4,
+      reviewerContent: "   ",
+    });
+    expect(emptyEdit.status).toBe(400);
+    const approveWithChangesRequested = await fetch(
+      `${baseUrl}/cases/${created.case.id}/approve`,
+      {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          deliverableId: deliverable.id,
+          deliverableVersion: reviewedDeliverable.version + 4,
+        }),
+      },
+    );
+    expect(approveWithChangesRequested.status).toBe(409);
+    const resolved = await patchReview({
+      expectedVersion: reviewedDeliverable.version + 4,
+      reviewStatus: "accepted",
+    });
+    expect(resolved.status).toBe(200);
 
     const scope = { caseId: created.case.id, ownerId: user.id };
     const currentDeliverable = await repositories.deliverables.findOwnedById(
