@@ -45,7 +45,7 @@ const CaseWorkspaceResponseSchema = z.object({
   findings: z.array(FindingSchema),
   evidence: z.array(EvidenceSchema),
   deliverables: z.array(DeliverableSchema),
-  approvals: z.array(ApprovalSchema),
+  approvals: z.array(ApprovalSchema).default([]),
 });
 
 const DeliverableResponseSchema = z.object({ deliverable: DeliverableSchema });
