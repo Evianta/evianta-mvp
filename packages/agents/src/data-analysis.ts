@@ -411,6 +411,32 @@ function dataQualityIssues(
   return issues;
 }
 
+function salesMeasureScore(header: string): number {
+  if (
+    /\b(date|month|period|week|quarter|year)\b/.test(header) ||
+    /\b(id|identifier|code|sku|key)\b/.test(header) ||
+    /\b(product|account|customer|sales rep|representative) (number|no)\b/.test(
+      header,
+    ) ||
+    /^sales (rep|representative|person|team|channel|region|territory|manager|agent|office|department)( name)?$/.test(
+      header,
+    ) ||
+    /^salesperson( name)?$/.test(header)
+  ) {
+    return 0;
+  }
+  if (/\brevenue\b/.test(header)) return 120;
+  if (/\b(net sales|gross sales|sales amount|total sales)\b/.test(header))
+    return 110;
+  if (/\bsales\b/.test(header)) return 100;
+  if (/\bamount\b/.test(header)) return 90;
+  if (/\bvalue\b/.test(header)) return 80;
+  if (/\bunit price\b|\bprice per\b|\bcost per\b/.test(header)) return 30;
+  if (/\bprice\b/.test(header)) return 40;
+  if (/\b(quantity|qty|units)\b/.test(header)) return 20;
+  return 0;
+}
+
 function chooseTable(tables: readonly SourceTable[]): {
   source: SourceTable;
   valueIndex: number;
@@ -421,41 +447,10 @@ function chooseTable(tables: readonly SourceTable[]): {
   const candidates = tables.flatMap((source) => {
     const table = source.table;
     const measures = table.headers
-      .map((header, index) => ({ header: normalized(header), index }))
-      .filter(
-        ({ header }) =>
-          !/\b(date|month|period|week|quarter|year)\b/.test(header) &&
-          !/(^| )(id|identifier|code|sku|key)($| )/.test(header) &&
-          !/(^| )(product|account|customer|sales rep|representative) (number|no)($| )/.test(
-            header,
-          ),
-      )
-      .map((column) => {
-        const score = /\b(revenue|net revenue|gross revenue)\b/.test(
-          column.header,
-        )
-          ? 120
-          : /\b(net sales|gross sales|sales amount|total sales)\b/.test(
-                column.header,
-              )
-            ? 110
-            : /\bsales\b/.test(column.header)
-              ? 100
-              : /\bamount\b/.test(column.header)
-                ? 90
-                : /\btotal value\b|\bvalue\b/.test(column.header)
-                  ? 80
-                  : /\bunit price\b|\bprice per\b|\bcost per\b/.test(
-                        column.header,
-                      )
-                    ? 30
-                    : /\bprice\b/.test(column.header)
-                      ? 40
-                      : /\bquantity\b|\bqty\b|\bunits\b/.test(column.header)
-                        ? 20
-                        : 0;
-        return { ...column, score };
-      })
+      .map((header, index) => ({
+        index,
+        score: salesMeasureScore(normalized(header)),
+      }))
       .filter(({ score }) => score > 0);
     if (!measures.length) return [];
     measures.sort(
@@ -590,14 +585,14 @@ export function analyzeSalesTables(
   }));
   const orders = byPeriod.map(({ label }) => periodOrder(label));
   const periodKind = orders[0]?.kind;
-  if (
+  const periodsOrdered =
     periodKind !== undefined &&
     orders.every(
       (order): order is { kind: string; order: number } =>
         order !== null && order.kind === periodKind,
     ) &&
-    new Set(orders.map(({ order }) => order)).size === orders.length
-  ) {
+    new Set(orders.map(({ order }) => order)).size === orders.length;
+  if (periodsOrdered) {
     byPeriod = byPeriod
       .map((entry, index) => ({ entry, order: orders[index]!.order }))
       .sort((left, right) => left.order - right.order)
@@ -634,6 +629,22 @@ export function analyzeSalesTables(
     periodIndex,
     (rowIndex) => sourceRowNumber(table, rowIndex),
   );
+  if (byPeriod.length > 1 && !periodsOrdered) {
+    const affectedRows = table.rows.flatMap((row, rowIndex) =>
+      values[rowIndex] !== null && row[periodIndex]?.trim()
+        ? [sourceRowNumber(table, rowIndex)]
+        : [],
+    );
+    dataQuality.push({
+      code: "unordered-periods",
+      severity: "medium",
+      message:
+        "Period labels cannot be ordered reliably. Growth rates and the trend chart were omitted; period totals retain source order.",
+      columns: [table.headers[periodIndex]!],
+      rows: rowGroups(affectedRows),
+      count: affectedRows.length,
+    });
+  }
   const finalSourceRow = sourceRowNumber(table, table.rows.length - 1);
   const sourceEvidence = makeSourceEvidence(
     source,
@@ -683,7 +694,7 @@ export function analyzeSalesTables(
       },
     });
   }
-  if (metrics.byPeriod.length > 1) {
+  if (metrics.byPeriod.length > 1 && periodsOrdered) {
     dashboardCharts.push({
       id: "sales-trend",
       title: `${metrics.valueColumn} trend`,

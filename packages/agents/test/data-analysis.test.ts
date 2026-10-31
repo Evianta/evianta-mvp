@@ -255,6 +255,168 @@ describe("business data analyst", () => {
   });
 
   it.each([
+    "Sales Rep",
+    "Sales Rep Name",
+    "Sales Representative",
+    "Sales Person",
+    "Salesperson",
+    "sales_team",
+    "Sales Channel",
+    "Sales Region",
+  ])("does not select categorical %s instead of Amount", (header) => {
+    for (const categories of [
+      ["Alice", "Bob"],
+      ["10001", "10002"],
+    ]) {
+      const result = analyzeSalesTables([
+        {
+          documentId: "sales-doc",
+          name: "sales.csv",
+          table: {
+            ...table,
+            headers: [header, "Month", "Amount"],
+            rows: [
+              [categories[0]!, "Jan", "100"],
+              [categories[1]!, "Feb", "200"],
+            ],
+          },
+        },
+      ]);
+      expect(result.metrics.valueColumn).toBe("Amount");
+      expect(result.metrics.total).toBe(300);
+    }
+  });
+
+  it("preserves measure priorities regardless of column order", () => {
+    const rankedHeaders = [
+      "Revenue",
+      "Net sales",
+      "Sales",
+      "Amount",
+      "Total value",
+      "Price",
+      "Unit price",
+      "Quantity",
+    ];
+    for (let index = 0; index < rankedHeaders.length; index++) {
+      const headers = rankedHeaders.slice(index).reverse();
+      const result = analyzeSalesTables([
+        {
+          documentId: "measure-doc",
+          name: "measures.csv",
+          table: {
+            ...table,
+            headers,
+            rows: [headers.map((_, column) => String(column + 1))],
+          },
+        },
+      ]);
+      expect(result.metrics.valueColumn).toBe(rankedHeaders[index]);
+      expect(result.metrics.total).toBe(headers.length);
+    }
+  });
+
+  it.each(["Sales Rep Revenue", "Sales Region Amount"])(
+    "keeps %s as a measure rather than a categorical header",
+    (header) => {
+      const result = analyzeSalesTables([
+        {
+          documentId: "measure-doc",
+          name: "sales.csv",
+          table: {
+            ...table,
+            headers: ["Month", header],
+            rows: [
+              ["Jan", "100"],
+              ["Feb", "200"],
+            ],
+          },
+        },
+      ]);
+      expect(result.metrics.valueColumn).toBe(header);
+      expect(result.metrics.total).toBe(300);
+    },
+  );
+
+  it("sorts canonical workbook dates before computing growth and the trend", () => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "workbook-doc",
+        name: "sales.xlsx",
+        table: {
+          ...table,
+          headers: ["Date", "Product", "Revenue"],
+          rows: [
+            ["2026-03-01", "A", "50"],
+            ["2026-01-01", "A", "100"],
+            ["2026-02-01", "A", "200"],
+          ],
+        },
+      },
+    ]);
+    expect(result.metrics.byPeriod).toEqual([
+      { label: "2026-01-01", value: 100, growthPercent: null },
+      { label: "2026-02-01", value: 200, growthPercent: 100 },
+      { label: "2026-03-01", value: 50, growthPercent: -75 },
+    ]);
+    expect(
+      result.dashboard.charts.find(({ type }) => type === "line")?.data,
+    ).toEqual([
+      { period: "2026-01-01", Revenue: 100 },
+      { period: "2026-02-01", Revenue: 200 },
+      { period: "2026-03-01", Revenue: 50 },
+    ]);
+  });
+
+  it.each([
+    ["3/1/26", "1/1/26", "2/1/26"],
+    ["FY26", "FY25", "FY24"],
+    ["2026-01", "Feb", "2026-03"],
+    ["Jan", "January", "Feb"],
+  ])("warns and omits a trend for unordered periods %j", (...labels) => {
+    const result = analyzeSalesTables([
+      {
+        documentId: "unordered-doc",
+        name: "sales.csv",
+        table: {
+          ...table,
+          headers: ["Period", "Revenue"],
+          rows: labels.map((label) => [label, "100"]),
+        },
+      },
+    ]);
+    expect(result.metrics.byPeriod.map(({ label }) => label)).toEqual(labels);
+    expect(
+      result.metrics.byPeriod.every(
+        ({ growthPercent }) => growthPercent === null,
+      ),
+    ).toBe(true);
+    expect(result.dashboard.charts.some(({ type }) => type === "line")).toBe(
+      false,
+    );
+    expect(result.dashboard.charts.some(({ type }) => type === "bar")).toBe(
+      true,
+    );
+    expect(result.dataQuality).toContainEqual(
+      expect.objectContaining({
+        code: "unordered-periods",
+        columns: ["Period"],
+        rows: [{ start: 2, end: 4 }],
+        count: 3,
+      }),
+    );
+    expect(result.qualityEvidence).toContainEqual(
+      expect.objectContaining({
+        documentId: "unordered-doc",
+        location: expect.objectContaining({
+          cellRange: "A2:A4",
+          rowRange: { start: 2, end: 4 },
+        }),
+      }),
+    );
+  });
+
+  it.each([
     {
       headers: ["year", "product", "revenue"],
       rows: [
@@ -267,6 +429,13 @@ describe("business data analyst", () => {
       rows: [
         ["2025", "A", "unknown", "10", "2"],
         ["2026", "B", null, "20", "3"],
+      ],
+    },
+    {
+      headers: ["Sales Rep", "Revenue", "Amount"],
+      rows: [
+        ["Alice", "unknown", "100"],
+        ["Bob", null, "200"],
       ],
     },
     {

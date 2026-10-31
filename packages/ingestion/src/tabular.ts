@@ -283,16 +283,29 @@ export function parseWorkbook(
     assertCellLimit(rowCount, columnCount, availableCells);
     remainingCells -= rowCount * columnCount;
     const grid = XLSX.utils
-      .sheet_to_json<(string | number | null)[]>(sheet, {
+      .sheet_to_json<(string | number | boolean | Date | null)[]>(sheet, {
         header: 1,
-        raw: false,
-        rawNumbers: true,
+        raw: true,
+        UTC: true,
         defval: null,
         blankrows: true,
         range: full,
       })
       .map((row) =>
-        row.map((value) => (typeof value === "number" ? String(value) : value)),
+        row.map((value) => {
+          if (value instanceof Date) {
+            if (!Number.isFinite(value.getTime())) {
+              throw new IngestionError(
+                `Sheet ${sheetName} contains an invalid date`,
+                "parse-failed",
+              );
+            }
+            return value.toISOString().replace(/T00:00:00\.000Z$/, "");
+          }
+          if (typeof value === "number") return String(value);
+          if (typeof value === "boolean") return String(value).toUpperCase();
+          return value;
+        }),
       );
     const range = XLSX.utils.decode_range(sheet["!ref"] ?? fullRange);
     const table = buildTable(

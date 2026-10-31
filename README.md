@@ -109,12 +109,19 @@ Ready sources start a run automatically. Sources still being read open in the ca
 workspace with preparation status and **Start analysis** when ready. Completed
 reports retain computed metrics, data-quality checks and source-linked charts.
 Workbook analysis uses underlying numeric cell values, not rounded currency or
-percentage display strings; date display and source row references are preserved.
+percentage display strings. Date cells use canonical ISO dates or timestamps
+regardless of their display format; source row references are preserved.
+Periods are sorted chronologically when their labels can be ordered reliably.
+Otherwise, period totals retain source order, growth rates and the trend chart
+are omitted, and the report includes a data-quality warning.
 Amounts support decimal points, scientific notation, Western comma grouping
 (`1,234.56`) and Indian comma grouping (`12,34,567.89`). Decimal-comma and malformed
 amounts are excluded with a data-quality warning when valid amounts remain.
 If the highest-ranked measure has no valid amounts, the analysis fails explicitly
 instead of using years, identifiers or a lower-ranked measure as sales.
+Categorical sales columns such as sales representatives, teams and channels are
+not treated as measures. Revenue ranks above sales, generic amounts, values,
+prices and quantities.
 Reopen saved work through **Cases**, without resubmitting. Upload failures retain
 the created case and successful files; rejected uploads can be retried in
 the composer. Ambiguous create/upload/run responses are checked against persisted

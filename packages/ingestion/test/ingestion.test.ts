@@ -345,13 +345,16 @@ describe("deterministic extraction", () => {
   });
 
   it.each(["xlsx", "xls"] as const)(
-    "preserves underlying numeric values and date display in %s workbooks",
+    "preserves underlying numeric values and canonical dates in %s workbooks",
     (bookType) => {
-      const sheet = XLSX.utils.aoa_to_sheet([
-        ["date", "revenue", "rate", "active"],
-        [new Date("2026-01-01T00:00:00Z"), 1234.56, 0.125, true],
-        [new Date("2026-02-01T00:00:00Z"), 2000.49, 0.25, false],
-      ]);
+      const sheet = XLSX.utils.aoa_to_sheet(
+        [
+          ["date", "revenue", "rate", "active"],
+          [new Date("2026-01-01T00:00:00Z"), 1234.56, 0.125, true],
+          [new Date("2026-02-01T00:00:00Z"), 2000.49, 0.25, false],
+        ],
+        { UTC: true },
+      );
       sheet.A2.z = sheet.A3.z = "yyyy-mm-dd";
       sheet.B2.z = "#,##0";
       sheet.B3.z = "$#,##0";
@@ -375,6 +378,78 @@ describe("deterministic extraction", () => {
         sourceRowNumbers: [2, 3],
         cellRange: "A1:D3",
       });
+    },
+  );
+
+  it.each(["xlsx", "xls"] as const)(
+    "canonicalizes dates independently of their display format in %s",
+    (bookType) => {
+      const sheet = XLSX.utils.aoa_to_sheet(
+        [
+          ["Date", "Product", "Revenue"],
+          [new Date("2026-03-01T00:00:00Z"), "A", 50],
+          [new Date("2026-01-01T00:00:00Z"), "A", 100],
+          [new Date("2026-02-01T00:00:00Z"), "A", 200],
+          [new Date("2026-02-01T12:30:00Z"), "A", 25],
+        ],
+        { UTC: true },
+      );
+      sheet.A3.z = "dd/mm/yyyy";
+      sheet.A4.z = "mmm d, yyyy";
+      sheet.A5.z = "m/d/yy h:mm";
+      const book = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(book, sheet, "Sales");
+      const result = parseWorkbook(
+        XLSX.write(book, { type: "buffer", bookType }) as Buffer,
+        resolveIngestionSettings().limits,
+        bookType === "xlsx",
+      );
+      expect(result.tables[0]).toMatchObject({
+        rows: [
+          ["2026-03-01", "A", "50"],
+          ["2026-01-01", "A", "100"],
+          ["2026-02-01", "A", "200"],
+          ["2026-02-01T12:30:00.000Z", "A", "25"],
+        ],
+        columnTypes: ["date", "string", "number"],
+        sourceRowNumbers: [2, 3, 4, 5],
+        cellRange: "A1:C5",
+      });
+    },
+  );
+
+  it.each(["UTC", "Asia/Kolkata", "America/Los_Angeles"])(
+    "keeps native Excel date cells unchanged in %s",
+    (timezone) => {
+      const previousTimezone = process.env.TZ;
+      process.env.TZ = timezone;
+      try {
+        for (const bookType of ["xlsx", "xls"] as const) {
+          const sheet: XLSX.WorkSheet = {
+            "!ref": "A1:B3",
+            A1: { t: "s", v: "Date" },
+            B1: { t: "s", v: "Revenue" },
+            A2: { t: "n", v: 46023, z: "m/d/yy" },
+            B2: { t: "n", v: 100 },
+            A3: { t: "n", v: 46054, z: "dd/mm/yyyy" },
+            B3: { t: "n", v: 200 },
+          };
+          const book = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(book, sheet, "Sales");
+          const result = parseWorkbook(
+            XLSX.write(book, { type: "buffer", bookType }) as Buffer,
+            resolveIngestionSettings().limits,
+            bookType === "xlsx",
+          );
+          expect(result.tables[0]?.rows).toEqual([
+            ["2026-01-01", "100"],
+            ["2026-02-01", "200"],
+          ]);
+        }
+      } finally {
+        if (previousTimezone === undefined) delete process.env.TZ;
+        else process.env.TZ = previousTimezone;
+      }
     },
   );
 

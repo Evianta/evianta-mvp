@@ -614,6 +614,7 @@ export const DataQualityIssueSchema = z.object({
     "type-mismatch",
     "out-of-range",
     "inconsistent-date-formats",
+    "unordered-periods",
   ]),
   severity: z.enum(["high", "medium", "low"]),
   message: z.string().min(1),
