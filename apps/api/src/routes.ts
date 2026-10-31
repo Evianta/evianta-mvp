@@ -1733,6 +1733,25 @@ export function registerCaseApiRoutes(
         );
         return;
       }
+      const contentChanged =
+        input.reviewerContent !== undefined &&
+        input.reviewerContent !== section.reviewerContent;
+      const reviewStatus =
+        input.reviewStatus ??
+        (contentChanged ? "pending" : section.reviewStatus);
+      const reviewComment =
+        input.reviewComment === undefined
+          ? section.reviewComment
+          : input.reviewComment;
+      if (reviewStatus === "changes-requested" && !reviewComment?.trim()) {
+        sendApiError(
+          response,
+          400,
+          "validation-failed",
+          "A comment is required when requesting changes.",
+        );
+        return;
+      }
       const reviewedAt = new Date().toISOString();
       const updated = {
         ...deliverable,
@@ -1746,11 +1765,8 @@ export function registerCaseApiRoutes(
                 ...(input.reviewerContent === undefined
                   ? {}
                   : { reviewerContent: input.reviewerContent }),
-                reviewStatus: input.reviewStatus ?? item.reviewStatus,
-                reviewComment:
-                  input.reviewComment === undefined
-                    ? item.reviewComment
-                    : input.reviewComment,
+                reviewStatus,
+                reviewComment,
                 reviewerId: principal.userId,
                 reviewedAt,
               },
@@ -1809,6 +1825,15 @@ export function registerCaseApiRoutes(
         response.status(200).json({ approval: existing });
         return;
       }
+      if (existing) {
+        sendApiError(
+          response,
+          409,
+          "conflict",
+          "This deliverable changed. Reload it before approving.",
+        );
+        return;
+      }
       const findings = await repositories.findings.listForCase(scope);
       const approval = ApprovalSchema.parse({
         id: randomUUID(),
@@ -1824,12 +1849,6 @@ export function registerCaseApiRoutes(
         ),
         note: input.note,
       });
-      if (existing) {
-        await repositories.approvals.invalidateForDeliverable(
-          deliverable.id,
-          scope,
-        );
-      }
       try {
         await repositories.approvals.insert(approval, scope);
       } catch (error) {

@@ -203,6 +203,20 @@ Next.js commands when validating types or production builds.
 CI runs the same quality gates and a separate Chromium browser job, retaining
 browser reports and traces on failure.
 
+## Reviewing deliverables
+
+The case workspace lets reviewers edit plain-text sections, accept sections,
+request changes with a comment, and approve a saved deliverable version.
+Section decisions save the current draft and comment together. Saving one
+section preserves unsaved work in other sections; save all edits and comments
+before approving the deliverable. Editing accepted content resets its section
+to pending unless the same request includes a new review decision.
+
+Reviewer edits replace the narrative interpretation in the data-analysis
+report, not its computed metrics or charts. Any saved review changes increment
+the deliverable version and invalidate its previous approval. Concurrent edits
+or approvals against an older version return a conflict; reload before retrying.
+
 ## Workspace responsibilities
 
 | Path                 | Current boundary and planned ownership                                |

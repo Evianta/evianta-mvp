@@ -111,7 +111,7 @@ export function ReviewEvidenceWorkspace({
     setDrafts({});
     setComments({});
     setError(null);
-  }, [deliverable?.id, deliverable?.version]);
+  }, [deliverable?.id]);
 
   useEffect(() => {
     if (!selectedEvidence || !selectedDocument) {
@@ -179,6 +179,20 @@ export function ReviewEvidenceWorkspace({
         section.id,
         { expectedVersion: deliverable.version, ...update },
       );
+      if (update.reviewerContent !== undefined) {
+        setDrafts((current) => {
+          const next = { ...current };
+          delete next[section.id];
+          return next;
+        });
+      }
+      if (update.reviewComment !== undefined) {
+        setComments((current) => {
+          const next = { ...current };
+          delete next[section.id];
+          return next;
+        });
+      }
       onDeliverableSaved(saved);
     } catch (reason) {
       setError(
@@ -191,8 +205,23 @@ export function ReviewEvidenceWorkspace({
     }
   }
 
+  function hasSectionChanges(section: DeliverableSection): boolean {
+    return (
+      (drafts[section.id] ?? initialDraft(section)) !== initialDraft(section) ||
+      (comments[section.id] ?? section.reviewComment ?? "") !==
+        (section.reviewComment ?? "")
+    );
+  }
+
+  const hasUnsavedChanges =
+    deliverable?.sections.some(hasSectionChanges) ?? false;
+
   async function approve() {
     if (!deliverable || pending) return;
+    if (hasUnsavedChanges) {
+      setError("Save your section edits and comments before approving.");
+      return;
+    }
     const unresolved = workspace.findings.flatMap((finding) =>
       finding.openQuestions.filter((question) => question.status === "open"),
     );
@@ -280,6 +309,7 @@ export function ReviewEvidenceWorkspace({
                         Reviewer draft
                         <textarea
                           className="mt-1 min-h-28 w-full rounded-md border border-border bg-surface p-2 text-xs text-foreground"
+                          disabled={pending}
                           value={drafts[section.id] ?? initialDraft(section)}
                           onChange={(event) =>
                             setDrafts((current) => ({
@@ -331,6 +361,7 @@ export function ReviewEvidenceWorkspace({
                   Review comment
                   <textarea
                     className="mt-1 min-h-16 w-full rounded-md border border-border bg-surface p-2 text-xs text-foreground"
+                    disabled={pending}
                     value={comments[section.id] ?? section.reviewComment ?? ""}
                     onChange={(event) =>
                       setComments((current) => ({
@@ -344,11 +375,19 @@ export function ReviewEvidenceWorkspace({
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={pending || section.reviewStatus === "accepted"}
+                    disabled={
+                      pending ||
+                      (section.reviewStatus === "accepted" &&
+                        !hasSectionChanges(section))
+                    }
                     onClick={() =>
                       void saveSection(section, {
+                        reviewerContent: drafts[section.id],
                         reviewStatus: "accepted",
-                        reviewComment: null,
+                        reviewComment:
+                          (
+                            comments[section.id] ?? section.reviewComment
+                          )?.trim() || null,
                       })
                     }
                   >
@@ -359,13 +398,16 @@ export function ReviewEvidenceWorkspace({
                     variant="ghost"
                     disabled={
                       pending ||
-                      !comments[section.id]?.trim() ||
-                      section.reviewStatus === "changes-requested"
+                      !(comments[section.id] ?? section.reviewComment)?.trim()
                     }
                     onClick={() =>
                       void saveSection(section, {
+                        reviewerContent: drafts[section.id],
                         reviewStatus: "changes-requested",
-                        reviewComment: comments[section.id]?.trim() ?? "",
+                        reviewComment:
+                          (
+                            comments[section.id] ?? section.reviewComment
+                          )?.trim() ?? "",
                       })
                     }
                   >
@@ -391,7 +433,19 @@ export function ReviewEvidenceWorkspace({
                     onChange={(event) => setApprovalNote(event.target.value)}
                   />
                 </label>
-                <Button className="mt-3" disabled={pending} onClick={approve}>
+                {hasUnsavedChanges && (
+                  <p
+                    className="mt-2 text-xs text-muted-foreground"
+                    role="status"
+                  >
+                    Save your section edits and comments before approving.
+                  </p>
+                )}
+                <Button
+                  className="mt-3"
+                  disabled={pending || hasUnsavedChanges}
+                  onClick={approve}
+                >
                   {pending ? "Saving…" : "Approve deliverable"}
                 </Button>
               </div>

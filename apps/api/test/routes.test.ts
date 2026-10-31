@@ -8,7 +8,7 @@ import {
 import { createDocumentIngestion } from "@evianta/ingestion";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApiApp } from "../src/app.js";
 import {
   createUserAccessKey,
@@ -835,6 +835,100 @@ describe("case API routes", () => {
     expect(
       ((await updatedDetails.json()) as { approvals: unknown[] }).approvals,
     ).toEqual([]);
+
+    const sectionUrl = `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`;
+    const patchReview = (update: Record<string, unknown>) =>
+      fetch(sectionUrl, {
+        method: "PATCH",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify(update),
+      });
+    const accepted = await patchReview({
+      expectedVersion: reviewedDeliverable.version + 1,
+      reviewStatus: "accepted",
+    });
+    expect(accepted.status).toBe(200);
+    const edited = await patchReview({
+      expectedVersion: reviewedDeliverable.version + 2,
+      reviewerContent: "A further corrected summary.",
+    });
+    expect(edited.status).toBe(200);
+    expect(await edited.json()).toMatchObject({
+      deliverable: {
+        sections: [
+          expect.objectContaining({
+            reviewerContent: "A further corrected summary.",
+            reviewStatus: "pending",
+          }),
+        ],
+      },
+    });
+    const changesRequested = await patchReview({
+      expectedVersion: reviewedDeliverable.version + 3,
+      reviewStatus: "changes-requested",
+      reviewComment: "Check the interpretation.",
+    });
+    expect(changesRequested.status).toBe(200);
+    const clearedComment = await patchReview({
+      expectedVersion: reviewedDeliverable.version + 4,
+      reviewComment: null,
+    });
+    expect(clearedComment.status).toBe(400);
+    const staleEdit = await patchReview({
+      expectedVersion: reviewedDeliverable.version,
+      reviewerContent: "Stale content must not overwrite the saved draft.",
+    });
+    expect(staleEdit.status).toBe(409);
+
+    const scope = { caseId: created.case.id, ownerId: user.id };
+    const currentDeliverable = await repositories.deliverables.findOwnedById(
+      deliverable.id,
+      scope,
+    );
+    if (!currentDeliverable) throw new Error("Deliverable was not found.");
+    const concurrentApproval = {
+      id: "concurrent-approval",
+      caseId: scope.caseId,
+      deliverableId: deliverable.id,
+      deliverableVersion: currentDeliverable.version + 1,
+      actorId: user.id,
+      approvedAt: new Date().toISOString(),
+      unresolvedQuestionIds: [],
+      note: "Approval of the concurrent edit.",
+    };
+    const approvalLookup = vi
+      .spyOn(repositories.approvals, "findForDeliverable")
+      .mockImplementationOnce(async () => {
+        await repositories.deliverables.replaceOwned(
+          {
+            ...currentDeliverable,
+            version: concurrentApproval.deliverableVersion,
+          },
+          scope,
+          { expectedVersion: currentDeliverable.version },
+        );
+        await repositories.approvals.insert(concurrentApproval, scope);
+        return concurrentApproval;
+      });
+    try {
+      const racingApproval = await fetch(
+        `${baseUrl}/cases/${created.case.id}/approve`,
+        {
+          method: "POST",
+          headers: { ...authHeaders(), "content-type": "application/json" },
+          body: JSON.stringify({
+            deliverableId: deliverable.id,
+            deliverableVersion: currentDeliverable.version,
+          }),
+        },
+      );
+      expect(racingApproval.status).toBe(409);
+      expect(
+        await repositories.approvals.findForDeliverable(deliverable.id, scope),
+      ).toEqual(concurrentApproval);
+    } finally {
+      approvalLookup.mockRestore();
+    }
   });
 
   it("requests case deletion without overwriting concurrent usage updates", async () => {
