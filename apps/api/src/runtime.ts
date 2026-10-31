@@ -128,19 +128,6 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       .register(dataAnalysisPlan)
       .register(createTrivialReferencePlan("tax-notice"))
       .register(createTrivialReferencePlan("msme-payment"));
-    const orchestrator = new Orchestrator({
-      repositories: store.repositories,
-      ai,
-      plans,
-      specialists: [
-        createBusinessDataAnalystAgent(),
-        createGenericAnalystAgent(),
-      ],
-      checkpointer,
-      userRunLimit: usage.userMaxConcurrentRuns,
-      globalRunLimit: usage.globalMaxConcurrentRuns,
-      leaseTtlSeconds: 120,
-    });
     const ingestion = createDocumentIngestion({
       documents: store.repositories.documents,
       extractions: store.repositories.extractions,
@@ -152,6 +139,24 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
           maxPages: uploads.documentMaxPages,
         },
       },
+    });
+    const orchestrator = new Orchestrator({
+      repositories: store.repositories,
+      refreshTabularExtraction: async (documentId, scope) => {
+        const result = await ingestion.ingest({ scope, documentId });
+        if (result.status !== "ready")
+          throw new Error("The tabular source could not be refreshed.");
+      },
+      ai,
+      plans,
+      specialists: [
+        createBusinessDataAnalystAgent(),
+        createGenericAnalystAgent(),
+      ],
+      checkpointer,
+      userRunLimit: usage.userMaxConcurrentRuns,
+      globalRunLimit: usage.globalMaxConcurrentRuns,
+      leaseTtlSeconds: 120,
     });
     const services: CaseApiServices = {
       repositories: store.repositories,

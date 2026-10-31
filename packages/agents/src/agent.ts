@@ -55,7 +55,7 @@ export interface DocumentSlice {
  */
 export interface DocumentAccess {
   listAsync(): Promise<DocumentSummary[]>;
-  tablesAsync(): Promise<
+  tablesAsync(documentIds: readonly string[]): Promise<
     Array<{
       documentId: string;
       name: string;

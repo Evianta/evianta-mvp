@@ -46,6 +46,7 @@ function ChartView({
   chart: ReturnType<typeof DataAnalysisDashboardSchema.parse>["charts"][number];
 }) {
   const axisClass = "fill-muted-foreground text-[10px]";
+  const labelKey = chart.type === "pie" ? chart.nameKey : chart.categoryKey;
   return (
     <figure className="rounded-lg border border-border bg-background p-4">
       <figcaption className="mb-3 text-xs font-semibold">
@@ -112,6 +113,47 @@ function ChartView({
           )}
         </ResponsiveContainer>
       </div>
+      <details className="mt-3 text-xs">
+        <summary className="cursor-pointer text-muted-foreground">
+          View chart data
+        </summary>
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full border-collapse text-left">
+            <caption className="sr-only">{chart.title} data</caption>
+            <thead>
+              <tr className="border-b border-border">
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  {labelKey}
+                </th>
+                <th scope="col" className="py-1 text-right font-medium">
+                  {chart.valueKey}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {chart.data.map((entry, index) => {
+                const label = entry[labelKey];
+                const value = entry[chart.valueKey];
+                return (
+                  <tr
+                    className="border-b border-border/50"
+                    key={`${String(label ?? "")}-${index}`}
+                  >
+                    <th scope="row" className="py-1 pr-3 font-normal">
+                      {String(label ?? "Unknown")}
+                    </th>
+                    <td className="py-1 text-right">
+                      {typeof value === "number"
+                        ? formatNumber(value)
+                        : String(value ?? "—")}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </details>
       <p className="mt-2 text-[10px] text-muted-foreground">
         Source: {chart.source.documentId}
         {chart.source.sheet ? ` · ${chart.source.sheet}` : ""}

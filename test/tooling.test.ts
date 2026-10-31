@@ -25,7 +25,7 @@ describe("developer tooling", () => {
       JWT_SIGNING_KEY: "synthetic-test-signing-key-with-32-bytes",
     });
     expect(environment.apiPort).toBe(3001);
-    expect(example.NEXT_PUBLIC_API_BASE_URL).toBe("http://127.0.0.1:3001");
+    expect(example.NEXT_PUBLIC_API_BASE_URL).toBe("http://localhost:3001");
     expect(
       new URL(getRequiredEnv("NEXT_PUBLIC_API_BASE_URL", example)).port,
     ).toBe(String(environment.apiPort));

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const EXTRACTOR_VERSION = "ingestion-2";
+export const EXTRACTOR_VERSION = "ingestion-3";
 
 export interface IngestionLimits {
   /** Largest stored object the pipeline will read. */

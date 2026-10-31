@@ -41,6 +41,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const generation = useRef(0);
   const logoutToken = useRef<string | null>(null);
+  const logoutStorageCleared = useRef(false);
+  const logoutRevoked = useRef(false);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutPending, setSignOutPending] = useState(false);
   const session = useSyncExternalStore(
@@ -153,9 +155,51 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setSigningOut(true);
         setSignOutPending(true);
         try {
-          controller.clear();
-          if (token) await api.revokeSession(token);
+          let cleanupError: unknown;
+          let cleanupFailed = false;
+          try {
+            if (!logoutStorageCleared.current) {
+              controller.clear();
+              logoutStorageCleared.current = true;
+            }
+          } catch (reason) {
+            cleanupFailed = true;
+            cleanupError = reason;
+          }
+
+          let revokeError: unknown;
+          let revokeFailed = false;
+          try {
+            if (token && !logoutRevoked.current) {
+              await api.revokeSession(token);
+              logoutRevoked.current = true;
+            }
+          } catch (reason) {
+            revokeFailed = true;
+            revokeError = reason;
+          }
+
+          if (cleanupFailed || revokeFailed) {
+            const failures: unknown[] = [];
+            if (cleanupFailed) failures.push(cleanupError);
+            if (revokeFailed) failures.push(revokeError);
+            const message = [
+              cleanupFailed
+                ? `Saved sign-in could not be removed: ${cleanupError instanceof Error ? cleanupError.message : "Browser storage is unavailable."}`
+                : null,
+              revokeFailed
+                ? `Server session could not be revoked: ${revokeError instanceof Error ? revokeError.message : "Request failed."}`
+                : null,
+            ]
+              .filter((part): part is string => part !== null)
+              .join(" ");
+            setRestoreError(message);
+            throw new AggregateError(failures, message);
+          }
+
           logoutToken.current = null;
+          logoutStorageCleared.current = false;
+          logoutRevoked.current = false;
           setSignOutPending(false);
         } finally {
           setSigningOut(false);

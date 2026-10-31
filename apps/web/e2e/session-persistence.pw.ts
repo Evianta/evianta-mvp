@@ -227,6 +227,47 @@ test("failed server revocation still removes local login, clears drafts and offe
   ).toBeVisible();
 });
 
+test("revokes the server session when local storage cleanup fails", async ({
+  page,
+}) => {
+  await mockAuth(page);
+  let revocations = 0;
+  await page.route("**/auth/logout", (route) => {
+    revocations++;
+    return route.fulfill({ status: 204 });
+  });
+  await page.addInitScript(() => {
+    const removeItem = Storage.prototype.removeItem;
+    let attempts = 0;
+    Storage.prototype.removeItem = function (key) {
+      attempts++;
+      if (attempts === 1)
+        throw new DOMException("Browser storage blocked.", "SecurityError");
+      removeItem.call(this, key);
+    };
+  });
+
+  await page.goto("/");
+  await enterKey(page);
+  await page
+    .getByRole("button", { name: "Sign out and revoke this session" })
+    .click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Sign-out could not finish" }),
+  ).toContainText("Retry sign-out");
+  expect(revocations).toBe(1);
+  expect(await savedSession(page)).not.toBeNull();
+
+  await page
+    .getByRole("button", { name: "Sign out and revoke this session" })
+    .click();
+  await expect.poll(() => savedSession(page)).toBeNull();
+  await expect(
+    page.getByRole("button", { name: "Sign in", exact: true }),
+  ).toBeVisible();
+  expect(revocations).toBe(1);
+});
+
 test("logout in another tab clears the active session and private draft", async ({
   page,
   context,

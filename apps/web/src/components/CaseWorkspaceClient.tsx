@@ -145,24 +145,26 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   useEffect(() => {
     if (!preparing || run) return;
     let active = true;
-    const timer = window.setTimeout(() => {
-      void api
-        .getCaseWorkspace(caseId)
-        .then((result) => {
-          if (active) setWorkspace(result);
-        })
-        .catch((reason: unknown) => {
-          if (active)
-            setError(
-              `Source preparation could not be refreshed: ${reason instanceof Error ? reason.message : "Request failed."}`,
-            );
-        });
-    }, 2000);
+    let timer: number;
+    const refresh = async () => {
+      try {
+        const result = await api.getCaseWorkspace(caseId);
+        if (active) setWorkspace(result);
+      } catch (reason: unknown) {
+        if (active)
+          setError(
+            `Source preparation could not be refreshed: ${reason instanceof Error ? reason.message : "Request failed."}`,
+          );
+      } finally {
+        if (active) timer = window.setTimeout(() => void refresh(), 2000);
+      }
+    };
+    timer = window.setTimeout(() => void refresh(), 2000);
     return () => {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [api, caseId, preparing, run, workspace]);
+  }, [api, caseId, preparing, run]);
 
   useEffect(() => {
     if (!runId || !runStatus || !session) return;

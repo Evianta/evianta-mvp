@@ -1071,9 +1071,9 @@ export function createBusinessDataAnalystAgent(): SpecialistAgent {
       const citationDocumentIds = new Set(
         input.documents.map((document) => document.documentId),
       );
-      const sourceTables = (await context.documents.tablesAsync()).filter(
-        (source) => citationDocumentIds.has(source.documentId),
-      );
+      const sourceTables = (
+        await context.documents.tablesAsync([...citationDocumentIds])
+      ).filter((source) => citationDocumentIds.has(source.documentId));
       const result = analyzeSalesTables(sourceTables);
       const narrativeResult = await context.ai.runStructured({
         tier: "mid",

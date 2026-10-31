@@ -311,7 +311,7 @@ describe("business data analyst", () => {
       taskId: "sales-task",
       documents: {
         listAsync: async () => [],
-        tablesAsync: async () => tablesForAnalysis,
+        tablesAsync: vi.fn(async () => tablesForAnalysis),
         sliceAsync: async () => null,
       },
       logger: {
@@ -357,6 +357,9 @@ describe("business data analyst", () => {
     const result = await createBusinessDataAnalystAgent().run(input, context);
 
     expect(generate).toHaveBeenCalledOnce();
+    expect(context.documents.tablesAsync).toHaveBeenCalledWith([
+      "sales-document",
+    ]);
     expect(result.output.report?.metrics.total).toBe(1000);
     expect(result.output.dashboard?.charts).toHaveLength(3);
     expect(result.output.findings[0]?.evidence[0]?.location).toMatchObject({

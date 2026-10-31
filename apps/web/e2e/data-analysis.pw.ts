@@ -306,7 +306,13 @@ test("reopens a completed analysis and renders its report and charts", async ({
 
   await expect(page.getByText("Revenue total: 1,000")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
-  await expect(page.getByText("Revenue by month")).toBeVisible();
+  await expect(
+    page.getByText("Revenue by month", { exact: true }),
+  ).toBeVisible();
+  await page.getByText("View chart data", { exact: true }).click();
+  const chartTable = page.getByRole("table").first();
+  await expect(chartTable).toContainText("Jan");
+  await expect(chartTable).toContainText("250");
   await expect(page.getByText("quarterly-sales.csv")).toBeVisible();
   await expect(page.getByText("rows 2–7")).toBeVisible();
 });

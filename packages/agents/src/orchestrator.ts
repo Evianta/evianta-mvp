@@ -117,6 +117,10 @@ export interface OrchestratorHooks {
 
 export interface OrchestratorOptions {
   repositories: OrchestratorRepositories;
+  refreshTabularExtraction?: (
+    documentId: string,
+    scope: OwnerScope,
+  ) => Promise<void>;
   ai: AiClient;
   plans: PlanRegistry;
   specialists: readonly SpecialistAgent[];
@@ -638,6 +642,7 @@ export class Orchestrator {
       ),
       documents: createDocumentAccess(this.repos, scope, {
         maxChars: this.options.maxDocumentChars,
+        refreshTabularExtraction: this.options.refreshTabularExtraction,
       }),
       deliverableId: deliverableIdFor(run.id),
     };
