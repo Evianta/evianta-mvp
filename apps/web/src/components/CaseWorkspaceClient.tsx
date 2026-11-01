@@ -340,15 +340,40 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
     setPendingAction(true);
     try {
       const retried = await api.retryRun(run.id);
+      setWorkspace((current) => {
+        if (!current) return current;
+        const priorDeliverableIds = new Set(
+          current.deliverables
+            .filter((deliverable) => deliverable.runId === run.id)
+            .map((deliverable) => deliverable.id),
+        );
+        return {
+          ...current,
+          approvals: current.approvals.filter(
+            (approval) => !priorDeliverableIds.has(approval.deliverableId),
+          ),
+        };
+      });
       setEvents([]);
       lastSequence.current = 0;
       setRun(retried);
     } catch (reason) {
-      setError(
+      const message =
         reason instanceof Error
           ? reason.message
-          : "The run could not be retried.",
-      );
+          : "The run could not be retried.";
+      setError(message);
+      try {
+        setWorkspace(await api.getCaseWorkspace(caseId));
+      } catch (refreshReason) {
+        setError(
+          `${message} The workspace could not be refreshed: ${
+            refreshReason instanceof Error
+              ? refreshReason.message
+              : "Request failed."
+          }`,
+        );
+      }
     } finally {
       setPendingAction(false);
     }

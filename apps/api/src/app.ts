@@ -149,7 +149,7 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
       );
       response.setHeader(
         "Access-Control-Allow-Methods",
-        "GET, POST, DELETE, OPTIONS",
+        "GET, POST, PATCH, DELETE, OPTIONS",
       );
     }
     if (request.method === "OPTIONS") {
