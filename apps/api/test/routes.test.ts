@@ -762,6 +762,48 @@ describe("case API routes", () => {
     );
     expect(missingComment.status).toBe(400);
 
+    const scope = { caseId: created.case.id, ownerId: user.id };
+    const storedDeliverable = await repositories.deliverables.findOwnedById(
+      deliverable.id,
+      scope,
+    );
+    const storedSection = storedDeliverable?.sections.find(
+      (item) => item.id === section.id,
+    );
+    if (!storedDeliverable || !storedSection) {
+      throw new Error("The stored deliverable section was not found.");
+    }
+    if (
+      typeof storedSection.content !== "object" ||
+      storedSection.content === null
+    ) {
+      throw new Error("The deliverable section content was not an object.");
+    }
+    const nestedOnlyContent = {
+      ...(storedSection.content as Record<string, unknown>),
+    };
+    delete nestedOnlyContent.summary;
+    if (
+      typeof nestedOnlyContent.report !== "object" ||
+      nestedOnlyContent.report === null ||
+      !("summary" in nestedOnlyContent.report)
+    ) {
+      throw new Error("The report executive summary was not found.");
+    }
+    expect(
+      await repositories.deliverables.replaceOwned(
+        {
+          ...storedDeliverable,
+          sections: storedDeliverable.sections.map((item) =>
+            item.id === section.id
+              ? { ...item, content: nestedOnlyContent }
+              : item,
+          ),
+        },
+        scope,
+      ),
+    ).toBe(true);
+
     const longReviewerContent = "R".repeat(9_000);
     const review = await fetch(
       `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
@@ -945,7 +987,6 @@ describe("case API routes", () => {
     });
     expect(resolved.status).toBe(200);
 
-    const scope = { caseId: created.case.id, ownerId: user.id };
     const currentDeliverable = await repositories.deliverables.findOwnedById(
       deliverable.id,
       scope,

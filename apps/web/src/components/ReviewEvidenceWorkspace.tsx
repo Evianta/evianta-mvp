@@ -18,6 +18,7 @@ import {
   type Evidence,
 } from "@evianta/core";
 import type { CaseWorkspace, WebApiClient } from "../api/client";
+import { sourcePreviewMimeType } from "../source-preview";
 import { Button } from "./Button";
 
 function evidenceLocation(evidence: Evidence): string {
@@ -116,7 +117,9 @@ export function ReviewEvidenceWorkspace({
     ? httpCitationUrl(selectedEvidence)
     : null;
   const sourceDocumentId = selectedDocument?.id ?? null;
-  const sourceMimeType = selectedDocument?.mimeType ?? null;
+  const previewMimeType = selectedDocument
+    ? sourcePreviewMimeType(selectedDocument)
+    : null;
 
   useEffect(() => {
     setDrafts({});
@@ -142,13 +145,18 @@ export function ReviewEvidenceWorkspace({
       .downloadDocument(caseId, sourceDocumentId)
       .then(async (blob) => {
         if (!active) return;
-        if (sourceMimeType === "text/csv" || sourceMimeType === "text/plain") {
+        if (
+          previewMimeType === "text/csv" ||
+          previewMimeType === "text/plain"
+        ) {
           const text = await blob.text();
           if (!active) return;
           setSourceText(text.slice(0, 40_000));
         }
         if (!active) return;
-        objectUrl = URL.createObjectURL(blob);
+        objectUrl = URL.createObjectURL(
+          previewMimeType ? new Blob([blob], { type: previewMimeType }) : blob,
+        );
         setSourceUrl(objectUrl);
       })
       .catch((reason: unknown) => {
@@ -167,7 +175,7 @@ export function ReviewEvidenceWorkspace({
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [api, caseId, sourceDocumentId, sourceMimeType]);
+  }, [api, caseId, sourceDocumentId, previewMimeType]);
 
   async function saveSection(
     section: DeliverableSection,
@@ -560,24 +568,28 @@ export function ReviewEvidenceWorkspace({
                 {sourceError}
               </p>
             )}
-            {sourceUrl && selectedDocument?.mimeType === "application/pdf" && (
-              <iframe
-                className="mt-3 h-[26rem] w-full rounded-md border border-border"
-                src={`${sourceUrl}#page=${selectedEvidence.kind === "document" ? (selectedEvidence.location.page ?? 1) : 1}`}
-                title={`Source document ${selectedDocument.name}`}
-              />
-            )}
-            {sourceUrl && selectedDocument?.mimeType.startsWith("image/") && (
-              <Image
-                className="mt-3 max-h-[26rem] max-w-full rounded-md border border-border object-contain"
-                src={sourceUrl}
-                alt={`Source document ${selectedDocument.name}`}
-                width={1200}
-                height={900}
-                unoptimized
-                style={{ width: "auto", height: "auto" }}
-              />
-            )}
+            {sourceUrl &&
+              selectedDocument &&
+              previewMimeType === "application/pdf" && (
+                <iframe
+                  className="mt-3 h-[26rem] w-full rounded-md border border-border"
+                  src={`${sourceUrl}#page=${selectedEvidence.kind === "document" ? (selectedEvidence.location.page ?? 1) : 1}`}
+                  title={`Source document ${selectedDocument.name}`}
+                />
+              )}
+            {sourceUrl &&
+              selectedDocument &&
+              previewMimeType?.startsWith("image/") && (
+                <Image
+                  className="mt-3 max-h-[26rem] max-w-full rounded-md border border-border object-contain"
+                  src={sourceUrl}
+                  alt={`Source document ${selectedDocument.name}`}
+                  width={1200}
+                  height={900}
+                  unoptimized
+                  style={{ width: "auto", height: "auto" }}
+                />
+              )}
             {sourceText !== null && (
               <pre className="mt-3 max-h-[26rem] overflow-auto rounded-md border border-border bg-background p-3 text-[10px]">
                 {sourceText}
@@ -585,8 +597,7 @@ export function ReviewEvidenceWorkspace({
             )}
             {sourceUrl &&
               selectedDocument &&
-              selectedDocument.mimeType !== "application/pdf" &&
-              !selectedDocument.mimeType.startsWith("image/") &&
+              previewMimeType === null &&
               sourceText === null && (
                 <p className="mt-3 text-xs text-muted-foreground">
                   This spreadsheet format is available as a private download.

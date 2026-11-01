@@ -181,11 +181,21 @@ function hasPlainTextSectionContent(section: {
   ) {
     return true;
   }
-  return (
-    typeof section.content === "object" &&
-    section.content !== null &&
+  if (typeof section.content !== "object" || section.content === null) {
+    return false;
+  }
+  if (
     "summary" in section.content &&
     typeof section.content.summary === "string"
+  ) {
+    return true;
+  }
+  return (
+    "report" in section.content &&
+    typeof section.content.report === "object" &&
+    section.content.report !== null &&
+    "summary" in section.content.report &&
+    typeof section.content.report.summary === "string"
   );
 }
 
