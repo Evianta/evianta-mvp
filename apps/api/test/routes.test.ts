@@ -704,6 +704,48 @@ describe("case API routes", () => {
       throw new Error("The analyst run did not produce a reviewable section.");
     }
     const section = deliverable.sections[0];
+    const settledRun = await repositories.runs.findOwnedById(run.id, user.id);
+    if (!settledRun) throw new Error("The analyst run was not found.");
+    const runningRun = { ...settledRun, status: "running" as const };
+    const runLookup = vi
+      .spyOn(repositories.runs, "findOwnedById")
+      .mockResolvedValue(runningRun);
+    try {
+      const activeReview = await fetch(
+        `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            ...authHeaders(),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            expectedVersion: deliverable.version,
+            reviewStatus: "accepted",
+          }),
+        },
+      );
+      expect(activeReview.status).toBe(409);
+
+      const activeApproval = await fetch(
+        `${baseUrl}/cases/${created.case.id}/approve`,
+        {
+          method: "POST",
+          headers: {
+            ...authHeaders(),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            deliverableId: deliverable.id,
+            deliverableVersion: deliverable.version,
+          }),
+        },
+      );
+      expect(activeApproval.status).toBe(409);
+    } finally {
+      runLookup.mockRestore();
+    }
+
     const missingComment = await fetch(
       `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
       {
@@ -720,6 +762,7 @@ describe("case API routes", () => {
     );
     expect(missingComment.status).toBe(400);
 
+    const longReviewerContent = "R".repeat(9_000);
     const review = await fetch(
       `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
       {
@@ -731,7 +774,7 @@ describe("case API routes", () => {
         body: JSON.stringify({
           expectedVersion: deliverable.version,
           reviewStatus: "accepted",
-          reviewerContent: "Reviewer-adjusted summary.",
+          reviewerContent: longReviewerContent,
         }),
       },
     );
@@ -751,7 +794,7 @@ describe("case API routes", () => {
     expect(reviewedDeliverable.version).toBe(deliverable.version + 1);
     expect(reviewedDeliverable.sections[0]).toMatchObject({
       reviewStatus: "accepted",
-      reviewerContent: "Reviewer-adjusted summary.",
+      reviewerContent: longReviewerContent,
       reviewerId: user.id,
     });
 

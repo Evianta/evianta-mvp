@@ -430,6 +430,9 @@ test("preserves unsaved reviews and approves only the saved content", async ({
   const firstDraft = sections.nth(0).getByLabel("Reviewer draft");
   const secondDraft = sections.nth(1).getByLabel("Reviewer draft");
   const secondComment = sections.nth(1).getByLabel("Review comment");
+  await expect(firstDraft).toHaveValue(
+    "6 row(s) analyzed. Revenue total: 1,000; average: 166.67.",
+  );
   await firstDraft.fill("Reviewer-adjusted interpretation");
   await secondDraft.fill("Unsaved second draft");
   await secondComment.fill("Review note to preserve");
@@ -448,7 +451,8 @@ test("preserves unsaved reviews and approves only the saved content", async ({
       .getByRole("paragraph")
       .filter({ hasText: "Reviewer-adjusted interpretation" }),
   ).toBeVisible();
-  await expect(page.getByText("Revenue total: 1,000")).toBeVisible();
+  await expect(page.getByText("revenue total", { exact: true })).toBeVisible();
+  await expect(page.getByText("1,000", { exact: true })).toBeVisible();
 
   await sections
     .nth(1)

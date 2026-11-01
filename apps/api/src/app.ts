@@ -198,6 +198,10 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
         .catch(next);
     },
   );
+  app.patch(
+    "/cases/:caseId/deliverables/:deliverableId/sections/:sectionId",
+    express.json({ limit: "512kb", strict: true }),
+  );
   app.use(express.json({ limit: "8kb", strict: true }));
 
   app.get("/healthz", (_request, response) => {

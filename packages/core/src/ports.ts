@@ -202,7 +202,7 @@ export interface DeliverableRepository {
   replaceOwned(
     deliverable: Deliverable,
     scope: OwnerScope,
-    options?: { expectedVersion?: number },
+    options?: { expectedVersion?: number; requireSettledRun?: boolean },
   ): Promise<boolean>;
 }
 
@@ -211,7 +211,11 @@ export interface ApprovalRepository {
     deliverableId: string,
     scope: OwnerScope,
   ): Promise<Approval | null>;
-  insert(approval: Approval, scope: OwnerScope): Promise<void>;
+  insert(
+    approval: Approval,
+    scope: OwnerScope,
+    options?: { requireSettledRun?: boolean },
+  ): Promise<void>;
   invalidateForDeliverable(
     deliverableId: string,
     scope: OwnerScope,

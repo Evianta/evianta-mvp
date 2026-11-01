@@ -16,6 +16,7 @@ import {
   type ApprovalRepository,
   type Case,
   type CaseRepository,
+  type Deliverable,
   type DeliverableRepository,
   type DocumentMetadataDto,
   type DocumentMetadataRecord,
@@ -186,6 +187,57 @@ function hasPlainTextSectionContent(section: {
     "summary" in section.content &&
     typeof section.content.summary === "string"
   );
+}
+
+async function findSettledDeliverable(
+  repositories: Pick<CaseRepositories, "deliverables" | "runs">,
+  deliverableId: string,
+  scope: { ownerId: string; caseId: string },
+  response: Response,
+): Promise<Deliverable | null> {
+  const reference = await repositories.deliverables.findOwnedById(
+    deliverableId,
+    scope,
+  );
+  if (!reference) {
+    sendApiError(response, 404, "not-found", "Resource not found");
+    return null;
+  }
+  const run = await repositories.runs.findOwnedById(
+    reference.runId,
+    scope.ownerId,
+  );
+  if (
+    !run ||
+    run.caseId !== scope.caseId ||
+    ["queued", "running", "waiting-for-input"].includes(run.status)
+  ) {
+    sendApiError(
+      response,
+      409,
+      "conflict",
+      "Wait for the analysis run to finish before reviewing this deliverable.",
+    );
+    return null;
+  }
+  const deliverable = await repositories.deliverables.findOwnedById(
+    deliverableId,
+    scope,
+  );
+  if (!deliverable) {
+    sendApiError(response, 404, "not-found", "Resource not found");
+    return null;
+  }
+  if (deliverable.runId !== reference.runId) {
+    sendApiError(
+      response,
+      409,
+      "conflict",
+      "This deliverable changed. Reload it before reviewing.",
+    );
+    return null;
+  }
+  return deliverable;
 }
 
 function sendValidationError(
@@ -1701,14 +1753,17 @@ export function registerCaseApiRoutes(
       if (!principal || !record || !deliverableId || !sectionId || !input)
         return;
       const scope = { ownerId: principal.userId, caseId: record.id };
-      const deliverable = await repositories.deliverables.findOwnedById(
+      const deliverable = await findSettledDeliverable(
+        repositories,
         deliverableId,
         scope,
+        response,
       );
-      const section = deliverable?.sections.find(
+      if (!deliverable) return;
+      const section = deliverable.sections.find(
         (item) => item.id === sectionId,
       );
-      if (!deliverable || !section) {
+      if (!section) {
         sendApiError(response, 404, "not-found", "Resource not found");
         return;
       }
@@ -1775,7 +1830,7 @@ export function registerCaseApiRoutes(
       const saved = await repositories.deliverables.replaceOwned(
         updated,
         scope,
-        { expectedVersion: input.expectedVersion },
+        { expectedVersion: input.expectedVersion, requireSettledRun: true },
       );
       if (!saved) {
         sendApiError(
@@ -1800,14 +1855,13 @@ export function registerCaseApiRoutes(
       const input = parseInput(ApproveInputSchema, request.body, response);
       if (!principal || !record || !input) return;
       const scope = { ownerId: principal.userId, caseId: record.id };
-      const deliverable = await repositories.deliverables.findOwnedById(
+      const deliverable = await findSettledDeliverable(
+        repositories,
         input.deliverableId,
         scope,
+        response,
       );
-      if (!deliverable) {
-        sendApiError(response, 404, "not-found", "Resource not found");
-        return;
-      }
+      if (!deliverable) return;
       if (deliverable.version !== input.deliverableVersion) {
         sendApiError(
           response,
@@ -1863,7 +1917,9 @@ export function registerCaseApiRoutes(
         note: input.note,
       });
       try {
-        await repositories.approvals.insert(approval, scope);
+        await repositories.approvals.insert(approval, scope, {
+          requireSettledRun: true,
+        });
       } catch (error) {
         if (error instanceof StoreError && error.code === "stale-approval") {
           sendApiError(

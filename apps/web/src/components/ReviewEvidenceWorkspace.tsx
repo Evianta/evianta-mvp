@@ -38,13 +38,22 @@ function evidenceLocation(evidence: Evidence): string {
 
 function originalDraft(section: DeliverableSection): string | null {
   if (typeof section.content === "string") return section.content;
-  if (
-    typeof section.content === "object" &&
-    section.content !== null &&
-    "summary" in section.content &&
-    typeof section.content.summary === "string"
-  ) {
-    return section.content.summary;
+  if (typeof section.content === "object" && section.content !== null) {
+    if (
+      "report" in section.content &&
+      typeof section.content.report === "object" &&
+      section.content.report !== null &&
+      "summary" in section.content.report &&
+      typeof section.content.report.summary === "string"
+    ) {
+      return section.content.report.summary;
+    }
+    if (
+      "summary" in section.content &&
+      typeof section.content.summary === "string"
+    ) {
+      return section.content.summary;
+    }
   }
   return null;
 }
