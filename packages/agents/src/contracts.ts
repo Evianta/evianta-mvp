@@ -2,6 +2,7 @@ import {
   DataAnalysisDashboardSchema,
   DataAnalysisReportSchema,
   EvidenceLocationSchema,
+  FindingSchema,
   UseCaseSchema,
 } from "@evianta/core";
 import { z } from "zod";
@@ -78,6 +79,9 @@ export const PriorFindingSchema = z.object({
   title: z.string(),
   description: z.string(),
   severity: z.string(),
+  confidence: FindingSchema.shape.confidence.optional(),
+  assumptions: FindingSchema.shape.assumptions.optional(),
+  openQuestions: FindingSchema.shape.openQuestions.optional(),
   evidenceIds: z.array(z.string()),
   sourceEvidence: z
     .array(

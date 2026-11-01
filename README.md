@@ -102,8 +102,19 @@ need a choice. Sample-origin entry uses Start at `/?source=<sample-id>`.
 Enter submits, Shift+Enter adds a line, and IME composition does not submit.
 Starting authorizes private case creation, upload/extraction and execution under
 existing model limits. File limits and enabled workflows come from the authenticated
-`GET /intake/configuration` endpoint. Tax and MSME suggestions are **Coming next**;
-the API also rejects live creation, uploads and execution for those workflows.
+`GET /intake/configuration` endpoint. Tax notice work is available; MSME remains
+**Coming next**, and the API rejects live creation, uploads and execution for it.
+
+Tax notice work analyzes the supplied records, reconciles income and credits,
+researches general official guidance, prepares a response draft and runs an
+independent review. Drafting receives the original notice findings, source
+references, assumptions and unresolved questions. Reconciliation requires
+traceable document evidence for each figure and does not calculate a difference
+when extraction has unresolved high-severity questions. Its confidence cannot
+exceed that of its inputs. Search citations without a claim retain a source
+discovery note, not an inferred legal conclusion. Unavailable search raises a
+professional-verification question. All response materials require professional
+review; the workflow does not approve or submit filings.
 
 Ready sources start a run automatically. Sources still being read open in the case
 workspace with preparation status and **Start analysis** when ready. Completed

@@ -1389,47 +1389,60 @@ export class Orchestrator {
     sources: readonly Task[],
     state: TaskGraphStateValue,
   ): Promise<PriorFinding[]> {
-    const evidence = await this.repos.evidence.listForCase(execution.scope);
+    const [evidence, findings] = await Promise.all([
+      this.repos.evidence.listForCase(execution.scope),
+      this.repos.findings.listForCase(execution.scope),
+    ]);
     const evidenceById = new Map(evidence.map((item) => [item.id, item]));
+    const findingsById = new Map(findings.map((item) => [item.id, item]));
     return sources.flatMap((source) => {
       const outcome = state.results[source.id];
       if (outcome?.status !== "completed") return [];
-      return outcome.findings.map((finding) => ({
-        taskId: source.id,
-        role: outcome.role,
-        findingId: finding.id,
-        title: finding.title,
-        description: finding.description,
-        severity: finding.severity,
-        evidenceIds: finding.evidenceIds,
-        sourceEvidence: finding.evidenceIds.flatMap((id) => {
-          const item = evidenceById.get(id);
-          if (!item) return [];
-          return [
-            item.kind === "document"
-              ? {
-                  kind: item.kind,
-                  sourceRef: item.sourceRef,
-                  confidence: item.confidence,
-                  documentId: item.documentId,
-                  location: item.location,
-                }
-              : {
-                  kind: item.kind,
-                  sourceRef: item.sourceRef,
-                  confidence: item.confidence,
-                  documentId: null,
-                  citation: {
-                    url: item.citation.url,
-                    title: item.citation.title,
-                    claim: item.citation.claim,
-                    span: item.citation.span,
+      return outcome.findings.map((finding) => {
+        const persisted = findingsById.get(finding.id);
+        if (!persisted) {
+          throw new Error(`Completed finding ${finding.id} is missing`);
+        }
+        return {
+          taskId: source.id,
+          role: outcome.role,
+          findingId: finding.id,
+          title: finding.title,
+          description: finding.description,
+          severity: finding.severity,
+          confidence: persisted.confidence,
+          assumptions: persisted.assumptions,
+          openQuestions: persisted.openQuestions,
+          evidenceIds: finding.evidenceIds,
+          sourceEvidence: finding.evidenceIds.flatMap((id) => {
+            const item = evidenceById.get(id);
+            if (!item) return [];
+            return [
+              item.kind === "document"
+                ? {
+                    kind: item.kind,
+                    sourceRef: item.sourceRef,
+                    confidence: item.confidence,
+                    documentId: item.documentId,
+                    location: item.location,
+                  }
+                : {
+                    kind: item.kind,
+                    sourceRef: item.sourceRef,
+                    confidence: item.confidence,
+                    documentId: null,
+                    citation: {
+                      url: item.citation.url,
+                      title: item.citation.title,
+                      claim: item.citation.claim,
+                      span: item.citation.span,
+                    },
                   },
-                },
-          ];
-        }),
-        claims: finding.claims,
-      }));
+            ];
+          }),
+          claims: finding.claims,
+        };
+      });
     });
   }
 
@@ -1803,9 +1816,10 @@ export class Orchestrator {
           context,
         );
       } else {
-        const sources = tasks.filter((item) =>
-          task.dependencyIds.includes(item.id),
-        );
+        const sources =
+          execution.caseRecord.useCase === "tax-notice"
+            ? this.ancestorsOf(task, tasks)
+            : tasks.filter((item) => task.dependencyIds.includes(item.id));
         const input: SpecialistInput = {
           case: this.caseInput(execution),
           task: {

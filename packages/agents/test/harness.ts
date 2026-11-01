@@ -3,6 +3,8 @@ import {
   createAdmittedUsageAccounting,
   createAi,
   pricingSettingsKey,
+  type Citation,
+  type UsageAccounting,
   type ModelProvider,
   type StructuredGenerationRequest,
 } from "@evianta/ai";
@@ -75,6 +77,7 @@ export class ScriptedProvider implements ModelProvider {
   constructor(
     public routes: Record<string, RouteHandler>,
     private readonly delayMs = 0,
+    private readonly citationsByRoute: Record<string, Citation[]> = {},
   ) {}
 
   async generateStructured(request: StructuredGenerationRequest) {
@@ -99,10 +102,14 @@ export class ScriptedProvider implements ModelProvider {
       const handler = this.routes[route];
       if (!handler) throw new Error(`No scripted route for ${route}`);
       const output = handler(input);
-      return await new MockProvider({
+      const result = await new MockProvider({
         responses: [JSON.stringify(output)],
         units: UNITS,
       }).generateStructured(request);
+      return {
+        ...result,
+        citations: this.citationsByRoute[route] ?? result.citations,
+      };
     } finally {
       this.active -= 1;
     }
@@ -308,6 +315,7 @@ export interface HarnessOptions {
   graphVersion?: string;
   maxBranchConcurrency?: number;
   admission?: (port: UsageAdmissionPort) => UsageAdmissionPort;
+  accounting?: UsageAccounting;
 }
 
 export function createHarness(options: HarnessOptions) {
@@ -319,18 +327,20 @@ export function createHarness(options: HarnessOptions) {
     : repositories.usageAdmission;
   const ai = createAi({
     provider: options.provider,
-    accounting: createAdmittedUsageAccounting({
-      admission,
-      runAdmission: repositories.runAdmission,
-      prices: repositories.usagePrices,
-      limits: {
-        userSpendLimitUsd: 10,
-        globalSpendLimitUsd: 100,
-        spendPeriodSeconds: 86_400,
-      },
-      now: clock.now,
-      runLeaseTtlSeconds: LEASE_TTL_SECONDS,
-    }),
+    accounting:
+      options.accounting ??
+      createAdmittedUsageAccounting({
+        admission,
+        runAdmission: repositories.runAdmission,
+        prices: repositories.usagePrices,
+        limits: {
+          userSpendLimitUsd: 10,
+          globalSpendLimitUsd: 100,
+          spendPeriodSeconds: 86_400,
+        },
+        now: clock.now,
+        runLeaseTtlSeconds: LEASE_TTL_SECONDS,
+      }),
     models: {
       provider: "mock",
       sparkModel: "mock-spark",

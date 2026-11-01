@@ -11,6 +11,7 @@ import {
   TAX_RESPONSE_DRAFTER_ROLE,
 } from "../src/index.js";
 import type { AgentContext } from "../src/agent.js";
+import type { PriorFinding } from "../src/contracts.js";
 
 describe("tax notice workflow", () => {
   it("defines the complete response-pack task dependency graph", () => {
@@ -127,7 +128,19 @@ describe("tax notice workflow", () => {
     expect(result.usage).toEqual({ input: 0, output: 0, total: 0 });
   });
 
-  it("calculates canonical income and credit differences deterministically", async () => {
+  it.each([
+    "supported",
+    "missing evidence",
+    "research evidence only",
+    "missing location",
+    "unassessed evidence",
+    "low confidence",
+    "medium confidence",
+    "unresolved extraction",
+    "resolved extraction",
+    "conflicting figures",
+    "matching unsupported figures",
+  ])("reconciles only traceable figures: %s", async (scenario) => {
     const ai = createAi({
       provider: new MockProvider({ responses: [] }),
       accounting: {
@@ -171,13 +184,14 @@ describe("tax notice workflow", () => {
       label: string,
       value: number,
       documentId: string,
-    ) => ({
+    ): PriorFinding => ({
       taskId: "analysis-task",
       role: TAX_NOTICE_ANALYST_ROLE,
       findingId: `finding-${label.replaceAll(" ", "-")}`,
       title: label,
       description: `${label} extracted from source.`,
       severity: "medium",
+      confidence: 0.8,
       evidenceIds: [`evidence-${documentId}`],
       sourceEvidence: [
         {
@@ -211,16 +225,83 @@ describe("tax notice workflow", () => {
       documents: [],
       humanInput: null,
     };
+    const returnedIncome = input.priorFindings[0]!;
+    if (
+      scenario === "missing evidence" ||
+      scenario === "matching unsupported figures"
+    ) {
+      returnedIncome.sourceEvidence = [];
+    }
+    if (scenario === "research evidence only") {
+      returnedIncome.sourceEvidence = [
+        {
+          kind: "research",
+          sourceRef: "https://www.incometax.gov.in/",
+          confidence: "high",
+          documentId: null,
+        },
+      ];
+    }
+    if (scenario === "low confidence" || scenario === "medium confidence") {
+      returnedIncome.sourceEvidence![0]!.confidence =
+        scenario === "low confidence" ? "low" : "medium";
+    }
+    if (scenario === "missing location") {
+      delete returnedIncome.sourceEvidence![0]!.location;
+    }
+    if (scenario === "unassessed evidence") {
+      returnedIncome.sourceEvidence![0]!.confidence = "unassessed";
+    }
+    if (
+      scenario === "unresolved extraction" ||
+      scenario === "resolved extraction"
+    ) {
+      returnedIncome.openQuestions = [
+        {
+          id: "extraction-question",
+          text: "Confirm the extracted return income.",
+          severity: "high",
+          status: scenario === "resolved extraction" ? "resolved" : "open",
+          resolutionNote: null,
+          actorId: null,
+          updatedAt: null,
+        },
+      ];
+    }
+    if (scenario === "conflicting figures") {
+      input.priorFindings.push(
+        sourceFinding("return income", 1_100_000, "other-return"),
+      );
+    }
+    if (scenario === "matching unsupported figures") {
+      input.priorFindings[1]!.claims[0]!.value = 1_200_000;
+    }
     const agent = createTaxNoticeSpecialists().find(
       (specialist) => specialist.role === TAX_RECONCILIATION_ROLE,
     );
     if (!agent) throw new Error("Tax reconciliation agent was not registered");
 
     const result = await agent.run(input, context);
+    if (
+      scenario !== "supported" &&
+      scenario !== "medium confidence" &&
+      scenario !== "resolved extraction"
+    ) {
+      expect(result.output.findings[0]).toMatchObject({
+        title: "Income reconciliation incomplete",
+        claims: [],
+        openQuestions: [{ severity: "high" }],
+      });
+      expect(result.output.findings[1]?.claims[0]?.value).toBe(-5_000);
+      return;
+    }
     expect(
       result.output.findings.map((finding) => finding.claims[0]?.value),
     ).toEqual([150_000, -5_000]);
     expect(result.output.findings[0]?.evidence).toHaveLength(2);
+    expect(result.output.findings[0]?.confidence).toBe(
+      scenario === "medium confidence" ? 0.7 : 0.8,
+    );
     expect(
       runDeterministicChecks(
         result.output.findings.map((finding, index) => ({

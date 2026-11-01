@@ -95,127 +95,236 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
-  it("runs the tax response-pack DAG with unavailable research safely flagged", async () => {
-    const plan = createTaxNoticePlan();
-    const provider = new ScriptedProvider({
-      ...routes("case-analysis", "response-preparation"),
-      coordinator: () => ({
-        tasks: plan.tasks.map((task) => ({
-          key: task.key,
-          assignedRole: task.role,
-          dependsOn: task.dependsOn,
-          instructions: task.instructions,
-        })),
-      }),
-      "case-analysis": () => ({
-        summary: "Extracted synthetic source figures.",
-        findings: [
-          {
-            ...specialistOutput("return").findings[0]!,
-            title: "Return figures",
-            claims: [
+  it.each([false, true])(
+    "runs the tax DAG and preserves context with search citations: %s",
+    async (withCitations) => {
+      const plan = createTaxNoticePlan();
+      const citation = {
+        url: "https://www.incometax.gov.in/",
+        title: "Income Tax Department guidance",
+      };
+      const provider = new ScriptedProvider(
+        {
+          ...routes("case-analysis", "response-preparation"),
+          coordinator: () => ({
+            tasks: plan.tasks.map((task) => ({
+              key: task.key,
+              assignedRole: task.role,
+              dependsOn: task.dependsOn,
+              instructions: task.instructions,
+            })),
+          }),
+          "case-analysis": () => ({
+            summary: "Extracted synthetic source figures.",
+            findings: [
               {
-                label: "return income",
-                value: 1_200_000,
-                components: null,
-                date: null,
+                ...specialistOutput("return").findings[0]!,
+                title: "Return figures",
+                assumptions: ["Return values are in INR."],
+                openQuestions: [
+                  { text: "Confirm the assessment year.", severity: "medium" },
+                ],
+                claims: [
+                  {
+                    label: "return income",
+                    value: 1_200_000,
+                    components: null,
+                    date: null,
+                  },
+                  {
+                    label: "claimed credit",
+                    value: 80_000,
+                    components: null,
+                    date: null,
+                  },
+                ],
               },
               {
-                label: "claimed credit",
-                value: 80_000,
-                components: null,
-                date: null,
+                ...specialistOutput("notice").findings[0]!,
+                title: "Notice figures",
+                description: "Notice requests bank records by 15 November.",
+                claims: [
+                  {
+                    label: "notice income",
+                    value: 1_350_000,
+                    components: null,
+                    date: null,
+                  },
+                  {
+                    label: "available credit",
+                    value: 75_000,
+                    components: null,
+                    date: null,
+                  },
+                ],
+              },
+              {
+                ...specialistOutput("notice-questions").findings[0]!,
+                title: "Notice requirements",
+                assumptions: ["The supplied notice is complete."],
+                openQuestions: [
+                  {
+                    text: "Verify the response deadline against the full notice.",
+                    severity: "high",
+                  },
+                ],
+                claims: [],
               },
             ],
-          },
-          {
-            ...specialistOutput("notice").findings[0]!,
-            title: "Notice figures",
-            claims: [
-              {
-                label: "notice income",
-                value: 1_350_000,
-                components: null,
-                date: null,
+            inputRequired: null,
+          }),
+          "tax-search": () => ({ summary: "No search citations returned." }),
+        },
+        0,
+        withCitations ? { "tax-search": [citation] } : {},
+      );
+      const h = harness({
+        provider,
+        plan,
+        specialists: createTaxNoticeSpecialists(),
+        coordinator: true,
+        ...(withCitations
+          ? {
+              accounting: {
+                mode: "test" as const,
+                admit: async () => undefined,
+                record: async () => undefined,
+                cancel: async () => undefined,
               },
-              {
-                label: "available credit",
-                value: 75_000,
-                components: null,
-                date: null,
-              },
-            ],
-          },
-        ],
-        inputRequired: null,
-      }),
-      "tax-search": () => ({ summary: "No search citations returned." }),
-    });
-    const h = harness({
-      provider,
-      plan,
-      specialists: createTaxNoticeSpecialists(),
-      coordinator: true,
-    });
-    const taxCase = makeCase("tax-workflow-case", { useCase: "tax-notice" });
-    await store.repositories.cases.insert(taxCase);
-    const run = await h.orchestrator.createRunAsync({
-      ownerId: OWNER,
-      caseId: taxCase.id,
-    });
+            }
+          : {}),
+      });
+      await store.repositories.cases.replaceOwned(
+        makeCase(CASE_ID, { useCase: "tax-notice" }),
+        OWNER,
+      );
+      const run = await h.orchestrator.createRunAsync({
+        ownerId: OWNER,
+        caseId: CASE_ID,
+      });
 
-    const result = await h.worker.runOnceAsync();
+      const result = await h.worker.runOnceAsync();
 
-    const tasks = await store.repositories.tasks.listForRun(run.id, {
-      ownerId: OWNER,
-      caseId: taxCase.id,
-    });
-    expect(
-      tasks.map((task) => [task.role, task.status, task.lastError]),
-    ).toEqual(
-      expect.arrayContaining(
+      const tasks = await store.repositories.tasks.listForRun(run.id, {
+        ownerId: OWNER,
+        caseId: CASE_ID,
+      });
+      expect(
+        tasks.map((task) => [task.role, task.status, task.lastError]),
+      ).toEqual(
+        expect.arrayContaining(
+          [
+            TAX_NOTICE_ANALYST_ROLE,
+            TAX_RECONCILIATION_ROLE,
+            TAX_RESEARCH_ROLE,
+            TAX_RESPONSE_DRAFTER_ROLE,
+            "independent-reviewer",
+          ].map((role) => [role, "completed", null]),
+        ),
+      );
+      expect(result?.run?.status).toBe("completed");
+      expect(tasks.map((task) => task.role).sort()).toEqual(
         [
           TAX_NOTICE_ANALYST_ROLE,
           TAX_RECONCILIATION_ROLE,
           TAX_RESEARCH_ROLE,
           TAX_RESPONSE_DRAFTER_ROLE,
           "independent-reviewer",
-        ].map((role) => [role, "completed", null]),
-      ),
-    );
-    expect(result?.run?.status).toBe("completed");
-    expect(tasks.map((task) => task.role).sort()).toEqual(
-      [
-        TAX_NOTICE_ANALYST_ROLE,
-        TAX_RECONCILIATION_ROLE,
-        TAX_RESEARCH_ROLE,
-        TAX_RESPONSE_DRAFTER_ROLE,
-        "independent-reviewer",
-      ].sort(),
-    );
-    expect(provider.calls).toContain("coordinator");
-    const deliverables = await store.repositories.deliverables.listForRun(
-      run.id,
-      { ownerId: OWNER, caseId: taxCase.id },
-    );
-    const deliverable = deliverables[0];
-    expect(deliverable).toMatchObject({
-      format: "document",
-      title: "Tax notice response pack",
-    });
-    expect(
-      deliverable?.sections.some((section) =>
-        JSON.stringify(section).includes("150000"),
-      ),
-    ).toBe(true);
-    expect(
-      deliverable?.sections.some((section) =>
-        JSON.stringify(section).includes(
-          "No legal research sources were verified",
+        ].sort(),
+      );
+      expect(provider.calls).toContain("coordinator");
+      const deliverables = await store.repositories.deliverables.listForRun(
+        run.id,
+        scope,
+      );
+      const deliverable = deliverables[0];
+      expect(deliverable).toMatchObject({
+        format: "document",
+        title: "Tax notice response pack",
+      });
+      expect(
+        deliverable?.sections.some((section) =>
+          JSON.stringify(section).includes("150000"),
         ),
-      ),
-    ).toBe(true);
-  });
+      ).toBe(true);
+      const drafter = provider.inputs.get("response-preparation")?.[0];
+      expect(drafter?.priorFindings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            title: "Notice figures",
+            description: "Notice requests bank records by 15 November.",
+          }),
+          expect.objectContaining({
+            title: "Return figures",
+            confidence: 0.8,
+            assumptions: ["Return values are in INR."],
+            openQuestions: [
+              expect.objectContaining({
+                text: "Confirm the assessment year.",
+                status: "open",
+              }),
+            ],
+          }),
+        ]),
+      );
+      const review = provider.inputs.get("review")?.[0];
+      expect(JSON.stringify(review?.findings)).toContain(
+        "Confirm the assessment year.",
+      );
+      expect(drafter?.priorFindings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            title: "Notice requirements",
+            assumptions: ["The supplied notice is complete."],
+            openQuestions: [
+              expect.objectContaining({
+                text: "Verify the response deadline against the full notice.",
+                severity: "high",
+                status: "open",
+              }),
+            ],
+          }),
+        ]),
+      );
+      expect(JSON.stringify(review?.findings)).toContain(
+        "Verify the response deadline against the full notice.",
+      );
+      const evidence = await store.repositories.evidence.listForCase(scope);
+      if (withCitations) {
+        expect(evidence).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              kind: "research",
+              citation: expect.objectContaining({
+                ...citation,
+                claim: expect.stringContaining(
+                  "currency and applicability have not been verified",
+                ),
+              }),
+            }),
+          ]),
+        );
+        expect(JSON.stringify(drafter?.priorFindings)).toContain(citation.url);
+        expect(JSON.stringify(review?.findings)).toContain(citation.url);
+        expect(
+          deliverable?.sections.find(
+            (section) => section.producingRole === TAX_RESEARCH_ROLE,
+          )?.evidenceIds,
+        ).toHaveLength(1);
+      } else {
+        expect(JSON.stringify(drafter?.priorFindings)).toContain(
+          "Which provisions and deadlines apply",
+        );
+        expect(
+          deliverable?.sections.some((section) =>
+            JSON.stringify(section).includes(
+              "No legal research sources were verified",
+            ),
+          ),
+        ).toBe(true);
+      }
+    },
+  );
 
   it("rejects a changed reference version before planning or dispatch", async () => {
     const provider = new ScriptedProvider(routes("a"));

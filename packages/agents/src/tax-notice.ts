@@ -178,7 +178,7 @@ const researchQuery =
 function canonicalClaim(
   findings: readonly PriorFinding[],
   label: string,
-): { value: number; sources: PriorFinding[] } | null {
+): { value: number; confidence: number; sources: PriorFinding[] } | null {
   const matches = findings.filter((finding) =>
     finding.claims.some(
       (claim) =>
@@ -200,7 +200,32 @@ function canonicalClaim(
     ),
   );
   if (values.size !== 1) return null;
-  return { value: [...values][0]!, sources: matches };
+  const confidences = matches.map((finding) => {
+    if (
+      finding.openQuestions?.some(
+        (question) =>
+          question.status === "open" && question.severity === "high",
+      )
+    ) {
+      return 0;
+    }
+    const evidenceConfidence = Math.max(
+      0,
+      ...(finding.sourceEvidence ?? []).map((source) =>
+        source.kind === "document" && source.documentId && source.location
+          ? source.confidence === "high"
+            ? 1
+            : source.confidence === "medium"
+              ? 0.7
+              : 0
+          : 0,
+      ),
+    );
+    return Math.min(finding.confidence ?? 0.5, evidenceConfidence);
+  });
+  const confidence = Math.min(...confidences);
+  if (confidence === 0) return null;
+  return { value: [...values][0]!, confidence, sources: matches };
 }
 
 function priorEvidenceDrafts(
@@ -257,7 +282,7 @@ function reconciliationFinding(
     const sources = [left, right].flatMap((source) => source?.sources ?? []);
     return {
       title: `${name} reconciliation incomplete`,
-      description: `Both a ${leftLabel} and a ${rightLabel} figure are required before this discrepancy can be calculated.`,
+      description: `Both a ${leftLabel} and a ${rightLabel} figure with traceable document evidence and no unresolved high-severity extraction questions are required before this discrepancy can be calculated.`,
       severity: "low",
       confidence: 1,
       evidence: priorEvidenceDrafts(sources),
@@ -277,18 +302,20 @@ function reconciliationFinding(
     title: `${name} reconciliation`,
     description: `${leftLabel} is ${formatAmount(left.value)} and ${rightLabel} is ${formatAmount(right.value)}. The difference (${rightLabel} minus ${leftLabel}) is ${formatAmount(difference)}.`,
     severity: difference === 0 ? "info" : "medium",
-    confidence: 1,
+    confidence: Math.min(left.confidence, right.confidence),
     evidence: sources,
-    assumptions: [],
-    openQuestions:
-      sources.length < 2
-        ? [
-            {
-              text: `Confirm that both ${leftLabel} and ${rightLabel} are traceable to their source records.`,
-              severity: "high",
-            },
-          ]
-        : [],
+    assumptions: [
+      ...new Set(
+        [...left.sources, ...right.sources].flatMap(
+          (source) => source.assumptions ?? [],
+        ),
+      ),
+    ],
+    openQuestions: [...left.sources, ...right.sources].flatMap((source) =>
+      (source.openQuestions ?? [])
+        .filter((question) => question.status === "open")
+        .map(({ text, severity }) => ({ text, severity })),
+    ),
     claims: [
       {
         label: `${name} difference`,
@@ -435,10 +462,13 @@ function createTaxResearchAgent(): SpecialistAgent {
                     confidence: "medium",
                     documentId: null,
                     page: null,
-                    textQuote: citation.span ?? null,
+                    textQuote: citation.span?.trim() || null,
                     url: citation.url,
                     title: citation.title,
-                    claim: citation.claim ?? null,
+                    claim:
+                      citation.claim?.trim() ||
+                      citation.span?.trim() ||
+                      `Provider search returned "${citation.title}" as a source for professional verification; currency and applicability have not been verified.`,
                   })),
                   assumptions: [],
                   openQuestions: [
