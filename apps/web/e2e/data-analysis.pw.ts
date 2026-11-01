@@ -312,7 +312,15 @@ test("reopens a completed analysis and renders its report and charts", async ({
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
-  await expect(page.getByText("Revenue total: 1,000")).toBeVisible();
+  const executiveSummary = page.locator("section").filter({
+    has: page.getByRole("heading", {
+      name: "Executive summary",
+      exact: true,
+    }),
+  });
+  await expect(
+    executiveSummary.getByText("Revenue total: 1,000"),
+  ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(
     page.getByText("Revenue by month", { exact: true }),
