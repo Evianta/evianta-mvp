@@ -182,7 +182,7 @@ application database is required. ESLint includes Next.js and React Hooks
 rules. Prettier and EditorConfig use two-space indentation and LF line endings;
 Git preserves LF on checkout, including Windows. CSV byte fixtures retain their
 original bytes. Vitest and Playwright each use at most two workers to avoid
-oversubscribing local databases and the Next.js development server. There are
+oversubscribing local databases and the browser test server. There are
 no Git hooks.
 
 Install Chromium once before running browser tests:
@@ -193,8 +193,9 @@ pnpm test:e2e
 ```
 
 Browser tests use a separate `.next-e2e` build directory so they do not overwrite
-an active development server's `.next` output. Navigation assertions allow cold
-Next.js compilation; they are functional checks, not latency measurements.
+an active development server's `.next` output. They build and start a production
+server before running assertions, keeping cold compilation out of navigation
+checks.
 
 The browser suite owns port 3100 and starts a dedicated fixture-backed web server;
 it never reuses a running development server. Free that port before testing.
