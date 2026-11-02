@@ -109,6 +109,7 @@ export function createSpecialistAgent(
   systemPrompt = [
     systemPrompt,
     "Source excerpts marked excerptsTruncated are partial. Preserve their evidence IDs and source locations, and flag material assertions that cannot be supported by the supplied excerpts.",
+    "Set inputRequired only when a specific missing source document blocks the work or the task instructions are too ambiguous to understand. Ask only for the missing document or task clarification. Do not ask the user to confirm figures, dates, conclusions, assumptions, or other unresolved findings; record those as findings and open questions for the case work.",
   ].join("\n");
   const structured = defineStructuredAgent({
     profile,

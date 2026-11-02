@@ -14,6 +14,28 @@ import type { AgentContext } from "../src/agent.js";
 import type { PriorFinding } from "../src/contracts.js";
 
 describe("tax notice workflow", () => {
+  it("limits user questions to blocking documents or unclear task instructions", () => {
+    const specialists = createTaxNoticeSpecialists();
+    const interactiveSpecialists = specialists.filter((specialist) =>
+      [TAX_NOTICE_ANALYST_ROLE, TAX_RESPONSE_DRAFTER_ROLE].includes(
+        specialist.role,
+      ),
+    );
+    const analyst = interactiveSpecialists.find(
+      (specialist) => specialist.role === TAX_NOTICE_ANALYST_ROLE,
+    );
+
+    expect(analyst).toBeDefined();
+    expect(analyst?.systemPrompt).toContain(
+      "Do not ask the user to confirm figures, response deadlines, required response type, tax treatment, or other issues to resolve while preparing the notice response.",
+    );
+    for (const specialist of interactiveSpecialists) {
+      expect(specialist.systemPrompt).toContain(
+        "Set inputRequired only when a specific missing source document blocks the work or the task instructions are too ambiguous to understand.",
+      );
+    }
+  });
+
   it("defines the complete response-pack task dependency graph", () => {
     const plan = createTaxNoticePlan();
     expect(plan).toMatchObject({

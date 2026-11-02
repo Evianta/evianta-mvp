@@ -538,6 +538,7 @@ export function createTaxNoticeSpecialists(): SpecialistAgent[] {
         "Cite the document ID and page or cell for each material finding.",
         "Report uncertain extraction as an open question; do not invent deadlines or legal conclusions.",
         "Document extraction reliability and warnings are supplied with each slice. Flag low-confidence or handwritten extraction for professional verification; never override those warnings with your own confidence label.",
+        "Do not ask the user to confirm figures, response deadlines, required response type, tax treatment, or other issues to resolve while preparing the notice response. Record discrepancies, missing evidence, and points requiring professional verification as findings and open questions. Set inputRequired only for a specific missing source document that blocks analysis or task instructions too ambiguous to understand.",
       ].join("\n"),
     ),
     createTaxReconciliationAgent(),
