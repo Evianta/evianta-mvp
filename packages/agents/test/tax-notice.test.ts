@@ -145,6 +145,8 @@ describe("tax notice workflow", () => {
     "distinct locations with shared reference",
     "unreadable amended return",
     "unknown amended return without questions",
+    "unknown amended return grouped with readable credit",
+    "unknown amended return grouped with readable income",
     "low extraction confidence",
     "handwritten extraction",
     "extraction warnings",
@@ -247,10 +249,22 @@ describe("tax notice workflow", () => {
     const returnedIncome = input.priorFindings[0]!;
     if (
       scenario === "unreadable amended return" ||
-      scenario === "unknown amended return without questions"
+      scenario === "unknown amended return without questions" ||
+      scenario === "unknown amended return grouped with readable credit" ||
+      scenario === "unknown amended return grouped with readable income"
     ) {
       const amended = sourceFinding("return income", 0, "amended-return");
       amended.claims[0]!.value = null;
+      if (scenario.startsWith("unknown amended return grouped")) {
+        amended.claims.push({
+          label: scenario.endsWith("credit")
+            ? "claimed credit"
+            : "return income",
+          value: scenario.endsWith("credit") ? 80_000 : 1_200_000,
+          components: null,
+          date: null,
+        });
+      }
       if (scenario === "unreadable amended return") {
         amended.openQuestions = [
           {

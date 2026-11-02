@@ -182,18 +182,16 @@ function canonicalClaim(
   const matches = findings.filter((finding) =>
     finding.claims.some((claim) => claim.label.trim().toLowerCase() === label),
   );
-  const values = new Set(
-    matches.flatMap((finding) =>
-      finding.claims
-        .filter(
-          (claim) =>
-            claim.label.trim().toLowerCase() === label &&
-            claim.value !== null &&
-            Number.isFinite(claim.value),
-        )
-        .map((claim) => claim.value!),
+  const claims = matches.flatMap((finding) =>
+    finding.claims.filter(
+      (claim) => claim.label.trim().toLowerCase() === label,
     ),
   );
+  const values = new Set<number>();
+  for (const claim of claims) {
+    if (claim.value === null || !Number.isFinite(claim.value)) return null;
+    values.add(claim.value);
+  }
   if (values.size !== 1) return null;
   const confidences = matches.map((finding) => {
     // Finding-level citations cannot distinguish support for grouped figures.

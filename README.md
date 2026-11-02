@@ -116,8 +116,9 @@ because their citations cannot be assigned to individual claims. Confidence
 cannot exceed the least reliable supporting document. Distinct source locations
 are retained even when they share a source reference, including when document
 slices are omitted from later tasks to fit model limits.
-Unreadable amended figures also block reconciliation; a readable older figure
-does not override an unknown replacement. Persisted extraction confidence,
+Unreadable amended figures also block reconciliation, even when grouped with
+other readable claims; a readable older figure does not override an unknown
+replacement. Persisted extraction confidence,
 page reliability and warnings accompany slices and prior source evidence.
 These are compact summaries: page count, minimum page confidence, handwriting
 presence, warning count and distinct warning codes. Complete per-page metadata
