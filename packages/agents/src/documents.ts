@@ -13,12 +13,18 @@ export function extractionReliability(
   return {
     method: extraction.method,
     confidence: extraction.confidence,
-    warnings: extraction.warnings,
-    pages: extraction.pages.map(({ index, method, confidence }) => ({
-      index,
-      method,
-      confidence,
-    })),
+    pageCount: extraction.pages.length,
+    minimumPageConfidence: extraction.pages.reduce(
+      (minimum, page) => Math.min(minimum, page.confidence),
+      1,
+    ),
+    hasHandwriting:
+      extraction.method === "handwriting" ||
+      extraction.pages.some((page) => page.method === "handwriting"),
+    warningCount: extraction.warnings.length,
+    warningCodes: [
+      ...new Set(extraction.warnings.map((warning) => warning.code)),
+    ],
   };
 }
 

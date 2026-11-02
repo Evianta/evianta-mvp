@@ -1,8 +1,60 @@
-import type { DocumentMetadataRecord, OwnerScope } from "@evianta/core";
+import type {
+  DocumentMetadataRecord,
+  ExtractedDocument,
+  OwnerScope,
+} from "@evianta/core";
 import { describe, expect, it, vi } from "vitest";
-import { createDocumentAccess } from "../src/documents.js";
+import {
+  createDocumentAccess,
+  extractionReliability,
+} from "../src/documents.js";
 
 describe("createDocumentAccess", () => {
+  it("summarizes all page reliability and repeated warnings without copying their arrays", () => {
+    const extraction: ExtractedDocument = {
+      documentId: "long-document",
+      kind: "text",
+      method: "mixed",
+      confidence: 0.9,
+      pages: Array.from({ length: 200 }, (_, index) => ({
+        index,
+        text: "Source text",
+        width: null,
+        height: null,
+        method: index === 199 ? "handwriting" : "pdf-text",
+        confidence: index === 199 ? 0.4 : 1,
+        spans: [],
+      })),
+      warnings: Array.from({ length: 200 }, (_, pageIndex) => ({
+        code: "handwriting-needs-review",
+        message: "Verify the original handwritten source.",
+        pageIndex,
+      })),
+      tables: [],
+      cacheIdentity: {
+        contentHash: "hash",
+        extractorVersion: "1",
+        modelVersion: null,
+      },
+    };
+
+    expect(extractionReliability(extraction)).toEqual({
+      method: "mixed",
+      confidence: 0.9,
+      pageCount: 200,
+      minimumPageConfidence: 0.4,
+      hasHandwriting: true,
+      warningCount: 200,
+      warningCodes: ["handwriting-needs-review"],
+    });
+    expect(extraction.pages).toHaveLength(200);
+    expect(extraction.warnings).toHaveLength(200);
+    expect(extraction.pages[199]).toMatchObject({
+      method: "handwriting",
+      confidence: 0.4,
+    });
+  });
+
   it("refreshes only requested tabular documents with bounded concurrency", async () => {
     const scope: OwnerScope = { ownerId: "owner-1", caseId: "case-1" };
     const documents: DocumentMetadataRecord[] = Array.from(

@@ -221,16 +221,15 @@ function canonicalClaim(
           !extraction ||
           extraction.confidence < 0.75 ||
           extraction.method === "handwriting" ||
-          extraction.warnings.length > 0 ||
-          extraction.pages.some(
-            (page) => page.method === "handwriting" || page.confidence < 0.75,
-          )
+          extraction.hasHandwriting ||
+          extraction.warningCount > 0 ||
+          extraction.minimumPageConfidence < 0.75
         ) {
           return 0;
         }
         return Math.min(
           extraction.confidence,
-          ...extraction.pages.map((page) => page.confidence),
+          extraction.minimumPageConfidence,
           source.confidence === "high"
             ? 1
             : source.confidence === "medium"

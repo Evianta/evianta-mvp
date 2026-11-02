@@ -119,6 +119,10 @@ slices are omitted from later tasks to fit model limits.
 Unreadable amended figures also block reconciliation; a readable older figure
 does not override an unknown replacement. Persisted extraction confidence,
 page reliability and warnings accompany slices and prior source evidence.
+These are compact summaries: page count, minimum page confidence, handwriting
+presence, warning count and distinct warning codes. Complete per-page metadata
+and warning messages remain in the stored extraction; repeated citations do not
+copy those arrays into model inputs.
 Reconciliation requires confidence of at least 0.75 for the extraction and every
 page, no extraction warnings, and no handwritten pages. Model-generated
 confidence cannot override these checks.

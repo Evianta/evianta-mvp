@@ -3,7 +3,6 @@ import {
   DataAnalysisReportSchema,
   EvidenceLocationSchema,
   ExtractedDocumentSchema,
-  ExtractedPageSchema,
   FindingSchema,
   UseCaseSchema,
 } from "@evianta/core";
@@ -14,11 +13,12 @@ const SeveritySchema = z.enum(["high", "medium", "low"]);
 export const ExtractionReliabilitySchema = ExtractedDocumentSchema.pick({
   method: true,
   confidence: true,
-  warnings: true,
 }).extend({
-  pages: z.array(
-    ExtractedPageSchema.pick({ index: true, method: true, confidence: true }),
-  ),
+  pageCount: z.number().int().nonnegative(),
+  minimumPageConfidence: ExtractedDocumentSchema.shape.confidence,
+  hasHandwriting: z.boolean(),
+  warningCount: z.number().int().nonnegative(),
+  warningCodes: z.array(z.string()),
 });
 export type ExtractionReliability = z.infer<typeof ExtractionReliabilitySchema>;
 

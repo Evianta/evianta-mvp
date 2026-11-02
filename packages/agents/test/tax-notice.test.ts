@@ -213,8 +213,11 @@ describe("tax notice workflow", () => {
           extraction: {
             method: "pdf-text",
             confidence: 1,
-            warnings: [],
-            pages: [{ index: 0, method: "pdf-text", confidence: 1 }],
+            pageCount: 1,
+            minimumPageConfidence: 1,
+            hasHandwriting: false,
+            warningCount: 0,
+            warningCodes: [],
           },
         },
       ],
@@ -277,21 +280,11 @@ describe("tax notice workflow", () => {
         scenario === "handwritten extraction" ? "handwriting" : "ocr";
       extraction.confidence =
         scenario === "low extraction confidence" ? 0.4 : 0.9;
-      extraction.pages = [
-        {
-          index: 0,
-          method: extraction.method,
-          confidence: extraction.confidence,
-        },
-      ];
+      extraction.minimumPageConfidence = extraction.confidence;
+      extraction.hasHandwriting = scenario === "handwritten extraction";
       if (scenario === "extraction warnings") {
-        extraction.warnings = [
-          {
-            code: "handwriting-needs-review",
-            message: "Verify handwritten text.",
-            pageIndex: 0,
-          },
-        ];
+        extraction.warningCount = 1;
+        extraction.warningCodes = ["handwriting-needs-review"];
       }
     }
     if (scenario === "grouped figures with mixed confidence") {

@@ -10,6 +10,8 @@ import {
   createTaxNoticePlan,
   createTaxNoticeSpecialists,
   createReviewAgent,
+  SpecialistModelOutputSchema,
+  SpecialistInputSchema,
   type ReviewInput,
   TAX_NOTICE_ANALYST_ROLE,
   TAX_RECONCILIATION_ROLE,
@@ -206,33 +208,40 @@ describe("orchestrator", () => {
     "warning-bearing",
     "unreliable-page",
     "reliable OCR",
+    "long reliable OCR",
+    "long unreliable-page",
+    "long warning-bearing",
   ])(
     "uses persisted %s extraction reliability instead of analyst confidence",
     async (scenario) => {
+      const reliability = scenario.replace("long ", "");
+      const pageCount = scenario.startsWith("long ") ? 200 : 1;
       const original = (await store.repositories.extractions.findForDocument(
         "document-1",
         scope,
       ))!;
-      const method = scenario === "handwriting" ? "handwriting" : "ocr";
+      const method = reliability === "handwriting" ? "handwriting" : "ocr";
       await store.repositories.extractions.saveForDocument(
         {
           ...original,
           method,
-          confidence: scenario === "low-confidence" ? 0.4 : 0.9,
-          pages: original.pages.map((page) => ({
-            ...page,
+          confidence: reliability === "low-confidence" ? 0.4 : 0.9,
+          pages: Array.from({ length: pageCount }, (_, index) => ({
+            ...original.pages[0]!,
+            index,
             method,
-            confidence: scenario === "unreliable-page" ? 0.4 : 0.9,
+            confidence:
+              reliability === "unreliable-page" && index === pageCount - 1
+                ? 0.4
+                : 0.9,
           })),
           warnings:
-            scenario === "warning-bearing"
-              ? [
-                  {
-                    code: "handwriting-needs-review",
-                    message: "Verify handwritten text against the original.",
-                    pageIndex: 0,
-                  },
-                ]
+            reliability === "warning-bearing"
+              ? Array.from({ length: pageCount }, (_, index) => ({
+                  code: "handwriting-needs-review",
+                  message: "Verify handwritten text against the original.",
+                  pageIndex: index,
+                }))
               : [],
         },
         scope,
@@ -273,7 +282,8 @@ describe("orchestrator", () => {
         expect.objectContaining({
           extraction: expect.objectContaining({
             method,
-            confidence: scenario === "low-confidence" ? 0.4 : 0.9,
+            confidence: reliability === "low-confidence" ? 0.4 : 0.9,
+            pageCount,
           }),
         }),
       ]);
@@ -286,7 +296,35 @@ describe("orchestrator", () => {
       const content = section.content as {
         findings: { title: string; claims: unknown[] }[];
       };
-      if (scenario === "reliable OCR") {
+      const draftingInput = SpecialistInputSchema.parse(
+        provider.inputs.get("response-preparation")![0],
+      );
+      const drafter = createTaxNoticeSpecialists().find(
+        (specialist) => specialist.role === TAX_RESPONSE_DRAFTER_ROLE,
+      )!;
+      expect(
+        inputTokenAllowance({
+          system: drafter.systemPrompt,
+          input: draftingInput,
+          schema: z.toJSONSchema(SpecialistModelOutputSchema),
+        }),
+      ).toBeLessThanOrEqual(32_000);
+      for (const finding of draftingInput.priorFindings) {
+        for (const evidence of finding.sourceEvidence ?? []) {
+          if (evidence.kind !== "document") continue;
+          expect(evidence.extraction).not.toHaveProperty("pages");
+          expect(JSON.stringify(evidence.extraction).length).toBeLessThan(400);
+        }
+      }
+      expect(
+        (
+          await store.repositories.extractions.findForDocument(
+            "document-1",
+            scope,
+          )
+        )?.pages,
+      ).toHaveLength(pageCount);
+      if (reliability === "reliable OCR") {
         expect(
           content.findings.every((finding) => finding.claims.length === 1),
         ).toBe(true);
