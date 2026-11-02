@@ -134,6 +134,8 @@ positions. Stored evidence remains unchanged. If the required findings and
 source identities still cannot fit, the task fails explicitly rather than dropping
 them. Specialist excerpts are budgeted before adding document slices. Deterministic
 reconciliation retains complete source excerpts.
+Short excerpts stay intact when marking them as partial would increase the
+serialized input size.
 Independent review also receives the complete task draft summaries, including
 assertions not repeated in findings. These drafts are never shortened to fit a
 model limit; an oversized required draft fails explicitly before model dispatch.

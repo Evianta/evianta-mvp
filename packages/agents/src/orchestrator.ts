@@ -1509,13 +1509,19 @@ export class Orchestrator {
         sourceEvidence: finding.sourceEvidence?.map((evidence) => {
           const quote = evidence.location?.textQuote;
           const span = evidence.citation?.span;
-          return {
+          const trimmedQuote = quote
+            ? Array.from(quote).slice(0, maxChars).join("")
+            : quote;
+          const trimmedSpan = span
+            ? Array.from(span).slice(0, maxChars).join("")
+            : span;
+          const candidate = {
             ...evidence,
             ...(evidence.location
               ? {
                   location: {
                     ...evidence.location,
-                    ...(quote ? { textQuote: quote.slice(0, maxChars) } : {}),
+                    ...(quote ? { textQuote: trimmedQuote } : {}),
                   },
                 }
               : {}),
@@ -1523,15 +1529,19 @@ export class Orchestrator {
               ? {
                   citation: {
                     ...evidence.citation,
-                    span: span ? span.slice(0, maxChars) : null,
+                    span: trimmedSpan ?? null,
                   },
                 }
               : {}),
-            ...((quote?.length ?? 0) > maxChars ||
-            (span?.length ?? 0) > maxChars
+            ...(quote !== trimmedQuote || span !== trimmedSpan
               ? { excerptsTruncated: true }
               : {}),
           };
+          // A partial-excerpt marker must not cost more than the removed text.
+          return Buffer.byteLength(JSON.stringify(candidate), "utf8") <
+            Buffer.byteLength(JSON.stringify(evidence), "utf8")
+            ? candidate
+            : evidence;
         }),
       }));
     if (!fits(trim(1))) {

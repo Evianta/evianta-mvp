@@ -314,6 +314,7 @@ export interface HarnessOptions {
   hooks?: OrchestratorHooks;
   graphVersion?: string;
   maxBranchConcurrency?: number;
+  maxInputTokens?: number;
   admission?: (port: UsageAdmissionPort) => UsageAdmissionPort;
   accounting?: UsageAccounting;
 }
@@ -345,7 +346,7 @@ export function createHarness(options: HarnessOptions) {
       provider: "mock",
       sparkModel: "mock-spark",
       wonderModel: "mock-wonder",
-      maxInputTokens: 32_000,
+      maxInputTokens: options.maxInputTokens ?? 32_000,
       maxOutputTokens: 1000,
     },
   });

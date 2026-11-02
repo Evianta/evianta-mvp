@@ -346,93 +346,173 @@ describe("orchestrator", () => {
     expect(provider.count("b")).toBe(0);
   });
 
-  it("budgets repeated review excerpts without dropping findings or source positions", async () => {
-    const keys = ["a", "b", "c"];
-    const quote = "é".repeat(14_000);
-    const provider = new ScriptedProvider({
-      ...Object.fromEntries(
-        keys.map((key) => [
-          key,
-          () => {
-            const output = specialistOutput(key);
-            output.summary = `${key} draft ${"complete narrative ".repeat(50)}`;
-            output.findings[0]!.evidence[0]!.textQuote = quote;
-            output.findings[0]!.evidence.push({
-              kind: "research",
-              sourceRef: "https://www.incometax.gov.in/",
-              confidence: "medium",
-              documentId: null,
-              page: null,
-              textQuote: quote,
-              url: "https://www.incometax.gov.in/",
-              title: "Official guidance",
-              claim: "A source for professional verification.",
-            });
-            return output;
-          },
+  it.each(["é", "\u{1f600}"])(
+    "budgets repeated review excerpts without dropping findings or source positions (%s)",
+    async (character) => {
+      const keys = ["a", "b", "c"];
+      const quote = character.repeat(14_000);
+      const provider = new ScriptedProvider({
+        ...Object.fromEntries(
+          keys.map((key) => [
+            key,
+            () => {
+              const output = specialistOutput(key);
+              output.summary = `${key} draft ${"complete narrative ".repeat(50)}`;
+              output.findings[0]!.evidence[0]!.textQuote = quote;
+              output.findings[0]!.evidence.push({
+                kind: "research",
+                sourceRef: "https://www.incometax.gov.in/",
+                confidence: "medium",
+                documentId: null,
+                page: null,
+                textQuote: quote,
+                url: "https://www.incometax.gov.in/",
+                title: "Official guidance",
+                claim: "A source for professional verification.",
+              });
+              return output;
+            },
+          ]),
+        ),
+        review: () => reviewOutput,
+      });
+      const h = harness({
+        provider,
+        plan: planOf([
+          ...keys.map((key) => ({ key })),
+          { key: "review", role: "independent-reviewer", dependsOn: keys },
         ]),
-      ),
-      review: () => reviewOutput,
-    });
-    const h = harness({
-      provider,
-      plan: planOf([
-        ...keys.map((key) => ({ key })),
-        { key: "review", role: "independent-reviewer", dependsOn: keys },
-      ]),
-    });
-    const { result } = await startRunAsync(h);
-    expect(result?.run?.status).toBe("completed");
-    const input = provider.inputs.get("review")![0] as ReviewInput;
-    expect(input.findings).toHaveLength(3);
-    expect(input.drafts).toEqual(
-      keys.map((key) => ({
-        taskId: expect.stringContaining(`:${key}`),
-        role: "analyst",
-        text: `${key} draft ${"complete narrative ".repeat(50)}`,
+      });
+      const { result } = await startRunAsync(h);
+      expect(result?.run?.status).toBe("completed");
+      const input = provider.inputs.get("review")![0] as ReviewInput;
+      expect(input.findings).toHaveLength(3);
+      expect(input.drafts).toEqual(
+        keys.map((key) => ({
+          taskId: expect.stringContaining(`:${key}`),
+          role: "analyst",
+          text: `${key} draft ${"complete narrative ".repeat(50)}`,
+        })),
+      );
+      const reviewer = createReviewAgent();
+      expect(
+        inputTokenAllowance({
+          system: reviewer.systemPrompt,
+          input,
+          schema: z.toJSONSchema(reviewer.outputSchema),
+        }),
+      ).toBeLessThanOrEqual(32_000 - 256);
+      for (const finding of input.findings) {
+        expect(finding.claims).toHaveLength(1);
+        expect(finding.sourceEvidence?.[0]).toMatchObject({
+          evidenceId: finding.evidenceIds[0],
+          sourceRef: "document-1#page=1",
+          documentId: "document-1",
+          location: { page: 1 },
+          excerptsTruncated: true,
+        });
+        expect(
+          finding.sourceEvidence![0]!.location!.textQuote!.length,
+        ).toBeLessThan(quote.length);
+        expect(finding.sourceEvidence?.[1]).toMatchObject({
+          evidenceId: finding.evidenceIds[1],
+          sourceRef: "https://www.incometax.gov.in/",
+          excerptsTruncated: true,
+          citation: {
+            url: "https://www.incometax.gov.in/",
+            title: "Official guidance",
+            claim: "A source for professional verification.",
+          },
+        });
+        expect(finding.sourceEvidence![1]!.citation!.span!.length).toBeLessThan(
+          quote.length,
+        );
+        for (const excerpt of [
+          finding.sourceEvidence![0]!.location!.textQuote!,
+          finding.sourceEvidence![1]!.citation!.span!,
+        ]) {
+          expect(excerpt).toBe(character.repeat(Array.from(excerpt).length));
+        }
+      }
+      const stored = await store.repositories.evidence.listForCase(scope);
+      expect(
+        stored
+          .filter((item) => item.kind === "document")
+          .every((item) => item.location.textQuote === quote),
+      ).toBe(true);
+      expect(provider.count("review")).toBe(1);
+    },
+  );
+
+  it("keeps short excerpts when truncation markers would make them larger", async () => {
+    const output = specialistOutput("a");
+    const source = output.findings[0]!.evidence[0]!;
+    output.findings[0]!.evidence = [
+      ...Array.from({ length: 15 }, () => ({
+        ...source,
+        textQuote: "short text",
       })),
+      { ...source, textQuote: "long text ".repeat(300) },
+    ];
+    const plan = planOf([
+      { key: "a" },
+      { key: "review", role: "independent-reviewer", dependsOn: ["a"] },
+    ]);
+    const providerOf = () =>
+      new ScriptedProvider({
+        a: () => output,
+        review: () => reviewOutput,
+      });
+    const calibration = providerOf();
+    expect(
+      (await startRunAsync(harness({ provider: calibration, plan }))).result
+        ?.run?.status,
+    ).toBe("completed");
+    const original = ReviewInputSchema.parse(
+      calibration.inputs.get("review")![0],
     );
     const reviewer = createReviewAgent();
-    expect(
+    const allowance = (input: ReviewInput) =>
       inputTokenAllowance({
         system: reviewer.systemPrompt,
         input,
         schema: z.toJSONSchema(reviewer.outputSchema),
-      }),
-    ).toBeLessThanOrEqual(32_000 - 256);
-    for (const finding of input.findings) {
-      expect(finding.claims).toHaveLength(1);
-      expect(finding.sourceEvidence?.[0]).toMatchObject({
-        evidenceId: finding.evidenceIds[0],
-        sourceRef: "document-1#page=1",
-        documentId: "document-1",
-        location: { page: 1 },
-        excerptsTruncated: true,
       });
-      expect(
-        finding.sourceEvidence![0]!.location!.textQuote!.length,
-      ).toBeLessThan(quote.length);
-      expect(finding.sourceEvidence?.[1]).toMatchObject({
-        evidenceId: finding.evidenceIds[1],
-        sourceRef: "https://www.incometax.gov.in/",
-        excerptsTruncated: true,
-        citation: {
-          url: "https://www.incometax.gov.in/",
-          title: "Official guidance",
-          claim: "A source for professional verification.",
-        },
-      });
-      expect(finding.sourceEvidence![1]!.citation!.span!.length).toBeLessThan(
-        quote.length,
-      );
+    const trimmed = (cap: number): ReviewInput => ({
+      ...original,
+      findings: original.findings.map((finding) => ({
+        ...finding,
+        sourceEvidence: finding.sourceEvidence!.map((evidence) => ({
+          ...evidence,
+          location: {
+            ...evidence.location,
+            textQuote: evidence.location!.textQuote!.slice(0, cap),
+          },
+          ...(evidence.location!.textQuote!.length > cap
+            ? { excerptsTruncated: true }
+            : {}),
+        })),
+      })),
+    });
+    const limit = allowance(trimmed(10));
+    expect(allowance(original)).toBeGreaterThan(limit);
+    expect(allowance(trimmed(1))).toBeGreaterThan(limit);
+    store = newMemoryStore();
+    await seedAsync(store.repositories);
+    const provider = providerOf();
+    const { result } = await startRunAsync(
+      harness({ provider, plan, maxInputTokens: limit + 256 }),
+    );
+    expect(result?.run?.status).toBe("completed");
+    const input = ReviewInputSchema.parse(provider.inputs.get("review")![0]);
+    expect(allowance(input)).toBeLessThanOrEqual(limit);
+    const evidence = input.findings[0]!.sourceEvidence!;
+    for (const short of evidence.slice(0, 15)) {
+      expect(short.location!.textQuote).toBe("short text");
+      expect(short.excerptsTruncated).toBeUndefined();
     }
-    const stored = await store.repositories.evidence.listForCase(scope);
-    expect(
-      stored
-        .filter((item) => item.kind === "document")
-        .every((item) => item.location.textQuote === quote),
-    ).toBe(true);
-    expect(provider.count("review")).toBe(1);
+    expect(evidence[15]).toMatchObject({ excerptsTruncated: true });
+    expect(evidence[15]!.location!.textQuote!.length).toBeGreaterThan(1);
   });
 
   it.each(["findings", "draft"])(
