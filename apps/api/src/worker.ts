@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { getErrorLogDetails } from "./error-logging.js";
 import { createApiRuntime } from "./runtime.js";
 
 export async function startWorker(): Promise<void> {
@@ -17,8 +18,7 @@ export async function startWorker(): Promise<void> {
         console.info("Evianta worker stopped");
       })
       .catch((error: unknown) => {
-        const errorName = error instanceof Error ? error.name : "UnknownError";
-        console.error("Worker shutdown failed", { errorName });
+        console.error("Worker shutdown failed", getErrorLogDetails(error));
         process.exitCode = 1;
       });
   };
@@ -31,8 +31,7 @@ if (
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   void startWorker().catch((error: unknown) => {
-    const errorName = error instanceof Error ? error.name : "UnknownError";
-    console.error("Worker startup failed", { errorName });
+    console.error("Worker startup failed", getErrorLogDetails(error));
     process.exitCode = 1;
   });
 }
