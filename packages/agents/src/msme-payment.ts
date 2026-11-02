@@ -222,6 +222,35 @@ const recordLabelPattern = /^(invoice|payment) amount\s*:\s*(.+)$/;
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
 
+function hasReliableRecordEvidence(
+  finding: PriorFinding,
+  documentSources: NonNullable<PriorFinding["sourceEvidence"]>,
+): boolean {
+  if (
+    (finding.confidence ?? 0.5) === 0 ||
+    finding.openQuestions?.some(
+      (question) => question.status === "open" && question.severity === "high",
+    ) ||
+    documentSources.length === 0
+  ) {
+    return false;
+  }
+  return documentSources.every((source) => {
+    const extraction = source.extraction;
+    return Boolean(
+      source.documentId &&
+        source.location &&
+        extraction &&
+        extraction.confidence >= 0.75 &&
+        extraction.method !== "handwriting" &&
+        !extraction.hasHandwriting &&
+        extraction.warningCount === 0 &&
+        extraction.minimumPageConfidence >= 0.75 &&
+        (source.confidence === "high" || source.confidence === "medium"),
+    );
+  });
+}
+
 /**
  * Sums one amount per distinct record. A record is identified by the label
  * "<invoice|payment> amount: <identifier>", so repeated extractions of the same
@@ -237,28 +266,61 @@ function collectRecords(
       identifier: string;
       amounts: Set<number>;
       sources: Set<PriorFinding>;
+      problems: Set<string>;
     }
   >();
   for (const finding of findings) {
     const documentSources = (finding.sourceEvidence ?? []).filter(
       (source) => source.kind === "document",
     );
-    for (const claim of finding.claims) {
+    const recordClaims = finding.claims.flatMap((claim) => {
       const match = recordLabelPattern.exec(
         claim.label.trim().toLowerCase().replace(/\s+/g, " "),
       );
-      if (!match || match[1] !== kind) continue;
+      return match ? [{ claim, match }] : [];
+    });
+    for (const { claim, match } of recordClaims) {
+      if (match[1] !== kind) continue;
       const identifier = claim.label.slice(claim.label.indexOf(":") + 1).trim();
       const key = identifier.toLowerCase().replace(/\s+/g, " ");
       const record = records.get(key) ?? {
         identifier,
         amounts: new Set<number>(),
         sources: new Set<PriorFinding>(),
+        problems: new Set<string>(),
       };
       if (claim.value !== null && Number.isFinite(claim.value)) {
         record.amounts.add(claim.value);
+      } else {
+        record.problems.add(
+          `The amount of ${kind} "${identifier}" is missing or unreadable.`,
+        );
       }
-      if (documentSources.length) record.sources.add(finding);
+      if (recordClaims.length !== 1) {
+        record.problems.add(
+          `${kind} "${identifier}" is grouped with other record claims and cannot be individually sourced.`,
+        );
+      }
+      if (!documentSources.length) {
+        record.problems.add(
+          `The amount of ${kind} "${identifier}" has no source-linked evidence.`,
+        );
+      } else if (!hasReliableRecordEvidence(finding, documentSources)) {
+        record.problems.add(
+          `The amount of ${kind} "${identifier}" has uncertain or unreliable source evidence.`,
+        );
+      }
+      if (
+        finding.openQuestions?.some(
+          (question) =>
+            question.status === "open" && question.severity === "high",
+        )
+      ) {
+        record.problems.add(
+          `${kind} "${identifier}" has an unresolved high-severity question.`,
+        );
+      }
+      record.sources.add(finding);
       records.set(key, record);
     }
   }
@@ -269,17 +331,20 @@ function collectRecords(
   for (const record of records.values()) {
     const name = `${kind} "${record.identifier}"`;
     if (record.amounts.size === 0) {
-      problems.push(`The amount of ${name} is missing or unreadable.`);
-      continue;
+      record.problems.add(`The amount of ${name} is missing or unreadable.`);
     }
     if (record.amounts.size > 1) {
-      problems.push(
+      record.problems.add(
         `${name} has conflicting amounts (${[...record.amounts].join(", ")}).`,
       );
-      continue;
     }
     if (record.sources.size === 0) {
-      problems.push(`The amount of ${name} has no source-linked evidence.`);
+      record.problems.add(
+        `The amount of ${name} has no source-linked evidence.`,
+      );
+    }
+    if (record.problems.size) {
+      problems.push(...record.problems);
       continue;
     }
     total += [...record.amounts][0]!;
@@ -292,7 +357,7 @@ function collectRecords(
 function sourceEvidenceDrafts(
   findings: readonly PriorFinding[],
 ): EvidenceDraft[] {
-  const bySourceRef = new Map<string, EvidenceDraft>();
+  const byIdentity = new Map<string, EvidenceDraft>();
   for (const finding of findings) {
     for (const source of finding.sourceEvidence ?? []) {
       const evidence: EvidenceDraft =
@@ -320,10 +385,10 @@ function sourceEvidenceDrafts(
               title: source.citation?.title ?? null,
               claim: source.citation?.claim ?? null,
             };
-      bySourceRef.set(evidence.sourceRef, evidence);
+      byIdentity.set(JSON.stringify(evidence), evidence);
     }
   }
-  return [...bySourceRef.values()];
+  return [...byIdentity.values()];
 }
 
 function formatAmount(value: number): string {

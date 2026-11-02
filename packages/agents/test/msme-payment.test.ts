@@ -2,6 +2,7 @@ import { createAi, MockProvider } from "@evianta/ai";
 import { EvidenceSchema, syntheticWorkflowFixtures } from "@evianta/core";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentContext } from "../src/agent.js";
+import type { PriorFinding } from "../src/contracts.js";
 import {
   createMsmePaymentPlan,
   createMsmePaymentSpecialists,
@@ -62,7 +63,7 @@ function sourceFinding(
   value: number | null,
   documentId: string,
   withEvidence = true,
-) {
+): PriorFinding {
   return {
     taskId: "analysis-task",
     role: MSME_DOCUMENT_ANALYSIS_ROLE,
@@ -70,6 +71,8 @@ function sourceFinding(
     title: label,
     description: `${label} extracted from source.`,
     severity: "medium",
+    confidence: 0.9,
+    openQuestions: [],
     evidenceIds: withEvidence ? [`evidence-${documentId}`] : [],
     sourceEvidence: withEvidence
       ? [
@@ -78,12 +81,29 @@ function sourceFinding(
             sourceRef: `${documentId}#page=1`,
             confidence: "high" as const,
             documentId,
+            extraction: {
+              method: "pdf-text" as const,
+              confidence: 1,
+              pageCount: 1,
+              minimumPageConfidence: 1,
+              hasHandwriting: false,
+              warningCount: 0,
+              warningCodes: [],
+            },
             location: { page: 1, textQuote: label },
           },
         ]
       : [],
     claims: [{ label, value, components: null, date: null }],
   };
+}
+
+function documentSource(finding: PriorFinding) {
+  const source = finding.sourceEvidence?.find(
+    (item) => item.kind === "document",
+  );
+  if (!source) throw new Error("Document evidence was not added");
+  return source;
 }
 
 function reconciliationInput(
@@ -220,6 +240,15 @@ describe("MSME payment workflow", () => {
       "INV-2",
     ],
     [
+      "a duplicate invoice claim is unreadable",
+      [
+        sourceFinding("invoice amount: INV-1", 100, "invoice-1"),
+        sourceFinding("invoice amount: INV-1", null, "invoice-1-copy"),
+        sourceFinding("payment amount: PAY-1", 50, "payment-1"),
+      ],
+      "missing or unreadable",
+    ],
+    [
       "one record has conflicting amounts",
       [
         sourceFinding("invoice amount: INV-1", 100, "invoice-1"),
@@ -254,6 +283,144 @@ describe("MSME payment workflow", () => {
       openQuestions: [{ severity: "high" }],
     });
     expect(finding?.description).toContain(reason);
+  });
+
+  it("refuses to calculate when multiple record claims share one finding", async () => {
+    const grouped = sourceFinding("invoice amount: INV-1", 100, "invoice-1");
+    grouped.claims.push({
+      label: "invoice amount: INV-2",
+      value: 200,
+      components: null,
+      date: null,
+    });
+
+    const result = await reconciler().run(
+      reconciliationInput([
+        grouped,
+        sourceFinding("payment amount: PAY-1", 50, "payment-1"),
+      ]),
+      contextFor(testAi(), "payment-task"),
+    );
+
+    expect(result.output.findings[0]?.description).toContain(
+      "grouped with other record claims",
+    );
+    expect(result.output.findings[0]?.claims).toEqual([]);
+  });
+
+  it.each(["low", "unassessed"] as const)(
+    "refuses to calculate with %s-confidence evidence",
+    async (confidence) => {
+      const invoice = sourceFinding("invoice amount: INV-1", 100, "invoice-1");
+      documentSource(invoice).confidence = confidence;
+
+      const result = await reconciler().run(
+        reconciliationInput([
+          invoice,
+          sourceFinding("payment amount: PAY-1", 50, "payment-1"),
+        ]),
+        contextFor(testAi(), "payment-task"),
+      );
+
+      expect(result.output.findings[0]?.description).toContain(
+        "uncertain or unreliable source evidence",
+      );
+      expect(result.output.findings[0]?.claims).toEqual([]);
+    },
+  );
+
+  it.each([
+    [
+      "low extraction confidence",
+      (source: ReturnType<typeof documentSource>) => {
+        source.extraction!.confidence = 0.4;
+      },
+    ],
+    [
+      "low page confidence",
+      (source: ReturnType<typeof documentSource>) => {
+        source.extraction!.minimumPageConfidence = 0.4;
+      },
+    ],
+    [
+      "handwriting",
+      (source: ReturnType<typeof documentSource>) => {
+        source.extraction!.method = "handwriting";
+      },
+    ],
+    [
+      "an extraction warning",
+      (source: ReturnType<typeof documentSource>) => {
+        source.extraction!.warningCount = 1;
+      },
+    ],
+    [
+      "missing extraction reliability",
+      (source: ReturnType<typeof documentSource>) => {
+        source.extraction = null;
+      },
+    ],
+  ])("refuses to calculate with %s", async (_name, makeUnreliable) => {
+    const invoice = sourceFinding("invoice amount: INV-1", 100, "invoice-1");
+    makeUnreliable(documentSource(invoice));
+
+    const result = await reconciler().run(
+      reconciliationInput([
+        invoice,
+        sourceFinding("payment amount: PAY-1", 50, "payment-1"),
+      ]),
+      contextFor(testAi(), "payment-task"),
+    );
+
+    expect(result.output.findings[0]?.description).toContain(
+      "uncertain or unreliable source evidence",
+    );
+    expect(result.output.findings[0]?.claims).toEqual([]);
+  });
+
+  it("refuses to calculate while a high-severity question is unresolved", async () => {
+    const invoice = sourceFinding("invoice amount: INV-1", 100, "invoice-1");
+    invoice.openQuestions = [
+      {
+        id: "question-1",
+        text: "Confirm the amended invoice amount.",
+        severity: "high",
+        status: "open",
+        resolutionNote: null,
+        actorId: null,
+        updatedAt: null,
+      },
+    ];
+
+    const result = await reconciler().run(
+      reconciliationInput([
+        invoice,
+        sourceFinding("payment amount: PAY-1", 50, "payment-1"),
+      ]),
+      contextFor(testAi(), "payment-task"),
+    );
+
+    expect(result.output.findings[0]?.description).toContain(
+      "unresolved high-severity question",
+    );
+    expect(result.output.findings[0]?.claims).toEqual([]);
+  });
+
+  it("preserves distinct evidence locations that share a source reference", async () => {
+    const invoice = sourceFinding("invoice amount: INV-1", 100, "invoice-1");
+    const payment = sourceFinding("payment amount: PAY-1", 50, "payment-1");
+    documentSource(invoice).sourceRef = "shared-source";
+    documentSource(payment).sourceRef = "shared-source";
+    documentSource(payment).location = { page: 2, textQuote: "Payment 50" };
+
+    const result = await reconciler().run(
+      reconciliationInput([invoice, payment]),
+      contextFor(testAi(), "payment-task"),
+    );
+
+    expect(
+      result.output.findings[0]?.evidence.map((evidence) => evidence.page),
+    ).toEqual([1, 2]);
   });
 
   it("persists provider citations that arrive without a claim", async () => {
