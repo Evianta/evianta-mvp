@@ -2,11 +2,25 @@ import {
   DataAnalysisDashboardSchema,
   DataAnalysisReportSchema,
   EvidenceLocationSchema,
+  ExtractedDocumentSchema,
+  FindingSchema,
   UseCaseSchema,
 } from "@evianta/core";
 import { z } from "zod";
 
 const SeveritySchema = z.enum(["high", "medium", "low"]);
+
+export const ExtractionReliabilitySchema = ExtractedDocumentSchema.pick({
+  method: true,
+  confidence: true,
+}).extend({
+  pageCount: z.number().int().nonnegative(),
+  minimumPageConfidence: ExtractedDocumentSchema.shape.confidence,
+  hasHandwriting: z.boolean(),
+  warningCount: z.number().int().nonnegative(),
+  warningCodes: z.array(z.string()),
+});
+export type ExtractionReliability = z.infer<typeof ExtractionReliabilitySchema>;
 
 export const NumericClaimSchema = z.object({
   label: z.string().min(1),
@@ -78,7 +92,32 @@ export const PriorFindingSchema = z.object({
   title: z.string(),
   description: z.string(),
   severity: z.string(),
+  confidence: FindingSchema.shape.confidence.optional(),
+  assumptions: FindingSchema.shape.assumptions.optional(),
+  openQuestions: FindingSchema.shape.openQuestions.optional(),
   evidenceIds: z.array(z.string()),
+  sourceEvidence: z
+    .array(
+      z.object({
+        kind: z.enum(["document", "research"]),
+        sourceRef: z.string().min(1),
+        confidence: z.enum(["high", "medium", "low", "unassessed"]),
+        documentId: z.string().nullable(),
+        evidenceId: z.string().optional(),
+        excerptsTruncated: z.boolean().optional(),
+        extraction: ExtractionReliabilitySchema.nullable().optional(),
+        location: EvidenceLocationSchema.optional(),
+        citation: z
+          .object({
+            url: z.string().url(),
+            title: z.string().min(1),
+            claim: z.string().min(1),
+            span: z.string().nullable(),
+          })
+          .optional(),
+      }),
+    )
+    .optional(),
   claims: z.array(NumericClaimSchema),
 });
 export type PriorFinding = z.infer<typeof PriorFindingSchema>;
@@ -86,6 +125,7 @@ export type PriorFinding = z.infer<typeof PriorFindingSchema>;
 export const DocumentSliceSchema = z.object({
   documentId: z.string(),
   name: z.string(),
+  extraction: ExtractionReliabilitySchema.optional(),
   pages: z.array(z.object({ page: z.number().int(), text: z.string() })),
   tables: z
     .array(
@@ -135,6 +175,15 @@ export type ReviewFlag = z.infer<typeof ReviewFlagSchema>;
 export const ReviewInputSchema = z.object({
   case: SpecialistInputSchema.shape.case,
   instructions: z.string(),
+  drafts: z
+    .array(
+      z.object({
+        taskId: z.string(),
+        role: z.string(),
+        text: z.string(),
+      }),
+    )
+    .optional(),
   findings: z.array(PriorFindingSchema),
   deterministicFlags: z.array(ReviewFlagSchema),
 });

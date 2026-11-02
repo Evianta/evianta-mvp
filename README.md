@@ -102,8 +102,52 @@ need a choice. Sample-origin entry uses Start at `/?source=<sample-id>`.
 Enter submits, Shift+Enter adds a line, and IME composition does not submit.
 Starting authorizes private case creation, upload/extraction and execution under
 existing model limits. File limits and enabled workflows come from the authenticated
-`GET /intake/configuration` endpoint. Tax and MSME suggestions are **Coming next**;
-the API also rejects live creation, uploads and execution for those workflows.
+`GET /intake/configuration` endpoint. Tax notice work is available; MSME remains
+**Coming next**, and the API rejects live creation, uploads and execution for it.
+
+Tax notice work analyzes the supplied records, reconciles income and credits,
+researches general official guidance, prepares a response draft and runs an
+independent review. Drafting receives the original notice findings, source
+references, assumptions and unresolved questions. Reconciliation requires
+traceable document evidence for each figure and does not calculate a difference
+when extraction has unresolved high-severity questions. Each figure must have
+its own finding and reliable source locations; grouped figures remain incomplete
+because their citations cannot be assigned to individual claims. Confidence
+cannot exceed the least reliable supporting document. Distinct source locations
+are retained even when they share a source reference, including when document
+slices are omitted from later tasks to fit model limits.
+Unreadable amended figures also block reconciliation, even when grouped with
+other readable claims; a readable older figure does not override an unknown
+replacement. Persisted extraction confidence,
+page reliability and warnings accompany slices and prior source evidence.
+These are compact summaries: page count, minimum page confidence, handwriting
+presence, warning count and distinct warning codes. Complete per-page metadata
+and warning messages remain in the stored extraction; repeated citations do not
+copy those arrays into model inputs.
+Reconciliation requires confidence of at least 0.75 for the extraction and every
+page, no extraction warnings, and no handwritten pages. Model-generated
+confidence cannot override these checks.
+Model-based specialists and independent review shorten source excerpts when
+needed to fit their input budgets,
+mark them as partial, and retain all findings, claims, evidence IDs and source
+positions. Stored evidence remains unchanged. If the required findings and
+source identities still cannot fit, the task fails explicitly rather than dropping
+them. Specialist excerpts are budgeted before adding document slices. Deterministic
+reconciliation retains complete source excerpts.
+Short excerpts stay intact when marking them as partial would increase the
+serialized input size.
+Independent review also receives the complete task draft summaries, including
+assertions not repeated in findings. These drafts are never shortened to fit a
+model limit; an oversized required draft fails explicitly before model dispatch.
+The tax workspace shows the latest deliverable's detailed findings, assumptions,
+question status and evidence links alongside the editable draft summaries.
+Search citations without a claim retain a source
+discovery note, not an inferred legal conclusion; excerpts stay as quotes.
+Unavailable search raises a
+professional-verification question. All response materials require professional
+review; the workflow does not approve or submit filings.
+Mock mode supplies schema-valid planning and review responses so the full tax
+workflow can run without a paid provider.
 
 Ready sources start a run automatically. Sources still being read open in the case
 workspace with preparation status and **Start analysis** when ready. Completed

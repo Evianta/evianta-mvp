@@ -163,12 +163,28 @@ describe("case API routes", () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      workflows: ["data-analysis"],
+      workflows: ["data-analysis", "tax-notice"],
       ...services.uploads,
     });
   });
 
-  it.each(["tax-notice", "msme-payment"] as const)(
+  it("allows tax notice cases to be created", async () => {
+    const response = await fetch(`${baseUrl}/cases`, {
+      method: "POST",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Synthetic tax notice",
+        description: "Review and reconcile a notice",
+        useCase: "tax-notice",
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      case: { useCase: "tax-notice", title: "Synthetic tax notice" },
+    });
+  });
+
+  it.each(["msme-payment"] as const)(
     "blocks live %s creation, upload and run admission",
     async (useCase) => {
       const response = await fetch(`${baseUrl}/cases`, {

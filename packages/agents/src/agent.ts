@@ -14,6 +14,7 @@ import type {
   UsageUnits,
 } from "@evianta/core";
 import type { ZodType } from "zod";
+import type { ExtractionReliability } from "./contracts.js";
 
 export type AgentRole = string;
 
@@ -39,6 +40,7 @@ export interface DocumentSummary {
 export interface DocumentSlice {
   documentId: string;
   name: string;
+  extraction?: ExtractionReliability;
   pages: Array<{ page: number; text: string }>;
   tables?: Array<{
     tableId: string;
@@ -125,6 +127,8 @@ export interface Agent<I, O, ModelOutput = O> {
   systemPrompt: string;
   inputSchema: ZodType<I>;
   outputSchema: ZodType<ModelOutput>;
+  /** The complete agent input is sent to the model and must fit its budget. */
+  usesModelInput?: boolean;
   tools?: Tool[];
   profile: AgentProfile;
   run(input: I, ctx: AgentContext): Promise<AgentResult<O>>;
@@ -162,6 +166,7 @@ export function defineStructuredAgent<I, O>(definition: {
     systemPrompt: definition.systemPrompt,
     inputSchema: definition.inputSchema,
     outputSchema: definition.outputSchema,
+    usesModelInput: true,
     tools: definition.tools,
     profile: definition.profile,
     async run(input, ctx) {

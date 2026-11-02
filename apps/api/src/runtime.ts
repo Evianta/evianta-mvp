@@ -13,6 +13,11 @@ import {
   createBusinessDataAnalystAgent,
   createGenericAnalystAgent,
   createMongoCheckpointerAsync,
+  createCoordinatorAgent,
+  createReviewAgent,
+  createTaxNoticePlan,
+  createTaxNoticeSpecialists,
+  taxNoticeProfiles,
   seedAgentDirectoryAsync,
   createTrivialReferencePlan,
 } from "@evianta/agents";
@@ -35,6 +40,28 @@ export interface ApiRuntime {
   repositories: Awaited<ReturnType<typeof connectMongoStore>>["repositories"];
   worker: RunWorker;
   close(): Promise<void>;
+}
+
+export function createApiMockProvider(): MockProvider {
+  return new MockProvider({
+    responses: [
+      JSON.stringify({
+        summary: "Analysis completed using the supplied case record.",
+        findings: [],
+        inputRequired: null,
+        interpretation:
+          "No significant trend was identified in the supplied records.",
+        insights: [],
+        tasks: createTaxNoticePlan().tasks.map((task) => ({
+          key: task.key,
+          assignedRole: task.role,
+          dependsOn: task.dependsOn,
+          instructions: task.instructions,
+        })),
+        items: [],
+      }),
+    ],
+  });
 }
 
 export async function createApiRuntime(): Promise<ApiRuntime> {
@@ -61,6 +88,10 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       dbName: store.databaseName,
     });
     await seedAgentDirectoryAsync(store.repositories.agentProfiles);
+    await seedAgentDirectoryAsync(
+      store.repositories.agentProfiles,
+      taxNoticeProfiles.map((profile) => ({ profile })),
+    );
 
     const accounting: UsageAccounting =
       usage.mode === "enforced"
@@ -87,18 +118,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
             apiKey: aiEnvironment.modelApiKey ?? "",
             baseUrl: aiEnvironment.museBaseUrl,
           })
-        : new MockProvider({
-            responses: [
-              JSON.stringify({
-                summary: "Analysis completed using the supplied case record.",
-                findings: [],
-                inputRequired: null,
-                interpretation:
-                  "No significant trend was identified in the supplied records.",
-                insights: [],
-              }),
-            ],
-          });
+        : createApiMockProvider();
     const ai = createAi({
       provider,
       accounting,
@@ -126,7 +146,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
     ];
     const plans = new PlanRegistry()
       .register(dataAnalysisPlan)
-      .register(createTrivialReferencePlan("tax-notice"))
+      .register(createTaxNoticePlan())
       .register(createTrivialReferencePlan("msme-payment"));
     const ingestion = createDocumentIngestion({
       documents: store.repositories.documents,
@@ -152,7 +172,10 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       specialists: [
         createBusinessDataAnalystAgent(),
         createGenericAnalystAgent(),
+        ...createTaxNoticeSpecialists(),
       ],
+      coordinator: createCoordinatorAgent(),
+      reviewer: createReviewAgent(),
       checkpointer,
       userRunLimit: usage.userMaxConcurrentRuns,
       globalRunLimit: usage.globalMaxConcurrentRuns,
