@@ -268,7 +268,11 @@ export function DataAnalysisResults({
     <div className="mt-5 space-y-5">
       <section className="rounded-lg border border-border bg-background p-4">
         <h3 className="text-xs font-semibold">Executive summary</h3>
-        <p className="mt-2 text-xs leading-relaxed">{report.data.summary}</p>
+        <p className="mt-2 text-xs leading-relaxed">
+          {typeof section?.reviewerContent === "string"
+            ? section.reviewerContent
+            : report.data.summary}
+        </p>
         {report.data.interpretation && (
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
             {report.data.interpretation}

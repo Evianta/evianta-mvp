@@ -100,6 +100,10 @@ export function createSpecialistAgent(
   profile: AgentProfile,
   systemPrompt: string,
 ): SpecialistAgent {
+  systemPrompt = [
+    systemPrompt,
+    "Source excerpts marked excerptsTruncated are partial. Preserve their evidence IDs and source locations, and flag material assertions that cannot be supported by the supplied excerpts.",
+  ].join("\n");
   const structured = defineStructuredAgent({
     profile,
     systemPrompt,
@@ -137,6 +141,8 @@ export function createReviewAgent(): ReviewAgent {
       "You independently review specialist findings.",
       "Deterministic checks already recomputed totals, evidence presence and consistency; do not repeat them.",
       "Assess narrative soundness, missing requirements and unsupported claims.",
+      "Review every assertion in the supplied drafts, even when it has no corresponding finding. Compare draft text with source-backed findings and flag unsupported figures, deadlines, and legal conclusions.",
+      "Source excerpts marked excerptsTruncated are partial; use their evidence IDs and source locations for traceability, and flag concerns that cannot be assessed from the supplied excerpt.",
       "Return each unresolved concern as an item with a severity.",
     ].join("\n"),
     inputSchema: ReviewInputSchema,

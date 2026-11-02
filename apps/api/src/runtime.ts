@@ -18,6 +18,9 @@ import {
   createBusinessDataAnalystAgent,
   createGenericAnalystAgent,
   createMongoCheckpointerAsync,
+  createTaxNoticePlan,
+  createTaxNoticeSpecialists,
+  taxNoticeProfiles,
   seedAgentDirectoryAsync,
   createTrivialReferencePlan,
 } from "@evianta/agents";
@@ -41,6 +44,10 @@ export interface ApiRuntime {
   repositories: Awaited<ReturnType<typeof connectMongoStore>>["repositories"];
   worker: RunWorker;
   close(): Promise<void>;
+}
+
+export function createApiMockProvider(): MockProvider {
+  return new MockProvider({ respond: respondToMockRequest });
 }
 
 export async function createApiRuntime(): Promise<ApiRuntime> {
@@ -71,6 +78,10 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       store.repositories.agentProfiles,
       msmePaymentProfiles.map((profile) => ({ profile })),
     );
+    await seedAgentDirectoryAsync(
+      store.repositories.agentProfiles,
+      taxNoticeProfiles.map((profile) => ({ profile })),
+    );
 
     const accounting: UsageAccounting =
       usage.mode === "enforced"
@@ -97,7 +108,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
             apiKey: aiEnvironment.modelApiKey ?? "",
             baseUrl: aiEnvironment.museBaseUrl,
           })
-        : new MockProvider({ respond: respondToMockRequest });
+        : createApiMockProvider();
     const ai = createAi({
       provider,
       accounting,
@@ -125,7 +136,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
     ];
     const plans = new PlanRegistry()
       .register(dataAnalysisPlan)
-      .register(createTrivialReferencePlan("tax-notice"))
+      .register(createTaxNoticePlan())
       .register(createMsmePaymentPlan());
     const ingestion = createDocumentIngestion({
       documents: store.repositories.documents,
@@ -152,6 +163,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
         createBusinessDataAnalystAgent(),
         createGenericAnalystAgent(),
         ...createMsmePaymentSpecialists(),
+        ...createTaxNoticeSpecialists(),
       ],
       coordinator: createCoordinatorAgent(),
       reviewer: createReviewAgent(),

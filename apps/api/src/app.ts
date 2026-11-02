@@ -149,7 +149,7 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
       );
       response.setHeader(
         "Access-Control-Allow-Methods",
-        "GET, POST, DELETE, OPTIONS",
+        "GET, POST, PATCH, DELETE, OPTIONS",
       );
     }
     if (request.method === "OPTIONS") {
@@ -197,6 +197,10 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
         })
         .catch(next);
     },
+  );
+  app.patch(
+    "/cases/:caseId/deliverables/:deliverableId/sections/:sectionId",
+    express.json({ limit: "512kb", strict: true }),
   );
   app.use(express.json({ limit: "8kb", strict: true }));
 

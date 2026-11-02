@@ -8,7 +8,7 @@ import {
 import { createDocumentIngestion } from "@evianta/ingestion";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApiApp } from "../src/app.js";
 import {
   createUserAccessKey,
@@ -163,7 +163,7 @@ describe("case API routes", () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      workflows: ["data-analysis", "msme-payment"],
+      workflows: ["data-analysis", "msme-payment", "tax-notice"],
       ...services.uploads,
     });
   });
@@ -184,16 +184,20 @@ describe("case API routes", () => {
     });
   });
 
-  it("keeps tax notice creation disabled until its workflow is merged", async () => {
+  it("allows tax notice cases to be created", async () => {
     const response = await fetch(`${baseUrl}/cases`, {
       method: "POST",
       headers: { ...authHeaders(), "content-type": "application/json" },
       body: JSON.stringify({
-        title: "Not available",
+        title: "Synthetic tax notice",
+        description: "Review and reconcile a notice",
         useCase: "tax-notice",
       }),
     });
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      case: { useCase: "tax-notice", title: "Synthetic tax notice" },
+    });
   });
 
   it.each([undefined, null, "sample-sales-quarter"])(
@@ -685,6 +689,48 @@ describe("case API routes", () => {
       throw new Error("The analyst run did not produce a reviewable section.");
     }
     const section = deliverable.sections[0];
+    const settledRun = await repositories.runs.findOwnedById(run.id, user.id);
+    if (!settledRun) throw new Error("The analyst run was not found.");
+    const runningRun = { ...settledRun, status: "running" as const };
+    const runLookup = vi
+      .spyOn(repositories.runs, "findOwnedById")
+      .mockResolvedValue(runningRun);
+    try {
+      const activeReview = await fetch(
+        `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            ...authHeaders(),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            expectedVersion: deliverable.version,
+            reviewStatus: "accepted",
+          }),
+        },
+      );
+      expect(activeReview.status).toBe(409);
+
+      const activeApproval = await fetch(
+        `${baseUrl}/cases/${created.case.id}/approve`,
+        {
+          method: "POST",
+          headers: {
+            ...authHeaders(),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            deliverableId: deliverable.id,
+            deliverableVersion: deliverable.version,
+          }),
+        },
+      );
+      expect(activeApproval.status).toBe(409);
+    } finally {
+      runLookup.mockRestore();
+    }
+
     const missingComment = await fetch(
       `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
       {
@@ -701,6 +747,49 @@ describe("case API routes", () => {
     );
     expect(missingComment.status).toBe(400);
 
+    const scope = { caseId: created.case.id, ownerId: user.id };
+    const storedDeliverable = await repositories.deliverables.findOwnedById(
+      deliverable.id,
+      scope,
+    );
+    const storedSection = storedDeliverable?.sections.find(
+      (item) => item.id === section.id,
+    );
+    if (!storedDeliverable || !storedSection) {
+      throw new Error("The stored deliverable section was not found.");
+    }
+    if (
+      typeof storedSection.content !== "object" ||
+      storedSection.content === null
+    ) {
+      throw new Error("The deliverable section content was not an object.");
+    }
+    const nestedOnlyContent = {
+      ...(storedSection.content as Record<string, unknown>),
+    };
+    delete nestedOnlyContent.summary;
+    if (
+      typeof nestedOnlyContent.report !== "object" ||
+      nestedOnlyContent.report === null ||
+      !("summary" in nestedOnlyContent.report)
+    ) {
+      throw new Error("The report executive summary was not found.");
+    }
+    expect(
+      await repositories.deliverables.replaceOwned(
+        {
+          ...storedDeliverable,
+          sections: storedDeliverable.sections.map((item) =>
+            item.id === section.id
+              ? { ...item, content: nestedOnlyContent }
+              : item,
+          ),
+        },
+        scope,
+      ),
+    ).toBe(true);
+
+    const longReviewerContent = "R".repeat(9_000);
     const review = await fetch(
       `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`,
       {
@@ -712,7 +801,7 @@ describe("case API routes", () => {
         body: JSON.stringify({
           expectedVersion: deliverable.version,
           reviewStatus: "accepted",
-          reviewerContent: "Reviewer-adjusted summary.",
+          reviewerContent: longReviewerContent,
         }),
       },
     );
@@ -732,7 +821,7 @@ describe("case API routes", () => {
     expect(reviewedDeliverable.version).toBe(deliverable.version + 1);
     expect(reviewedDeliverable.sections[0]).toMatchObject({
       reviewStatus: "accepted",
-      reviewerContent: "Reviewer-adjusted summary.",
+      reviewerContent: longReviewerContent,
       reviewerId: user.id,
     });
 
@@ -810,12 +899,130 @@ describe("case API routes", () => {
       },
     );
     expect(nextReview.status).toBe(200);
+    const nextVersion = (
+      (await nextReview.json()) as { deliverable: { version: number } }
+    ).deliverable.version;
     const updatedDetails = await fetch(`${baseUrl}/cases/${created.case.id}`, {
       headers: authHeaders(),
     });
     expect(
       ((await updatedDetails.json()) as { approvals: unknown[] }).approvals,
     ).toEqual([]);
+
+    const sectionUrl = `${baseUrl}/cases/${created.case.id}/deliverables/${deliverable.id}/sections/${section.id}`;
+    const patchReview = (update: Record<string, unknown>) =>
+      fetch(sectionUrl, {
+        method: "PATCH",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify(update),
+      });
+    const accepted = await patchReview({
+      expectedVersion: nextVersion,
+      reviewStatus: "accepted",
+    });
+    expect(accepted.status).toBe(200);
+    const edited = await patchReview({
+      expectedVersion: nextVersion + 1,
+      reviewerContent: "A further corrected summary.",
+    });
+    expect(edited.status).toBe(200);
+    expect(await edited.json()).toMatchObject({
+      deliverable: {
+        sections: [
+          expect.objectContaining({
+            reviewerContent: "A further corrected summary.",
+            reviewStatus: "pending",
+          }),
+        ],
+      },
+    });
+    const changesRequested = await patchReview({
+      expectedVersion: nextVersion + 2,
+      reviewStatus: "changes-requested",
+      reviewComment: "Check the interpretation.",
+    });
+    expect(changesRequested.status).toBe(200);
+    const clearedComment = await patchReview({
+      expectedVersion: nextVersion + 3,
+      reviewComment: null,
+    });
+    expect(clearedComment.status).toBe(400);
+    const staleEdit = await patchReview({
+      expectedVersion: reviewedDeliverable.version,
+      reviewerContent: "Stale content must not overwrite the saved draft.",
+    });
+    expect(staleEdit.status).toBe(409);
+    const emptyEdit = await patchReview({
+      expectedVersion: nextVersion + 3,
+      reviewerContent: "   ",
+    });
+    expect(emptyEdit.status).toBe(400);
+    const approveWithChangesRequested = await fetch(
+      `${baseUrl}/cases/${created.case.id}/approve`,
+      {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          deliverableId: deliverable.id,
+          deliverableVersion: nextVersion + 3,
+        }),
+      },
+    );
+    expect(approveWithChangesRequested.status).toBe(409);
+    const resolved = await patchReview({
+      expectedVersion: nextVersion + 3,
+      reviewStatus: "accepted",
+    });
+    expect(resolved.status).toBe(200);
+
+    const currentDeliverable = await repositories.deliverables.findOwnedById(
+      deliverable.id,
+      scope,
+    );
+    if (!currentDeliverable) throw new Error("Deliverable was not found.");
+    const concurrentApproval = {
+      id: "concurrent-approval",
+      caseId: scope.caseId,
+      deliverableId: deliverable.id,
+      deliverableVersion: currentDeliverable.version + 1,
+      actorId: user.id,
+      approvedAt: new Date().toISOString(),
+      unresolvedQuestionIds: [],
+      note: "Approval of the concurrent edit.",
+    };
+    const approvalLookup = vi
+      .spyOn(repositories.approvals, "findForDeliverable")
+      .mockImplementationOnce(async () => {
+        await repositories.deliverables.replaceOwned(
+          {
+            ...currentDeliverable,
+            version: concurrentApproval.deliverableVersion,
+          },
+          scope,
+          { expectedVersion: currentDeliverable.version },
+        );
+        await repositories.approvals.insert(concurrentApproval, scope);
+        return concurrentApproval;
+      });
+    try {
+      const racingApproval = await fetch(
+        `${baseUrl}/cases/${created.case.id}/approve`,
+        {
+          method: "POST",
+          headers: { ...authHeaders(), "content-type": "application/json" },
+          body: JSON.stringify({
+            deliverableId: deliverable.id,
+            deliverableVersion: currentDeliverable.version,
+          }),
+        },
+      );
+      expect(racingApproval.status).toBe(409);
+      expect(
+        await repositories.approvals.findForDeliverable(deliverable.id, scope),
+      ).toEqual(concurrentApproval);
+    } finally {
+      approvalLookup.mockRestore();
+    }
   });
 
   it("requests case deletion without overwriting concurrent usage updates", async () => {

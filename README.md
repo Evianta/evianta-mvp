@@ -102,9 +102,52 @@ need a choice. Sample-origin entry uses Start at `/?source=<sample-id>`.
 Enter submits, Shift+Enter adds a line, and IME composition does not submit.
 Starting authorizes private case creation, upload/extraction and execution under
 existing model limits. File limits and enabled workflows come from the authenticated
-`GET /intake/configuration` endpoint. MSME delayed-payment work is live; tax notices
-remain **Coming next**. The API rejects creation, uploads and execution for tax-notice
-cases until that workflow is enabled.
+`GET /intake/configuration` endpoint. MSME delayed-payment work and tax notices are
+available for live work.
+
+Tax notice work analyzes the supplied records, reconciles income and credits,
+researches general official guidance, prepares a response draft and runs an
+independent review. Drafting receives the original notice findings, source
+references, assumptions and unresolved questions. Reconciliation requires
+traceable document evidence for each figure and does not calculate a difference
+when extraction has unresolved high-severity questions. Each figure must have
+its own finding and reliable source locations; grouped figures remain incomplete
+because their citations cannot be assigned to individual claims. Confidence
+cannot exceed the least reliable supporting document. Distinct source locations
+are retained even when they share a source reference, including when document
+slices are omitted from later tasks to fit model limits.
+Unreadable amended figures also block reconciliation, even when grouped with
+other readable claims; a readable older figure does not override an unknown
+replacement. Persisted extraction confidence,
+page reliability and warnings accompany slices and prior source evidence.
+These are compact summaries: page count, minimum page confidence, handwriting
+presence, warning count and distinct warning codes. Complete per-page metadata
+and warning messages remain in the stored extraction; repeated citations do not
+copy those arrays into model inputs.
+Reconciliation requires confidence of at least 0.75 for the extraction and every
+page, no extraction warnings, and no handwritten pages. Model-generated
+confidence cannot override these checks.
+Model-based specialists and independent review shorten source excerpts when
+needed to fit their input budgets,
+mark them as partial, and retain all findings, claims, evidence IDs and source
+positions. Stored evidence remains unchanged. If the required findings and
+source identities still cannot fit, the task fails explicitly rather than dropping
+them. Specialist excerpts are budgeted before adding document slices. Deterministic
+reconciliation retains complete source excerpts.
+Short excerpts stay intact when marking them as partial would increase the
+serialized input size.
+Independent review also receives the complete task draft summaries, including
+assertions not repeated in findings. These drafts are never shortened to fit a
+model limit; an oversized required draft fails explicitly before model dispatch.
+The tax workspace shows the latest deliverable's detailed findings, assumptions,
+question status and evidence links alongside the editable draft summaries.
+Search citations without a claim retain a source
+discovery note, not an inferred legal conclusion; excerpts stay as quotes.
+Unavailable search raises a
+professional-verification question. All response materials require professional
+review; the workflow does not approve or submit filings.
+Mock mode supplies schema-valid planning and review responses so workflows can
+run without a paid provider.
 
 Ready sources start a run automatically. Sources still being read open in the case
 workspace with preparation status and **Start analysis** when ready. Completed
@@ -183,7 +226,7 @@ application database is required. ESLint includes Next.js and React Hooks
 rules. Prettier and EditorConfig use two-space indentation and LF line endings;
 Git preserves LF on checkout, including Windows. CSV byte fixtures retain their
 original bytes. Vitest and Playwright each use at most two workers to avoid
-oversubscribing local databases and the Next.js development server. There are
+oversubscribing local databases and the browser test server. There are
 no Git hooks.
 
 Install Chromium once before running browser tests:
@@ -194,8 +237,9 @@ pnpm test:e2e
 ```
 
 Browser tests use a separate `.next-e2e` build directory so they do not overwrite
-an active development server's `.next` output. Navigation assertions allow cold
-Next.js compilation; they are functional checks, not latency measurements.
+an active development server's `.next` output. They build and start a production
+server before running assertions, keeping cold compilation out of navigation
+checks.
 
 The browser suite owns port 3100 and starts a dedicated fixture-backed web server;
 it never reuses a running development server. Free that port before testing.
@@ -203,6 +247,22 @@ Next.js commands still share generated TypeScript entry files; avoid concurrent
 Next.js commands when validating types or production builds.
 CI runs the same quality gates and a separate Chromium browser job, retaining
 browser reports and traces on failure.
+
+## Reviewing deliverables
+
+The case workspace lets reviewers edit plain-text sections, accept sections,
+request changes with a comment, and approve a saved deliverable version.
+Section decisions save the current draft and comment together. Saving one
+section preserves unsaved work in other sections; save all edits and comments
+before approving the deliverable. Editing accepted content resets its section
+to pending unless the same request includes a new review decision.
+
+Reviewer edits replace the executive summary text in the data-analysis report,
+not its computed metrics, narrative interpretation, or charts. Any saved review
+changes increment the deliverable version and invalidate its previous approval.
+A deliverable cannot be approved while any section has requested changes.
+Concurrent edits or approvals against an older version return a conflict;
+reload before retrying.
 
 ## Workspace responsibilities
 

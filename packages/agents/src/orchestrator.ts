@@ -5,7 +5,7 @@ import {
   isGraphBubbleUp,
   type BaseCheckpointSaver,
 } from "@langchain/langgraph";
-import { inputTokenAllowance, type AiClient } from "@evianta/ai";
+import { AiError, inputTokenAllowance, type AiClient } from "@evianta/ai";
 import type {
   ApprovalRepository,
   Case,
@@ -54,10 +54,11 @@ import {
   type FindingDraft,
   type PriorFinding,
   type ReviewOutput,
+  type ReviewInput,
   type SpecialistInput,
   type SpecialistOutput,
 } from "./contracts.js";
-import { createDocumentAccess } from "./documents.js";
+import { createDocumentAccess, extractionReliability } from "./documents.js";
 import {
   OrchestrationError,
   RunCancelledError,
@@ -1389,48 +1390,188 @@ export class Orchestrator {
     sources: readonly Task[],
     state: TaskGraphStateValue,
   ): Promise<PriorFinding[]> {
-    const evidence = await this.repos.evidence.listForCase(execution.scope);
+    const [evidence, findings] = await Promise.all([
+      this.repos.evidence.listForCase(execution.scope),
+      this.repos.findings.listForCase(execution.scope),
+    ]);
     const evidenceById = new Map(evidence.map((item) => [item.id, item]));
+    const findingsById = new Map(findings.map((item) => [item.id, item]));
+    const referencedEvidenceIds = new Set(
+      sources.flatMap((source) =>
+        (state.results[source.id]?.findings ?? []).flatMap(
+          (finding) => finding.evidenceIds,
+        ),
+      ),
+    );
+    const documentIds = [
+      ...new Set(
+        evidence.flatMap((item) =>
+          item.kind === "document" && referencedEvidenceIds.has(item.id)
+            ? [item.documentId]
+            : [],
+        ),
+      ),
+    ];
+    const reliabilityByDocument = new Map(
+      await Promise.all(
+        documentIds.map(async (id) => {
+          const extraction = await this.repos.extractions.findForDocument(
+            id,
+            execution.scope,
+          );
+          return [
+            id,
+            extraction ? extractionReliability(extraction) : null,
+          ] as const;
+        }),
+      ),
+    );
     return sources.flatMap((source) => {
       const outcome = state.results[source.id];
       if (outcome?.status !== "completed") return [];
-      return outcome.findings.map((finding) => ({
-        taskId: source.id,
-        role: outcome.role,
-        findingId: finding.id,
-        title: finding.title,
-        description: finding.description,
-        severity: finding.severity,
-        evidenceIds: finding.evidenceIds,
-        sourceEvidence: finding.evidenceIds.flatMap((id) => {
-          const item = evidenceById.get(id);
-          if (!item) return [];
-          return [
-            item.kind === "document"
-              ? {
-                  kind: item.kind,
-                  sourceRef: item.sourceRef,
-                  confidence: item.confidence,
-                  documentId: item.documentId,
-                  location: item.location,
-                }
-              : {
-                  kind: item.kind,
-                  sourceRef: item.sourceRef,
-                  confidence: item.confidence,
-                  documentId: null,
-                  citation: {
-                    url: item.citation.url,
-                    title: item.citation.title,
-                    claim: item.citation.claim,
-                    span: item.citation.span,
+      return outcome.findings.map((finding) => {
+        const persisted = findingsById.get(finding.id);
+        if (!persisted) {
+          throw new Error(`Completed finding ${finding.id} is missing`);
+        }
+        return {
+          taskId: source.id,
+          role: outcome.role,
+          findingId: finding.id,
+          title: finding.title,
+          description: finding.description,
+          severity: finding.severity,
+          confidence: persisted.confidence,
+          assumptions: persisted.assumptions,
+          openQuestions: persisted.openQuestions,
+          evidenceIds: finding.evidenceIds,
+          sourceEvidence: finding.evidenceIds.flatMap((id) => {
+            const item = evidenceById.get(id);
+            if (!item) return [];
+            return [
+              item.kind === "document"
+                ? {
+                    kind: item.kind,
+                    sourceRef: item.sourceRef,
+                    confidence: item.confidence,
+                    documentId: item.documentId,
+                    evidenceId: item.id,
+                    extraction:
+                      reliabilityByDocument.get(item.documentId) ?? null,
+                    location: item.location,
+                  }
+                : {
+                    kind: item.kind,
+                    sourceRef: item.sourceRef,
+                    confidence: item.confidence,
+                    documentId: null,
+                    evidenceId: item.id,
+                    citation: {
+                      url: item.citation.url,
+                      title: item.citation.title,
+                      claim: item.citation.claim,
+                      span: item.citation.span,
+                    },
                   },
-                },
-          ];
-        }),
-        claims: finding.claims,
-      }));
+            ];
+          }),
+          claims: finding.claims,
+        };
+      });
     });
+  }
+
+  private budgetReviewInput(input: ReviewInput): ReviewInput {
+    const reviewer = this.options.reviewer!;
+    const limit = this.options.ai.inputTokenLimit(reviewer.modelTier) - 256;
+    const schema = z.toJSONSchema(reviewer.outputSchema);
+    const fits = (findings: PriorFinding[]) =>
+      inputTokenAllowance({
+        system: reviewer.systemPrompt,
+        input: { ...input, findings },
+        schema,
+      }) <= limit;
+    return {
+      ...input,
+      findings: this.budgetSourceExcerpts(input.findings, fits, "Review"),
+    };
+  }
+
+  private budgetSourceExcerpts(
+    findings: PriorFinding[],
+    fits: (findings: PriorFinding[]) => boolean,
+    label: string,
+  ): PriorFinding[] {
+    if (fits(findings)) return findings;
+    const trim = (maxChars: number): PriorFinding[] =>
+      findings.map((finding) => ({
+        ...finding,
+        sourceEvidence: finding.sourceEvidence?.map((evidence) => {
+          const quote = evidence.location?.textQuote;
+          const span = evidence.citation?.span;
+          const trimmedQuote = quote
+            ? Array.from(quote).slice(0, maxChars).join("")
+            : quote;
+          const trimmedSpan = span
+            ? Array.from(span).slice(0, maxChars).join("")
+            : span;
+          const candidate = {
+            ...evidence,
+            ...(evidence.location
+              ? {
+                  location: {
+                    ...evidence.location,
+                    ...(quote ? { textQuote: trimmedQuote } : {}),
+                  },
+                }
+              : {}),
+            ...(evidence.citation
+              ? {
+                  citation: {
+                    ...evidence.citation,
+                    span: trimmedSpan ?? null,
+                  },
+                }
+              : {}),
+            ...(quote !== trimmedQuote || span !== trimmedSpan
+              ? { excerptsTruncated: true }
+              : {}),
+          };
+          // A partial-excerpt marker must not cost more than the removed text.
+          return Buffer.byteLength(JSON.stringify(candidate), "utf8") <
+            Buffer.byteLength(JSON.stringify(evidence), "utf8")
+            ? candidate
+            : evidence;
+        }),
+      }));
+    if (!fits(trim(1))) {
+      throw new AiError(
+        `${label} required content and source identities exceed the configured input limit even with minimal excerpts.`,
+        "input-limit-exceeded",
+      );
+    }
+    let low = 1;
+    let high = Math.max(
+      1,
+      ...findings.flatMap((finding) =>
+        (finding.sourceEvidence ?? []).flatMap((evidence) => [
+          evidence.location?.textQuote?.length ?? 0,
+          evidence.citation?.span?.length ?? 0,
+        ]),
+      ),
+    );
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (fits(trim(mid))) low = mid;
+      else high = mid - 1;
+    }
+    this.logger.warn(
+      `${label} source excerpts were shortened to fit the input budget`,
+      {
+        maxExcerptChars: low,
+      },
+    );
+    return trim(low);
   }
 
   private async documentSlicesAsync(
@@ -1794,18 +1935,31 @@ export class Orchestrator {
           })),
         ).flags;
         agentResult = await this.options.reviewer!.run(
-          {
+          this.budgetReviewInput({
             case: this.caseInput(execution),
             instructions: this.instructionsFor(execution, task, state),
+            drafts: ancestors.flatMap((source) => {
+              const outcome = state.results[source.id];
+              return outcome?.status === "completed"
+                ? [
+                    {
+                      taskId: source.id,
+                      role: outcome.role,
+                      text: outcome.summary,
+                    },
+                  ]
+                : [];
+            }),
             findings,
             deterministicFlags: flags,
-          },
+          }),
           context,
         );
       } else {
-        const sources = tasks.filter((item) =>
-          task.dependencyIds.includes(item.id),
-        );
+        const sources =
+          execution.caseRecord.useCase === "tax-notice"
+            ? this.ancestorsOf(task, tasks)
+            : tasks.filter((item) => task.dependencyIds.includes(item.id));
         const input: SpecialistInput = {
           case: this.caseInput(execution),
           task: {
@@ -1818,12 +1972,36 @@ export class Orchestrator {
           documents: [],
           humanInput: humanInput ?? null,
         };
+        if (specialist!.usesModelInput) {
+          const schema = z.toJSONSchema(specialist!.outputSchema);
+          const limit =
+            this.options.ai.inputTokenLimit(specialist!.modelTier) - 256;
+          input.priorFindings = this.budgetSourceExcerpts(
+            input.priorFindings,
+            (priorFindings) =>
+              inputTokenAllowance({
+                system: specialist!.systemPrompt,
+                input: { ...input, priorFindings },
+                schema,
+              }) <= limit,
+            "Specialist",
+          );
+        }
         const documents = await this.documentSlicesAsync(
           execution,
           specialist!,
           input,
         );
-        documentIds = new Set(documents.map((document) => document.documentId));
+        documentIds = new Set([
+          ...documents.map((document) => document.documentId),
+          ...input.priorFindings.flatMap((finding) =>
+            (finding.sourceEvidence ?? []).flatMap((evidence) =>
+              evidence.kind === "document" && evidence.documentId
+                ? [evidence.documentId]
+                : [],
+            ),
+          ),
+        ]);
         agentResult = await specialist!.run({ ...input, documents }, context);
       }
     } catch (error) {

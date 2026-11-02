@@ -18,6 +18,7 @@ import {
   type Evidence,
 } from "@evianta/core";
 import type { CaseWorkspace, WebApiClient } from "../api/client";
+import { sourcePreviewMimeType } from "../source-preview";
 import { Button } from "./Button";
 
 function evidenceLocation(evidence: Evidence): string {
@@ -38,13 +39,22 @@ function evidenceLocation(evidence: Evidence): string {
 
 function originalDraft(section: DeliverableSection): string | null {
   if (typeof section.content === "string") return section.content;
-  if (
-    typeof section.content === "object" &&
-    section.content !== null &&
-    "summary" in section.content &&
-    typeof section.content.summary === "string"
-  ) {
-    return section.content.summary;
+  if (typeof section.content === "object" && section.content !== null) {
+    if (
+      "report" in section.content &&
+      typeof section.content.report === "object" &&
+      section.content.report !== null &&
+      "summary" in section.content.report &&
+      typeof section.content.report.summary === "string"
+    ) {
+      return section.content.report.summary;
+    }
+    if (
+      "summary" in section.content &&
+      typeof section.content.summary === "string"
+    ) {
+      return section.content.summary;
+    }
   }
   return null;
 }
@@ -106,15 +116,19 @@ export function ReviewEvidenceWorkspace({
   const citationUrl = selectedEvidence
     ? httpCitationUrl(selectedEvidence)
     : null;
+  const sourceDocumentId = selectedDocument?.id ?? null;
+  const previewMimeType = selectedDocument
+    ? sourcePreviewMimeType(selectedDocument)
+    : null;
 
   useEffect(() => {
     setDrafts({});
     setComments({});
     setError(null);
-  }, [deliverable?.id, deliverable?.version]);
+  }, [deliverable?.id]);
 
   useEffect(() => {
-    if (!selectedEvidence || !selectedDocument) {
+    if (!sourceDocumentId) {
       setSourceUrl(null);
       setSourceText(null);
       setSourceError(null);
@@ -128,19 +142,21 @@ export function ReviewEvidenceWorkspace({
     setSourceLoading(true);
     setSourceError(null);
     void api
-      .downloadDocument(caseId, selectedDocument.id)
+      .downloadDocument(caseId, sourceDocumentId)
       .then(async (blob) => {
         if (!active) return;
         if (
-          selectedDocument.mimeType === "text/csv" ||
-          selectedDocument.mimeType === "text/plain"
+          previewMimeType === "text/csv" ||
+          previewMimeType === "text/plain"
         ) {
           const text = await blob.text();
           if (!active) return;
           setSourceText(text.slice(0, 40_000));
         }
         if (!active) return;
-        objectUrl = URL.createObjectURL(blob);
+        objectUrl = URL.createObjectURL(
+          previewMimeType ? new Blob([blob], { type: previewMimeType }) : blob,
+        );
         setSourceUrl(objectUrl);
       })
       .catch((reason: unknown) => {
@@ -159,7 +175,7 @@ export function ReviewEvidenceWorkspace({
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [api, caseId, selectedDocument, selectedEvidence]);
+  }, [api, caseId, sourceDocumentId, previewMimeType]);
 
   async function saveSection(
     section: DeliverableSection,
@@ -179,6 +195,20 @@ export function ReviewEvidenceWorkspace({
         section.id,
         { expectedVersion: deliverable.version, ...update },
       );
+      if (update.reviewerContent !== undefined) {
+        setDrafts((current) => {
+          const next = { ...current };
+          delete next[section.id];
+          return next;
+        });
+      }
+      if (update.reviewComment !== undefined) {
+        setComments((current) => {
+          const next = { ...current };
+          delete next[section.id];
+          return next;
+        });
+      }
       onDeliverableSaved(saved);
     } catch (reason) {
       setError(
@@ -191,8 +221,30 @@ export function ReviewEvidenceWorkspace({
     }
   }
 
+  function changedDraft(section: DeliverableSection): string | undefined {
+    const draft = drafts[section.id];
+    return draft === undefined || draft === initialDraft(section)
+      ? undefined
+      : draft;
+  }
+
+  function hasSectionChanges(section: DeliverableSection): boolean {
+    return (
+      (drafts[section.id] ?? initialDraft(section)) !== initialDraft(section) ||
+      (comments[section.id] ?? section.reviewComment ?? "") !==
+        (section.reviewComment ?? "")
+    );
+  }
+
+  const hasUnsavedChanges =
+    deliverable?.sections.some(hasSectionChanges) ?? false;
+
   async function approve() {
     if (!deliverable || pending) return;
+    if (hasUnsavedChanges) {
+      setError("Save your section edits and comments before approving.");
+      return;
+    }
     const unresolved = workspace.findings.flatMap((finding) =>
       finding.openQuestions.filter((question) => question.status === "open"),
     );
@@ -280,6 +332,7 @@ export function ReviewEvidenceWorkspace({
                         Reviewer draft
                         <textarea
                           className="mt-1 min-h-28 w-full rounded-md border border-border bg-surface p-2 text-xs text-foreground"
+                          disabled={pending}
                           value={drafts[section.id] ?? initialDraft(section)}
                           onChange={(event) =>
                             setDrafts((current) => ({
@@ -304,12 +357,12 @@ export function ReviewEvidenceWorkspace({
                         variant="secondary"
                         disabled={
                           pending ||
-                          (drafts[section.id] ?? initialDraft(section)) ===
-                            initialDraft(section)
+                          changedDraft(section) === undefined ||
+                          !drafts[section.id]?.trim()
                         }
                         onClick={() =>
                           void saveSection(section, {
-                            reviewerContent: drafts[section.id] ?? "",
+                            reviewerContent: changedDraft(section),
                           })
                         }
                       >
@@ -331,6 +384,7 @@ export function ReviewEvidenceWorkspace({
                   Review comment
                   <textarea
                     className="mt-1 min-h-16 w-full rounded-md border border-border bg-surface p-2 text-xs text-foreground"
+                    disabled={pending}
                     value={comments[section.id] ?? section.reviewComment ?? ""}
                     onChange={(event) =>
                       setComments((current) => ({
@@ -344,11 +398,19 @@ export function ReviewEvidenceWorkspace({
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={pending || section.reviewStatus === "accepted"}
+                    disabled={
+                      pending ||
+                      (section.reviewStatus === "accepted" &&
+                        !hasSectionChanges(section))
+                    }
                     onClick={() =>
                       void saveSection(section, {
+                        reviewerContent: changedDraft(section),
                         reviewStatus: "accepted",
-                        reviewComment: null,
+                        reviewComment:
+                          (
+                            comments[section.id] ?? section.reviewComment
+                          )?.trim() || null,
                       })
                     }
                   >
@@ -359,13 +421,16 @@ export function ReviewEvidenceWorkspace({
                     variant="ghost"
                     disabled={
                       pending ||
-                      !comments[section.id]?.trim() ||
-                      section.reviewStatus === "changes-requested"
+                      !(comments[section.id] ?? section.reviewComment)?.trim()
                     }
                     onClick={() =>
                       void saveSection(section, {
+                        reviewerContent: changedDraft(section),
                         reviewStatus: "changes-requested",
-                        reviewComment: comments[section.id]?.trim() ?? "",
+                        reviewComment:
+                          (
+                            comments[section.id] ?? section.reviewComment
+                          )?.trim() ?? "",
                       })
                     }
                   >
@@ -391,7 +456,19 @@ export function ReviewEvidenceWorkspace({
                     onChange={(event) => setApprovalNote(event.target.value)}
                   />
                 </label>
-                <Button className="mt-3" disabled={pending} onClick={approve}>
+                {hasUnsavedChanges && (
+                  <p
+                    className="mt-2 text-xs text-muted-foreground"
+                    role="status"
+                  >
+                    Save your section edits and comments before approving.
+                  </p>
+                )}
+                <Button
+                  className="mt-3"
+                  disabled={pending || hasUnsavedChanges}
+                  onClick={approve}
+                >
                   {pending ? "Saving…" : "Approve deliverable"}
                 </Button>
               </div>
@@ -441,7 +518,7 @@ export function ReviewEvidenceWorkspace({
                         )?.name ?? item.documentId)
                       : item.citation.title}
                   </span>
-                  <span className="mt-1 block text-muted-foreground">
+                  <span className="mt-1 block text-foreground">
                     {evidenceLocation(item)} · {item.confidence} confidence
                   </span>
                 </button>
@@ -481,6 +558,19 @@ export function ReviewEvidenceWorkspace({
                   {selectedEvidence.location.textQuote}
                 </blockquote>
               )}
+            {selectedEvidence.kind === "research" && (
+              <div className="mt-3 space-y-2 text-xs">
+                <p className="font-semibold">
+                  {selectedEvidence.citation.title}
+                </p>
+                <p>{selectedEvidence.citation.claim}</p>
+                {selectedEvidence.citation.span && (
+                  <blockquote className="border-l-2 border-primary/40 pl-3 text-muted-foreground">
+                    {selectedEvidence.citation.span}
+                  </blockquote>
+                )}
+              </div>
+            )}
             {sourceLoading && (
               <p className="mt-3 text-xs text-muted-foreground" role="status">
                 Opening source…
@@ -491,24 +581,28 @@ export function ReviewEvidenceWorkspace({
                 {sourceError}
               </p>
             )}
-            {sourceUrl && selectedDocument?.mimeType === "application/pdf" && (
-              <iframe
-                className="mt-3 h-[26rem] w-full rounded-md border border-border"
-                src={`${sourceUrl}#page=${selectedEvidence.kind === "document" ? (selectedEvidence.location.page ?? 1) : 1}`}
-                title={`Source document ${selectedDocument.name}`}
-              />
-            )}
-            {sourceUrl && selectedDocument?.mimeType.startsWith("image/") && (
-              <Image
-                className="mt-3 max-h-[26rem] max-w-full rounded-md border border-border object-contain"
-                src={sourceUrl}
-                alt={`Source document ${selectedDocument.name}`}
-                width={1200}
-                height={900}
-                unoptimized
-                style={{ width: "auto", height: "auto" }}
-              />
-            )}
+            {sourceUrl &&
+              selectedDocument &&
+              previewMimeType === "application/pdf" && (
+                <iframe
+                  className="mt-3 h-[26rem] w-full rounded-md border border-border"
+                  src={`${sourceUrl}#page=${selectedEvidence.kind === "document" ? (selectedEvidence.location.page ?? 1) : 1}`}
+                  title={`Source document ${selectedDocument.name}`}
+                />
+              )}
+            {sourceUrl &&
+              selectedDocument &&
+              previewMimeType?.startsWith("image/") && (
+                <Image
+                  className="mt-3 max-h-[26rem] max-w-full rounded-md border border-border object-contain"
+                  src={sourceUrl}
+                  alt={`Source document ${selectedDocument.name}`}
+                  width={1200}
+                  height={900}
+                  unoptimized
+                  style={{ width: "auto", height: "auto" }}
+                />
+              )}
             {sourceText !== null && (
               <pre className="mt-3 max-h-[26rem] overflow-auto rounded-md border border-border bg-background p-3 text-[10px]">
                 {sourceText}
@@ -516,8 +610,7 @@ export function ReviewEvidenceWorkspace({
             )}
             {sourceUrl &&
               selectedDocument &&
-              selectedDocument.mimeType !== "application/pdf" &&
-              !selectedDocument.mimeType.startsWith("image/") &&
+              previewMimeType === null &&
               sourceText === null && (
                 <p className="mt-3 text-xs text-muted-foreground">
                   This spreadsheet format is available as a private download.

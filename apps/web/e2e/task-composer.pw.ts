@@ -37,7 +37,7 @@ const source = {
   buffer: Buffer.from("month,revenue\nJan,100\nFeb,200"),
 };
 const settings = {
-  workflows: ["data-analysis", "msme-payment"],
+  workflows: ["data-analysis", "tax-notice", "msme-payment"],
   uploadMaxBytes: 1024,
   uploadMaxFiles: 2,
   documentMaxPages: 20,
@@ -145,7 +145,7 @@ test("suggestions are static, preserve selection through sign-in and require con
   );
   await expect(
     page.getByRole("button", { name: "Start task", exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
   await expect(page.locator("#case-files")).toBeEnabled();
   expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
 });
@@ -288,9 +288,7 @@ test("conflicting message and data ask for selection; choosing never replaces th
   expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
 });
 
-test("MSME messages are available while tax remains unavailable", async ({
-  page,
-}) => {
+test("tax and MSME messages are both available", async ({ page }) => {
   const calls = await setup(page);
   await page.goto("/");
   await signIn(page);
@@ -299,8 +297,8 @@ test("MSME messages are available while tax remains unavailable", async ({
   await prompt.fill("Reply to a 143(1) intimation about TDS");
   await expect(
     page.getByRole("status").filter({ hasText: "Detected: Tax notice" }),
-  ).toContainText("Coming next");
-  await expect(start).toBeDisabled();
+  ).not.toContainText("Coming next");
+  await expect(start).toBeEnabled();
 
   await prompt.fill("Reconcile my overdue invoices");
   await expect(
