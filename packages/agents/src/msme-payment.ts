@@ -270,7 +270,22 @@ function collectRecords(
       problems: Set<string>;
     }
   >();
+  const unresolvedCreditNoteProblems = new Set<string>();
   for (const finding of findings) {
+    if (kind === "credit note") {
+      const findingContext = `${finding.title}\n${finding.description}`;
+      for (const question of finding.openQuestions ?? []) {
+        if (
+          question.status === "open" &&
+          question.severity === "high" &&
+          /credit[\s-]?notes?/i.test(`${findingContext}\n${question.text}`)
+        ) {
+          unresolvedCreditNoteProblems.add(
+            `A credit-note issue has an unresolved high-severity question: ${question.text}`,
+          );
+        }
+      }
+    }
     const documentSources = (finding.sourceEvidence ?? []).filter(
       (source) => source.kind === "document",
     );
@@ -330,7 +345,7 @@ function collectRecords(
       records.set(key, record);
     }
   }
-  const problems: string[] = [];
+  const problems: string[] = [...unresolvedCreditNoteProblems];
   let total = 0;
   let count = 0;
   const sources = new Set<PriorFinding>();

@@ -282,7 +282,7 @@ function TaskComposer({
     if (!files.length) {
       setError(
         useCase === "data-analysis"
-          ? "Attach a source dataset before starting data analysis."
+          ? "Attach a CSV, TSV, Excel, or JSON dataset before starting data analysis."
           : "Attach the source records before starting this task.",
       );
       return;

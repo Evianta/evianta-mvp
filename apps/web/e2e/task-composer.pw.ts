@@ -173,8 +173,18 @@ test("unclear prompts ask for selection without replacing text; file limits and 
   await expect(prompt).toHaveValue("My own question");
   await page.getByRole("button", { name: "Start task", exact: true }).click();
   await expect(page.getByRole("main").getByRole("alert")).toContainText(
-    "Attach a CSV or Excel",
+    "Attach a CSV, TSV, Excel, or JSON dataset",
   );
+  await page.locator("#case-files").setInputFiles({
+    name: "sales-report.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.4"),
+  });
+  await page.getByRole("button", { name: "Start task", exact: true }).click();
+  await expect(page.getByRole("main").getByRole("alert")).toContainText(
+    "at least one CSV, TSV, Excel, or JSON dataset",
+  );
+  expect(calls.create).toBe(0);
   await page
     .locator("#case-files")
     .setInputFiles({ ...source, buffer: Buffer.alloc(1025) });

@@ -291,6 +291,44 @@ describe("MSME payment workflow", () => {
     },
   );
 
+  it("blocks an unresolved credit-note finding without a canonical amount claim", async () => {
+    const unresolvedCreditNote = sourceFinding(
+      "Credit note review",
+      null,
+      "credit-note",
+    );
+    unresolvedCreditNote.description =
+      "A credit note may apply, but its amount was not identified.";
+    unresolvedCreditNote.openQuestions = [
+      {
+        id: "credit-note-question",
+        text: "Confirm the credit note amount.",
+        severity: "high",
+        status: "open",
+        resolutionNote: null,
+        actorId: null,
+        updatedAt: null,
+      },
+    ];
+
+    const result = await reconciler().run(
+      reconciliationInput([
+        sourceFinding("invoice amount: INV-2", 472_000, "invoice"),
+        sourceFinding("payment amount: PAY-1", 250_000, "payment"),
+        unresolvedCreditNote,
+      ]),
+      contextFor(testAi(), "payment-task"),
+    );
+
+    expect(result.output.findings[0]?.claims).toEqual([]);
+    expect(result.output.findings[0]?.description).toContain(
+      "credit-note issue has an unresolved high-severity question",
+    );
+    expect(result.output.findings[0]?.description).toContain(
+      "Confirm the credit note amount.",
+    );
+  });
+
   it.each([
     [
       "an invoice amount is unreadable",
