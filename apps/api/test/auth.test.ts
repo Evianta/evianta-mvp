@@ -518,6 +518,21 @@ describe("API access-key authentication", () => {
     });
     expect(allowed.status).toBe(200);
     expect(allowed.headers.get("access-control-allow-origin")).toBe(webOrigin);
+    const preflight = await fetch(
+      `${baseUrl}/cases/case-1/deliverables/d1/sections/s1`,
+      {
+        method: "OPTIONS",
+        headers: {
+          origin: webOrigin,
+          "access-control-request-method": "PATCH",
+          "access-control-request-headers": "authorization,content-type",
+        },
+      },
+    );
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-methods")).toContain(
+      "PATCH",
+    );
   });
 
   it("applies the shared authenticated-user request limit", async () => {

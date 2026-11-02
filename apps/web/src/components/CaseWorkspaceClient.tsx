@@ -13,7 +13,9 @@ import {
 } from "lucide-react";
 import {
   liveWorkflows,
+  type Approval,
   type Case,
+  type Deliverable,
   type RunDto,
   type RunEvent,
 } from "@evianta/core";
@@ -26,6 +28,7 @@ import { LoadingSkeleton } from "./LoadingSkeleton";
 import { PrivateGate } from "./PrivateGate";
 import { StatusBadge, type StatusTone } from "./Badges";
 import { DataAnalysisResults } from "./DataAnalysisResults";
+import { ReviewEvidenceWorkspace } from "./ReviewEvidenceWorkspace";
 
 const workflowNames: Record<Case["useCase"], string> = {
   "data-analysis": "Data analysis",
@@ -90,6 +93,9 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   const { session, api } = useSession();
   const [record, setRecord] = useState<Case | null>(null);
   const [workspace, setWorkspace] = useState<CaseWorkspace | null>(null);
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(
+    null,
+  );
   const [run, setRun] = useState<RunDto | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -104,8 +110,10 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   useEffect(() => {
     let active = true;
     setRecord(null);
+    setWorkspace(null);
     setRun(null);
     setEvents([]);
+    setSelectedEvidenceId(null);
     lastSequence.current = 0;
     setError(null);
     if (!session)
@@ -332,18 +340,82 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
     setPendingAction(true);
     try {
       const retried = await api.retryRun(run.id);
+      setWorkspace((current) => {
+        if (!current) return current;
+        const priorDeliverableIds = new Set(
+          current.deliverables
+            .filter((deliverable) => deliverable.runId === run.id)
+            .map((deliverable) => deliverable.id),
+        );
+        return {
+          ...current,
+          approvals: current.approvals.filter(
+            (approval) => !priorDeliverableIds.has(approval.deliverableId),
+          ),
+        };
+      });
       setEvents([]);
       lastSequence.current = 0;
       setRun(retried);
     } catch (reason) {
-      setError(
+      const message =
         reason instanceof Error
           ? reason.message
-          : "The run could not be retried.",
-      );
+          : "The run could not be retried.";
+      setError(message);
+      try {
+        setWorkspace(await api.getCaseWorkspace(caseId));
+      } catch (refreshReason) {
+        setError(
+          `${message} The workspace could not be refreshed: ${
+            refreshReason instanceof Error
+              ? refreshReason.message
+              : "Request failed."
+          }`,
+        );
+      }
     } finally {
       setPendingAction(false);
     }
+  }
+
+  function onDeliverableSaved(deliverable: Deliverable) {
+    setWorkspace((current) =>
+      current
+        ? {
+            ...current,
+            deliverables: current.deliverables.map((item) =>
+              item.id === deliverable.id ? deliverable : item,
+            ),
+            approvals: current.approvals.filter(
+              (approval) => approval.deliverableId !== deliverable.id,
+            ),
+          }
+        : current,
+    );
+  }
+
+  function onApprovalSaved(approval: Approval) {
+    setWorkspace((current) =>
+      current
+        ? {
+            ...current,
+            approvals: [
+              ...current.approvals.filter(
+                (item) => item.deliverableId !== approval.deliverableId,
+              ),
+              approval,
+            ],
+          }
+        : current,
+    );
+  }
+
+  function openEvidence(evidenceId: string) {
+    setSelectedEvidenceId(evidenceId);
+    document
+      .getElementById("review-evidence-workspace")
+      ?.scrollIntoView({ block: "start" });
   }
 
   if (!session) return <PrivateGate />;
@@ -605,7 +677,10 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
             </div>
           </div>
           {record.useCase === "data-analysis" ? (
-            <DataAnalysisResults workspace={workspace} />
+            <DataAnalysisResults
+              workspace={workspace}
+              onOpenEvidence={openEvidence}
+            />
           ) : (
             <div className="mt-5 rounded-lg border border-dashed border-border p-4">
               <p className="text-xs font-medium">
@@ -635,6 +710,17 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
           </div>
         </section>
       </div>
+      {workspace && (
+        <ReviewEvidenceWorkspace
+          caseId={caseId}
+          workspace={workspace}
+          api={api}
+          selectedEvidenceId={selectedEvidenceId}
+          onSelectEvidence={setSelectedEvidenceId}
+          onDeliverableSaved={onDeliverableSaved}
+          onApprovalSaved={onApprovalSaved}
+        />
+      )}
     </div>
   );
 }

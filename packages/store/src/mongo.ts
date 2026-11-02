@@ -387,13 +387,14 @@ export class MongoStore {
         findOwnedById: (id, scope) => this.deliverableFindOwnedById(id, scope),
         listForRun: (id, scope) => this.deliverableListForRun(id, scope),
         insert: (record, scope) => this.deliverableInsert(record, scope),
-        replaceOwned: (record, scope) =>
-          this.deliverableReplaceOwned(record, scope),
+        replaceOwned: (record, scope, options) =>
+          this.deliverableReplaceOwned(record, scope, options),
       },
       approvals: {
         findForDeliverable: (id, scope) =>
           this.approvalFindForDeliverable(id, scope),
-        insert: (record, scope) => this.approvalInsert(record, scope),
+        insert: (record, scope, options) =>
+          this.approvalInsert(record, scope, options),
         invalidateForDeliverable: (id, scope) =>
           this.approvalInvalidateForDeliverable(id, scope),
       },
@@ -1765,6 +1766,7 @@ export class MongoStore {
   async deliverableReplaceOwned(
     deliverable: Deliverable,
     scope: OwnerScope,
+    options?: { expectedVersion?: number; requireSettledRun?: boolean },
   ): Promise<boolean> {
     const parsed = DeliverableSchema.parse(deliverable);
     if (parsed.caseId !== scope.caseId || !(await this.ownsCase(scope))) {
@@ -1790,8 +1792,32 @@ export class MongoStore {
           "run-not-owned",
         );
       }
+      if (options?.requireSettledRun) {
+        if (["queued", "running", "waiting-for-input"].includes(run.status)) {
+          return false;
+        }
+        const touched = await this.runs.updateOne(
+          {
+            _id: parsed.runId,
+            ownerId: scope.ownerId,
+            caseId: scope.caseId,
+            status: run.status,
+            fencingToken: run.fencingToken,
+          },
+          { $inc: { reviewWrites: 1 } },
+          { session },
+        );
+        if (touched.matchedCount !== 1) return false;
+      }
       const result = await this.deliverables.replaceOne(
-        { _id: parsed.id, caseId: scope.caseId, ownerId: scope.ownerId },
+        {
+          _id: parsed.id,
+          caseId: scope.caseId,
+          ownerId: scope.ownerId,
+          ...(options?.expectedVersion === undefined
+            ? {}
+            : { version: options.expectedVersion }),
+        },
         { ...documentFor(parsed), ownerId: scope.ownerId },
         { session },
       );
@@ -1825,11 +1851,61 @@ export class MongoStore {
     );
   }
 
-  async approvalInsert(approval: Approval, scope: OwnerScope): Promise<void> {
+  async approvalInsert(
+    approval: Approval,
+    scope: OwnerScope,
+    options?: { requireSettledRun?: boolean },
+  ): Promise<void> {
     const parsed = ApprovalSchema.parse(approval);
     if (parsed.caseId !== scope.caseId) throw new CaseNotOwnedError();
     await this.requireOwnedCase(scope);
     await this.withTransaction(async (session) => {
+      if (options?.requireSettledRun) {
+        const deliverable = await this.deliverables.findOne(
+          {
+            _id: parsed.deliverableId,
+            caseId: scope.caseId,
+            ownerId: scope.ownerId,
+          },
+          { session },
+        );
+        const run = deliverable
+          ? await this.runs.findOne(
+              {
+                _id: deliverable.runId,
+                caseId: scope.caseId,
+                ownerId: scope.ownerId,
+              },
+              { session },
+            )
+          : null;
+        if (
+          !run ||
+          ["queued", "running", "waiting-for-input"].includes(run.status)
+        ) {
+          throw new StoreError(
+            "The analysis run is not settled",
+            "stale-approval",
+          );
+        }
+        const touched = await this.runs.updateOne(
+          {
+            _id: run._id,
+            ownerId: scope.ownerId,
+            caseId: scope.caseId,
+            status: run.status,
+            fencingToken: run.fencingToken,
+          },
+          { $inc: { reviewWrites: 1 } },
+          { session },
+        );
+        if (touched.matchedCount !== 1) {
+          throw new StoreError(
+            "The analysis run is not settled",
+            "stale-approval",
+          );
+        }
+      }
       const result = await this.deliverables.updateOne(
         {
           _id: parsed.deliverableId,

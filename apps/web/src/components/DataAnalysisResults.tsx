@@ -208,8 +208,10 @@ function ChartView({
 
 export function DataAnalysisResults({
   workspace,
+  onOpenEvidence,
 }: {
   workspace: CaseWorkspace | null;
+  onOpenEvidence: (evidenceId: string) => void;
 }) {
   const deliverable = workspace?.deliverables
     .filter((item) => item.format === "dashboard")
@@ -266,7 +268,11 @@ export function DataAnalysisResults({
     <div className="mt-5 space-y-5">
       <section className="rounded-lg border border-border bg-background p-4">
         <h3 className="text-xs font-semibold">Executive summary</h3>
-        <p className="mt-2 text-xs leading-relaxed">{report.data.summary}</p>
+        <p className="mt-2 text-xs leading-relaxed">
+          {typeof section?.reviewerContent === "string"
+            ? section.reviewerContent
+            : report.data.summary}
+        </p>
         {report.data.interpretation && (
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
             {report.data.interpretation}
@@ -362,17 +368,25 @@ export function DataAnalysisResults({
                       const document = documentsById.get(source.documentId);
                       const location = source.location;
                       return (
-                        <li
-                          className="text-[10px] text-muted-foreground"
-                          key={id}
-                        >
-                          Evidence: {document?.name ?? source.documentId}
-                          {location.sheet ? ` · ${location.sheet}` : ""}
-                          {location.cellRange ? ` · ${location.cellRange}` : ""}
-                          {location.rowRange
-                            ? ` · rows ${location.rowRange.start}–${location.rowRange.end}`
-                            : ""}
-                          {location.textQuote ? ` · ${location.textQuote}` : ""}
+                        <li key={id}>
+                          <button
+                            type="button"
+                            className="text-left text-[10px] text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                            onClick={() => onOpenEvidence(source.id)}
+                          >
+                            Evidence: {document?.name ?? source.documentId}
+                            {location.sheet ? ` · ${location.sheet}` : ""}
+                            {location.cellRange
+                              ? ` · ${location.cellRange}`
+                              : ""}
+                            {location.rowRange
+                              ? ` · rows ${location.rowRange.start}–${location.rowRange.end}`
+                              : ""}
+                            {location.page ? ` · page ${location.page}` : ""}
+                            {location.textQuote
+                              ? ` · ${location.textQuote}`
+                              : ""}
+                          </button>
                         </li>
                       );
                     })}

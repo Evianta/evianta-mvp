@@ -1217,6 +1217,43 @@ function repositoryContract(
       ).toEqual(deliverable);
     });
 
+    it("rejects review writes while the owning run is active", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
+      const deliverable = makeDeliverable("deliverable-1", 1);
+      await repositories.deliverables.insert(deliverable, ownerScope);
+
+      expect(
+        await repositories.deliverables.replaceOwned(
+          makeDeliverable(deliverable.id, 2),
+          ownerScope,
+          { expectedVersion: 1, requireSettledRun: true },
+        ),
+      ).toBe(false);
+      await expect(
+        repositories.approvals.insert(
+          {
+            id: "approval-1",
+            caseId: ownerScope.caseId,
+            deliverableId: deliverable.id,
+            deliverableVersion: 1,
+            actorId: "owner-1",
+            approvedAt: timestamp,
+            unresolvedQuestionIds: [],
+            note: "",
+          },
+          ownerScope,
+          { requireSettledRun: true },
+        ),
+      ).rejects.toMatchObject({ code: "stale-approval" });
+      expect(
+        await repositories.deliverables.findOwnedById(
+          deliverable.id,
+          ownerScope,
+        ),
+      ).toEqual(deliverable);
+    });
+
     it("invalidates approval after a deliverable version changes", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));
@@ -1254,6 +1291,19 @@ function repositoryContract(
           ownerScope,
         ),
       ).toBeNull();
+      expect(
+        await repositories.deliverables.replaceOwned(
+          makeDeliverable(deliverable.id, 3),
+          ownerScope,
+          { expectedVersion: 1 },
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.deliverables.findOwnedById(
+          deliverable.id,
+          ownerScope,
+        ),
+      ).toMatchObject({ version: 2 });
     });
 
     it("rejects out-of-order events and preserves monotonic visibility", async () => {

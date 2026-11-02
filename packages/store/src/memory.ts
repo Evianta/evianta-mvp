@@ -996,14 +996,27 @@ export class InMemoryStore {
           }
           this.deliverables.set(record.id, record);
         },
-        replaceOwned: async (deliverable, scope) => {
+        replaceOwned: async (deliverable, scope, options) => {
           const record = parse(DeliverableSchema, deliverable);
           if (!this.ownsCase(scope) || record.caseId !== scope.caseId) {
             return false;
           }
           const current = this.deliverables.get(record.id);
           if (!current || current.caseId !== scope.caseId) return false;
+          if (
+            options?.expectedVersion !== undefined &&
+            current.version !== options.expectedVersion
+          ) {
+            return false;
+          }
           const run = this.runs.get(record.runId);
+          if (
+            options?.requireSettledRun &&
+            (!run ||
+              ["queued", "running", "waiting-for-input"].includes(run.status))
+          ) {
+            return false;
+          }
           if (
             !run ||
             run.ownerId !== scope.ownerId ||
@@ -1035,10 +1048,11 @@ export class InMemoryStore {
           );
           return approval ? parse(ApprovalSchema, approval) : null;
         },
-        insert: async (approval, scope) => {
+        insert: async (approval, scope, options) => {
           const record = parse(ApprovalSchema, approval);
           this.requireScope(record.caseId, scope);
           const deliverable = this.deliverables.get(record.deliverableId);
+          const run = deliverable && this.runs.get(deliverable.runId);
           if (
             !deliverable ||
             deliverable.caseId !== scope.caseId ||
@@ -1046,6 +1060,17 @@ export class InMemoryStore {
           ) {
             throw new StoreError(
               "Deliverable version is not current",
+              "stale-approval",
+            );
+          }
+          if (
+            options?.requireSettledRun &&
+            (!run ||
+              run.caseId !== scope.caseId ||
+              ["queued", "running", "waiting-for-input"].includes(run.status))
+          ) {
+            throw new StoreError(
+              "The analysis run is not settled",
               "stale-approval",
             );
           }

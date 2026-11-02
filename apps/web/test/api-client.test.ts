@@ -45,6 +45,7 @@ describe("FetchWebApiClient", () => {
       onUnauthorized: vi.fn(),
       fetcher,
     });
+
     expect(await client.exchangeAccessKey("test-access-key")).toEqual(token);
     expect(fetcher.mock.calls[0]).toEqual([
       "/auth/token",
@@ -54,6 +55,91 @@ describe("FetchWebApiClient", () => {
         method: "POST",
       }),
     ]);
+  });
+
+  it("downloads a private source with the bearer session and no cookies", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          new Blob(["month,revenue\nJan,100"], { type: "text/csv" }),
+        ),
+      );
+    const client = new FetchWebApiClient({
+      getToken: () => "session-token",
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+
+    const source = await client.downloadDocument("case/1", "doc 2");
+    expect(await source.text()).toBe("month,revenue\nJan,100");
+    expect(fetcher.mock.calls[0][0]).toBe(
+      "/cases/case%2F1/documents/doc%202/download",
+    );
+    expect(fetcher.mock.calls[0][1]).toMatchObject({
+      cache: "no-store",
+      credentials: "omit",
+      headers: { Authorization: "Bearer session-token" },
+    });
+  });
+
+  it("saves versioned section reviews and records explicit approvals", async () => {
+    const deliverable = {
+      id: "deliverable-1",
+      caseId: "case-1",
+      runId: "run-1",
+      version: 2,
+      format: "report",
+      title: "Sales report",
+      summary: "",
+      sections: [],
+      createdAt: "2026-01-15T00:00:00.000Z",
+      updatedAt: "2026-01-15T00:00:00.000Z",
+    };
+    const approval = {
+      id: "approval-1",
+      caseId: "case-1",
+      deliverableId: "deliverable-1",
+      deliverableVersion: 2,
+      actorId: "user-1",
+      approvedAt: "2026-01-15T00:00:00.000Z",
+      unresolvedQuestionIds: [],
+      note: "Reviewed",
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ deliverable }))
+      .mockResolvedValueOnce(Response.json({ approval }));
+    const client = new FetchWebApiClient({
+      getToken: () => "session-token",
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+
+    await expect(
+      client.updateDeliverableSection("case-1", "deliverable-1", "section-1", {
+        expectedVersion: 1,
+        reviewStatus: "accepted",
+      }),
+    ).resolves.toEqual(deliverable);
+    await expect(
+      client.approveDeliverable("case-1", "deliverable-1", 2, "Reviewed"),
+    ).resolves.toEqual(approval);
+    expect(
+      fetcher.mock.calls.map(([url, init]) => [url, init?.method]),
+    ).toEqual([
+      ["/cases/case-1/deliverables/deliverable-1/sections/section-1", "PATCH"],
+      ["/cases/case-1/approve", "POST"],
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      expectedVersion: 1,
+      reviewStatus: "accepted",
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      deliverableId: "deliverable-1",
+      deliverableVersion: 2,
+      note: "Reviewed",
+    });
   });
 
   const run: RunDto = {
@@ -204,6 +290,7 @@ describe("FetchWebApiClient", () => {
         findings: [],
         evidence: [],
         deliverables: [],
+        approvals: [],
         state: "active",
         usage: record.usage,
       }),
@@ -220,6 +307,7 @@ describe("FetchWebApiClient", () => {
       findings: [],
       evidence: [],
       deliverables: [],
+      approvals: [],
     });
     expect(fetcher.mock.calls[0]?.[0]).toBe(
       `/cases/${encodeURIComponent(record.id)}`,
