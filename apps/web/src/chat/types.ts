@@ -59,6 +59,15 @@ export type ChatMessage =
       answered?: string;
     }
   | { id: string; from: "evianta"; type: "setup"; steps: SetupStep[] }
+  | {
+      id: string;
+      from: "evianta";
+      type: "question-form";
+      questions: { id: string; text: string }[];
+      answers?: Record<string, string>;
+      submitted?: boolean;
+      error?: string | null;
+    }
   | { id: string; from: "evianta"; type: "progress"; runId: string }
   | { id: string; from: "evianta"; type: "result"; runId: string }
   | {

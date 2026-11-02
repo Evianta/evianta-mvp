@@ -105,6 +105,12 @@ existing model limits. File limits and enabled workflows come from the authentic
 `GET /intake/configuration` endpoint. MSME delayed-payment work and tax notices are
 available for live work.
 
+When a run pauses for clarification, the chat shows all pending questions in one
+form. Answer each field, optionally attach supporting files, then select
+**Submit answers and continue**. The message composer stays disabled until the
+answers are sent. Failed submissions keep the answers and offer a retry without
+starting a new run.
+
 All three workflows accept CSV, TSV, Excel (`.xlsx`/`.xls`), JSON, plain text,
 Markdown (`.md`/`.markdown`) and PDF. Image uploads are not enabled because OCR
 is not configured. The file picker and drag-and-drop use the same type and size
@@ -328,6 +334,65 @@ USD per million tokens, with an optional per-request web-search rate.
 `UsageAdminService` exposes bounded, administrator-only attempt summaries.
 `runAdmission` provides fenced user/global concurrency admission and retains a
 case lock while a run waits for input.
+
+#### Configure live prices
+
+The API and worker provision missing Muse prices on startup from
+[`apps/api/src/muse-pricing.ts`](apps/api/src/muse-pricing.ts). These are Meta's
+[published Standard-mode prices](https://dev.meta.ai/docs/pricing-rate-limits),
+verified on 2026-11-02, in USD per million tokens:
+
+| Model family | Input | Output | Cached input |
+| ------------ | ----: | -----: | -----------: |
+| Muse Spark   |  1.25 |   4.25 |         0.15 |
+| Muse Wonder  |  4.00 |  20.00 |         0.20 |
+
+Set `MUSE_SPARK_MODEL=muse-spark-1.3` and
+`MUSE_WONDER_MODEL=muse-wonder-1.0` for live calls. The legacy shorthand values
+`spark` and `wonder` are normalized to these versioned IDs before pricing and
+dispatch; the provider does not accept those shorthand names directly. The
+explicit versioned IDs `muse-spark-1.1`, `muse-spark-1.2`, `muse-spark-1.3` and
+`muse-wonder-1.0` are also supported. Unknown IDs and Contributor-mode variants
+are not assigned Standard-mode prices; add verified configuration before using
+them. No request is switched to Contributor mode.
+
+For live Muse work, start with `MODEL_MAX_OUTPUT_TOKENS=16384`. Meta counts
+[reasoning tokens](https://dev.meta.ai/docs/reasoning) and visible output against
+the same ceiling: a 2,048-token limit can be exhausted by reasoning before the
+model finishes a JSON plan. This is a bounded allowance, not a guarantee that
+every response fits. Larger allowances reserve more budget before dispatch;
+user/global spending limits still apply. Truncated output is rejected and its
+reported usage is recorded. No automatic paid retry increases the ceiling.
+
+Startup uses the configured model IDs and `MODEL_MAX_OUTPUT_TOKENS` to create
+immutable price records with canonical settings hashes. Existing active prices,
+including operator overrides, are preserved. Repeated or concurrent API/worker
+starts do not duplicate records. Cache writes use the ordinary input rate;
+Meta lists a discount for cache reads, not a separate cache-write surcharge.
+Search remains disabled for admission: Meta charges $2.50 per 1,000 search
+queries, which is not a bounded per-request rate.
+
+For account-specific pricing, the operator can still import a JSON record using
+the fields in `UsagePriceSchema`, omitting `settingsKey`:
+
+```powershell
+pnpm --filter @evianta/api build
+pnpm --filter @evianta/api admin import-price "C:\path\to\price.json"
+```
+
+The command validates the file before connecting, computes `settingsKey`, and
+inserts through the price repository. Do not supply a hash yourself. Rates are
+USD per million tokens; `searchUsdPerRequest` is nullable and does not enable
+unsupported search admission. Set `effectiveAt` no later than the calls it
+should cover. Duplicate IDs or provider/model/settings/version combinations are
+rejected, not overwritten; use a new ID and version for a pricing change.
+
+`settings.maxOutputTokens` must match the dispatched allowance. Custom requests
+with another output allowance need a matching record too. The missing-price
+error includes the requested settings. After prices are provisioned, use
+**Try again** on the failed run. Planning failures with no tasks start planning
+again; task retries retain finished work.
+No API or worker restart is needed to pick up newly active prices.
 
 Document ingestion renews its extraction claim during parsing and OCR. Processing
 and failure transitions are fenced by the live claim and the document snapshot;

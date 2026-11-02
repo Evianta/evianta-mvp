@@ -243,6 +243,50 @@ describe("getUsageEnvironment", () => {
   });
 });
 
+describe("Muse model configuration", () => {
+  const configuration = {
+    EVIANTA_AI_PROVIDER: "muse",
+    EVIANTA_USAGE_MODE: "enforced",
+    MODEL_API_KEY: "test-key",
+    MUSE_SPARK_MODEL: "spark",
+    MUSE_WONDER_MODEL: "wonder",
+    MODEL_MAX_INPUT_TOKENS: "32000",
+    MODEL_MAX_OUTPUT_TOKENS: "2048",
+    USER_MAX_CONCURRENT_RUNS: "2",
+    GLOBAL_MAX_CONCURRENT_RUNS: "10",
+    USER_SPEND_LIMIT_USD: "5",
+    GLOBAL_SPEND_LIMIT_USD: "100",
+    SPEND_PERIOD_SECONDS: "86400",
+  };
+
+  it("resolves legacy shorthand to published Standard-mode API IDs", () => {
+    expect(getAiEnvironment(configuration)).toMatchObject({
+      museBaseUrl: "https://api.meta.ai/v1",
+      museSparkModel: "muse-spark-1.3",
+      museWonderModel: "muse-wonder-1.0",
+    });
+  });
+
+  it("preserves explicit model versions and trims configuration whitespace", () => {
+    expect(
+      getAiEnvironment({
+        ...configuration,
+        MUSE_SPARK_MODEL: " muse-spark-1.2 ",
+        MUSE_WONDER_MODEL: " muse-wonder-1.0 ",
+      }),
+    ).toMatchObject({
+      museSparkModel: "muse-spark-1.2",
+      museWonderModel: "muse-wonder-1.0",
+    });
+  });
+
+  it("still requires nonblank model configuration", () => {
+    expect(() =>
+      getAiEnvironment({ ...configuration, MUSE_SPARK_MODEL: " " }),
+    ).toThrow('Required environment variable "MUSE_SPARK_MODEL" is not set');
+  });
+});
+
 describe("getApiEnvironment", () => {
   const configuration = {
     JWT_SIGNING_KEY: "test-only-signing-key-that-is-at-least-32-bytes",

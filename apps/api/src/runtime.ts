@@ -3,6 +3,7 @@ import {
   MuseProvider,
   createAdmittedUsageAccounting,
   createAi,
+  type ModelSettings,
   type UsageAccounting,
 } from "@evianta/ai";
 import {
@@ -38,6 +39,7 @@ import {
 } from "@evianta/store";
 import type { CaseApiServices } from "./routes.js";
 import { respondToMockRequest } from "./mock-responses.js";
+import { seedMusePrices } from "./muse-pricing.js";
 
 export interface ApiRuntime {
   services: CaseApiServices;
@@ -55,6 +57,13 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
   const documentStoreConfig = getDocumentStoreConfig();
   const aiEnvironment = getAiEnvironment();
   const usage = getUsageEnvironment();
+  const models: ModelSettings = {
+    provider: aiEnvironment.provider,
+    sparkModel: aiEnvironment.museSparkModel ?? "mock-spark",
+    wonderModel: aiEnvironment.museWonderModel ?? "mock-wonder",
+    maxInputTokens: usage.modelMaxInputTokens,
+    maxOutputTokens: usage.modelMaxOutputTokens,
+  };
   const store = await connectMongoStore().catch((error: unknown) => {
     if (
       error instanceof StoreError &&
@@ -68,6 +77,9 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
     throw error;
   });
   try {
+    if (usage.mode === "enforced") {
+      await seedMusePrices(store.repositories.usagePrices, models);
+    }
     const storage = createDocumentStore(documentStoreConfig);
     const checkpointer = await createMongoCheckpointerAsync({
       client: store.client,
@@ -112,13 +124,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
     const ai = createAi({
       provider,
       accounting,
-      models: {
-        provider: aiEnvironment.provider,
-        sparkModel: aiEnvironment.museSparkModel ?? "mock-spark",
-        wonderModel: aiEnvironment.museWonderModel ?? "mock-wonder",
-        maxInputTokens: usage.modelMaxInputTokens,
-        maxOutputTokens: usage.modelMaxOutputTokens,
-      },
+      models,
     });
     const dataAnalysisPlan = createTrivialReferencePlan("data-analysis");
     dataAnalysisPlan.title = "Sales data analysis";

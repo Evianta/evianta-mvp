@@ -5,6 +5,7 @@ import {
   createProgress,
   formatCost,
   isTerminalStatus,
+  progressTitle,
 } from "../src/chat/narration.js";
 import {
   buildResult,
@@ -44,6 +45,20 @@ function event(payload: RunEvent["payload"]): RunEvent {
 const nameOf = (role: string) => `Agent ${role}`;
 
 describe("run narration", () => {
+  it.each([
+    ["completed", "Work finished"],
+    ["partially-completed", "Work partly finished"],
+    ["failed", "Work could not finish"],
+    ["cancelled", "Work stopped"],
+    ["limit-reached", "Usage limit reached"],
+    ["waiting-for-input", "Waiting for your answer"],
+    ["queued", "Working on your task"],
+    ["running", "Working on your task"],
+    ["starting", "Working on your task"],
+  ] as const)("labels %s progress accurately", (status, title) => {
+    expect(progressTitle(status)).toBe(title);
+  });
+
   it("tracks the roster, findings, cost and waiting state from events", () => {
     sequence = 0;
     let state = createProgress("case-1", run);

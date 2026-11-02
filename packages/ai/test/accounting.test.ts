@@ -318,10 +318,13 @@ describe("admitted usage accounting", () => {
   });
 
   it("rejects paid work when no active price is configured", async () => {
-    const { accounting } = setup(null);
-    await expect(accounting.admit(admittedAttempt())).rejects.toBeInstanceOf(
-      AdmissionRejectedError,
-    );
+    const { accounting, admission } = setup(null);
+    await expect(accounting.admit(admittedAttempt())).rejects.toMatchObject({
+      code: "usage-admission-rejected",
+      message:
+        'No active price is configured for muse:spark with settings {"maxOutputTokens":200}. Ask an administrator to import a matching price record.',
+    });
+    expect(admission.reserve).not.toHaveBeenCalled();
   });
 
   it("rejects requested capabilities without a known price", async () => {

@@ -184,8 +184,16 @@ export class ProviderRefusalError extends AiError {
 }
 
 export class ProviderTruncationError extends AiError {
-  constructor(readonly units?: UsageUnits) {
-    super("The model response was truncated", "provider-truncated");
+  constructor(
+    readonly units?: UsageUnits,
+    maxOutputTokens?: number,
+  ) {
+    super(
+      maxOutputTokens === undefined
+        ? "The model response was truncated"
+        : `The model exhausted its ${maxOutputTokens}-token output limit (including reasoning). Increase MODEL_MAX_OUTPUT_TOKENS or request a shorter response, then retry.`,
+      "provider-truncated",
+    );
   }
 }
 
@@ -821,10 +829,24 @@ function normalizeUsage(usage: ApiUsage | undefined): UsageUnits {
   };
 }
 
-function responseText(body: Record<string, unknown>): string {
+function responseText(
+  body: Record<string, unknown>,
+  maxOutputTokens: number,
+): string {
   const units = normalizeUsage(body.usage as ApiUsage | undefined);
   if (body.status === "refused") throw new ProviderRefusalError(units);
-  if (body.status === "incomplete") throw new ProviderTruncationError(units);
+  if (body.status === "incomplete") {
+    const details = body.incomplete_details;
+    const tokenLimitReached =
+      details !== null &&
+      typeof details === "object" &&
+      "reason" in details &&
+      details.reason === "max_output_tokens";
+    throw new ProviderTruncationError(
+      units,
+      tokenLimitReached ? maxOutputTokens : undefined,
+    );
+  }
   if (typeof body.output_text === "string") return body.output_text;
   const choices = body.choices;
   if (Array.isArray(choices)) {
@@ -836,7 +858,7 @@ function responseText(body: Record<string, unknown>): string {
       | undefined;
     if (choice?.message?.refusal) throw new ProviderRefusalError(units);
     if (choice?.finish_reason === "length") {
-      throw new ProviderTruncationError(units);
+      throw new ProviderTruncationError(units, maxOutputTokens);
     }
     if (typeof choice?.message?.content === "string") {
       return choice.message.content;
@@ -1025,7 +1047,7 @@ export class MuseProvider implements ModelProvider {
         };
 
     const response = await this.request(endpoint, body, request.signal);
-    const text = responseText(response);
+    const text = responseText(response, request.maxOutputTokens);
     return {
       text,
       units: normalizeUsage(response.usage as ApiUsage | undefined),
@@ -1115,7 +1137,10 @@ export class MuseProvider implements ModelProvider {
             throw new ProviderRefusalError();
           }
           if (choice?.finish_reason === "length") {
-            throw new ProviderTruncationError();
+            throw new ProviderTruncationError(
+              undefined,
+              request.maxOutputTokens,
+            );
           }
           if (typeof choice?.delta?.content === "string") {
             yield choice.delta.content;
@@ -1178,7 +1203,9 @@ export class MuseProvider implements ModelProvider {
         ? Math.max(0, retryDate - Date.now())
         : undefined;
     return new ProviderRequestError(
-      `The model provider request failed (${response.status})`,
+      response.status === 404
+        ? "The model provider request failed (404). Check MUSE_BASE_URL and the configured model ID against the provider's available models."
+        : `The model provider request failed (${response.status})`,
       response.status,
       retryAfterMs,
     );

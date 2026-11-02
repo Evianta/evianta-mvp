@@ -95,7 +95,9 @@ interface SetupState {
 interface RunQuestions {
   caseId: string;
   runId: string;
-  pending: { messageId: string; question: PendingQuestion }[];
+  messageId: string;
+  questions: PendingQuestion[];
+  uploaded: Set<File>;
   answers: Record<string, { question: string; answer: string }>;
   key: string | null;
 }
@@ -580,7 +582,9 @@ function ChatSession({
         }
         return;
       case "run-question":
-        await answerRunQuestionByText(content, attached);
+        setComposerError(
+          "Complete the questions in the form above to continue.",
+        );
         return;
     }
   }
@@ -977,34 +981,22 @@ function ChatSession({
         );
         return;
       }
-      say(
-        questions.length === 1
-          ? "I need one more detail before the team can continue."
-          : `I need ${questions.length} more details before the team can continue.`,
-      );
-      const pending = questions.map((question) => ({
-        messageId: makeId("q"),
-        question,
-      }));
-      for (const item of pending) {
-        dispatch({
-          type: "add",
-          message: {
-            id: item.messageId,
-            from: "evianta",
-            type: "question",
-            origin: "run",
-            questionId: item.question.id,
-            text: item.question.text,
-            chips: [],
-            hint: "Type your answer below. You can also attach a file.",
-          },
-        });
-      }
+      const messageId = makeId("questions");
+      dispatch({
+        type: "add",
+        message: {
+          id: messageId,
+          from: "evianta",
+          type: "question-form",
+          questions,
+        },
+      });
       runQuestionsRef.current = {
         caseId,
         runId,
-        pending,
+        messageId,
+        questions,
+        uploaded: new Set(),
         answers: {},
         key: null,
       };
@@ -1089,12 +1081,18 @@ function ChatSession({
 
   async function submitResume() {
     const rq = runQuestionsRef.current;
-    if (!rq) return;
+    if (!rq || busyRef.current) return;
     rq.key ??= makeId("resume");
+    dispatch({ type: "patch", id: rq.messageId, patch: { error: null } });
     setBusy(true);
-    setAwaiting(null);
     try {
       await apiRef.current.resumeRun(rq.caseId, rq.runId, rq.answers, rq.key);
+      dispatch({
+        type: "patch",
+        id: rq.messageId,
+        patch: { submitted: true },
+      });
+      setAwaiting(null);
       runQuestionsRef.current = null;
       updateProgress(rq.runId, (state) => ({
         ...state,
@@ -1106,70 +1104,90 @@ function ChatSession({
       if (isStale(reason)) return;
       setAwaiting({ type: "run-question" });
       retryRef.current = () => void submitResume();
-      notice(
-        "danger",
-        `I could not pass your answers on: ${errorText(reason, "Request failed.")}`,
-        { kind: "retry" },
-      );
+      dispatch({
+        type: "patch",
+        id: rq.messageId,
+        patch: {
+          error: `I could not pass your answers on: ${errorText(reason, "Request failed.")} Retry sending them below.`,
+        },
+      });
       setBusy(false);
     }
   }
 
-  async function answerRunQuestion(
+  async function submitRunAnswers(
     messageId: string,
-    answer: string,
-    attached: AttachedFile[],
+    answers: Record<string, string>,
+    files: File[],
   ) {
     const rq = runQuestionsRef.current;
-    if (!rq) return;
-    const item = rq.pending.find((entry) => entry.messageId === messageId);
-    if (!item || rq.answers[item.question.id]) return;
-    let finalAnswer = answer;
-    if (attached.length) {
-      setBusy(true);
-      try {
-        for (const file of attached) {
-          await apiRef.current.uploadDocument(rq.caseId, file.file, "mixed");
-        }
-        await waitUntilReady(rq.caseId);
-        finalAnswer = [
-          answer,
-          `Uploaded: ${attached.map((f) => f.file.name).join(", ")}`,
-        ]
-          .filter(Boolean)
-          .join(". ");
-      } catch (reason) {
-        if (isStale(reason)) return;
-        setBusy(false);
-        setComposerError(
-          `The file could not be added: ${errorText(reason, "Request failed.")}`,
-        );
+    if (!rq || rq.messageId !== messageId || busyRef.current) return;
+    const showError = (error: string | null) =>
+      dispatch({ type: "patch", id: messageId, patch: { error } });
+    if (rq.key) {
+      await submitResume();
+      return;
+    }
+    if (rq.questions.some((question) => !answers[question.id]?.trim())) {
+      showError("Answer every question in the form before continuing.");
+      return;
+    }
+    const maxFiles = configRef.current?.uploadMaxFiles ?? 5;
+    if (files.length > maxFiles) {
+      showError(`Please attach at most ${maxFiles} files.`);
+      return;
+    }
+    for (const file of files) {
+      const error = validateUploadFile(file, limitsFor(configRef.current));
+      if (error) {
+        showError(error);
         return;
       }
-      setBusy(false);
     }
-    rq.answers[item.question.id] = {
-      question: item.question.text,
-      answer: finalAnswer,
-    };
+    showError(null);
+    setBusy(true);
+    try {
+      for (const file of files) {
+        if (rq.uploaded.has(file)) continue;
+        await apiRef.current.uploadDocument(rq.caseId, file, "mixed");
+        rq.uploaded.add(file);
+      }
+      if (files.length) await waitUntilReady(rq.caseId);
+    } catch (reason) {
+      if (isStale(reason)) return;
+      setBusy(false);
+      showError(
+        `The file could not be added: ${errorText(reason, "Request failed.")}`,
+      );
+      return;
+    }
+    rq.answers = Object.fromEntries(
+      rq.questions.map((question) => [
+        question.id,
+        {
+          question: question.text,
+          answer: [
+            answers[question.id]!.trim(),
+            files.length
+              ? `Uploaded: ${files.map((file) => file.name).join(", ")}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(". "),
+        },
+      ]),
+    );
     dispatch({
       type: "patch",
       id: messageId,
-      patch: { answered: finalAnswer },
+      patch: {
+        answers: Object.fromEntries(
+          Object.entries(rq.answers).map(([id, value]) => [id, value.answer]),
+        ),
+      },
     });
-    if (rq.pending.every((entry) => rq.answers[entry.question.id])) {
-      await submitResume();
-    }
-  }
-
-  async function answerRunQuestionByText(
-    content: string,
-    attached: AttachedFile[],
-  ) {
-    const rq = runQuestionsRef.current;
-    const next = rq?.pending.find((entry) => !rq.answers[entry.question.id]);
-    if (!rq || !next) return;
-    await answerRunQuestion(next.messageId, content, attached);
+    setBusy(false);
+    await submitResume();
   }
 
   // ----------------------------------------------------------- hydrate
@@ -1375,8 +1393,9 @@ function ChatSession({
         answerFact(awaiting.fact, messageId, answer);
         return;
       }
-      void answerRunQuestion(messageId, answer, []);
     },
+    questionFileAccept: acceptAttribute,
+    onSubmitAnswers: submitRunAnswers,
     onStop: () => setStopOpen(true),
     onNoticeAction: handleNoticeAction,
     onInspect: (target, caseId) =>
@@ -1387,7 +1406,7 @@ function ChatSession({
   };
 
   const empty = messages.length === 0;
-  const composerDisabled = busy || blocked;
+  const composerDisabled = busy || blocked || awaitingKind === "run-question";
   const readingFiles = composerFiles.some((file) => file.status === "reading");
   const sendDisabled =
     composerDisabled ||
@@ -1398,7 +1417,7 @@ function ChatSession({
     : busy
       ? "Evianta is working..."
       : awaitingKind === "run-question"
-        ? "Type your answer..."
+        ? "Complete the form above to continue."
         : (awaitingHint ?? examplePrompt);
   const inspectWorkspace = inspect?.caseId
     ? (workspaces[inspect.caseId] ?? null)

@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { UserRecord } from "@evianta/core";
 import { getAccessKeyPepper } from "@evianta/env/server";
 import { connectMongoStore } from "@evianta/store";
 import { createUserAccessKey } from "./auth.js";
 import { createPassphraseAccessKey } from "./passphrase.js";
+import { parseUsagePrice } from "./usage-price.js";
 
 function usage(): never {
   throw new Error(
-    "Usage: admin create-user <email> <display-name> [user|admin] | disable-user <user-id> | issue-key <user-id> [expiry-ISO] [--code <your-own-code>] | revoke-key <key-id>",
+    "Usage: admin create-user <email> <display-name> [user|admin] | disable-user <user-id> | issue-key <user-id> [expiry-ISO] [--code <your-own-code>] | revoke-key <key-id> | import-price <json-file>",
   );
 }
 
@@ -41,16 +43,30 @@ async function main(args: string[]): Promise<void> {
       break;
     case "disable-user":
     case "revoke-key":
+    case "import-price":
       if (!values[0]?.trim() || values.length !== 1) usage();
       break;
     default:
       usage();
   }
+  const pricePath = values[0];
+  const price =
+    command === "import-price" && pricePath
+      ? parseUsagePrice(JSON.parse(await readFile(pricePath, "utf8")))
+      : undefined;
   const store = await connectMongoStore();
   try {
     const { users, accessKeys } = store.repositories;
     const now = new Date().toISOString();
     switch (command) {
+      case "import-price": {
+        if (!price) usage();
+        await store.repositories.usagePrices.insert(price);
+        console.info(
+          `Imported price ${price.id} for ${price.provider}:${price.model} (settings ${price.settingsKey}, version ${price.version}, effective ${price.effectiveAt})`,
+        );
+        break;
+      }
       case "create-user": {
         const [email, displayName] = values;
         const roleInput = values[2];

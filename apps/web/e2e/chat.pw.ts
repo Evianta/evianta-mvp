@@ -9,6 +9,39 @@ import {
 
 const message = (page: Page) => page.getByLabel("Message to Evianta");
 
+test("a planning failure is not presented as finished work", async ({
+  page,
+}) => {
+  const errorMessage =
+    'No active price is configured for muse:spark with settings {"maxOutputTokens":2048}. Ask an administrator to import a matching price record.';
+  await mockApi(page, {
+    findings: [],
+    segments: [
+      {
+        final: "failed",
+        events: [
+          {
+            type: "run-failed",
+            error: {
+              code: "usage-admission-rejected",
+              message: errorMessage,
+            },
+          },
+        ],
+      },
+    ],
+  });
+  await page.goto("/#access=jury-amber-falcon-47");
+  await page.getByLabel("Attach records").setInputFiles(csv);
+  await send(page, "Analyze my sales spreadsheet");
+  await expect(page.getByText("Work could not finish")).toBeVisible();
+  await expect(
+    page.getByText(`The run stopped: ${errorMessage}`),
+  ).toBeVisible();
+  await expect(page.getByText("Work finished", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+});
+
 async function send(page: Page, text: string) {
   await message(page).fill(text);
   await page.getByRole("button", { name: "Send message" }).click();
@@ -172,7 +205,7 @@ test("missing documents and facts are requested interactively and recorded", asy
   expect(description).toContain("Not available: your return or income summary");
 });
 
-test("free text answers a question and the run pauses and resumes for mid-run questions", async ({
+test("a clarification form submits answers and resumes the run", async ({
   page,
 }) => {
   const state: MockState = await mockApi(page, { segments: waitingSegments });
@@ -195,9 +228,14 @@ test("free text answers a question and the run pauses and resumes for mid-run qu
   await expect(
     page.getByText("Which bank account were the payments received in?"),
   ).toBeVisible();
-  await expect(message(page)).toBeEnabled();
+  await expect(message(page)).toBeDisabled();
 
-  await send(page, "HDFC current account ending 4821");
+  await page
+    .getByLabel("Which bank account were the payments received in?")
+    .fill("HDFC current account ending 4821");
+  await page
+    .getByRole("button", { name: "Submit answers and continue" })
+    .click();
   await expect(page.getByText("Work finished")).toBeVisible();
   expect(state.resumes).toHaveLength(1);
   expect(state.resumes[0]).toMatchObject({
@@ -212,6 +250,91 @@ test("free text answers a question and the run pauses and resumes for mid-run qu
   await expect(
     page.getByRole("link", { name: "Open full details" }),
   ).toBeVisible();
+});
+
+test("all clarification answers are submitted together with supporting files", async ({
+  page,
+}) => {
+  const questions = [
+    { id: "t1:input:1:q0", text: "What TDS credit was claimed?" },
+    { id: "t1:input:1:q1", text: "What is the response deadline?" },
+    { id: "t1:input:1:q2", text: "Which tax regime applies?" },
+  ];
+  const state = await mockApi(page, {
+    segments: waitingSegments,
+    questions,
+  });
+  await page.goto("/#access=jury-amber-falcon-47");
+  await page.getByLabel("Attach records").setInputFiles(csv);
+  await send(page, "Analyze my sales spreadsheet");
+  const form = page.getByRole("form", { name: "Details needed to continue" });
+  const submit = form.getByRole("button", {
+    name: "Submit answers and continue",
+  });
+  await expect(form.getByRole("textbox")).toHaveCount(3);
+  await expect(submit).toBeDisabled();
+  await form.getByLabel(questions[0]!.text).fill("52000 and 8000");
+  await expect(submit).toBeDisabled();
+  expect(state.resumes).toHaveLength(0);
+  await form.getByLabel(questions[1]!.text).fill("   ");
+  await form.getByLabel(questions[2]!.text).fill("New regime");
+  await expect(submit).toBeDisabled();
+  await form.getByLabel(questions[1]!.text).fill("15 November 2026");
+  await form.getByLabel("Supporting files (optional)").setInputFiles({
+    ...csv,
+    name: "tds.csv",
+  });
+  await submit.click();
+  await expect(page.getByText("Work finished")).toBeVisible();
+  expect(state.resumes).toHaveLength(1);
+  expect(state.resumes[0]).toMatchObject({
+    input: {
+      "t1:input:1:q0": {
+        question: questions[0]!.text,
+        answer: "52000 and 8000. Uploaded: tds.csv",
+      },
+      "t1:input:1:q1": {
+        question: questions[1]!.text,
+        answer: "15 November 2026. Uploaded: tds.csv",
+      },
+      "t1:input:1:q2": {
+        question: questions[2]!.text,
+        answer: "New regime. Uploaded: tds.csv",
+      },
+    },
+  });
+  expect(state.uploads).toEqual(["sales.csv", "tds.csv"]);
+  await expect(form.getByRole("status")).toHaveText(
+    "Answers sent. The team can continue.",
+  );
+  await expect(message(page)).toBeEnabled();
+});
+
+test("clarification form retries keep answers and the resume idempotency key", async ({
+  page,
+}) => {
+  const state = await mockApi(page, {
+    segments: waitingSegments,
+    failResumeOnce: true,
+  });
+  await page.goto("/#access=jury-amber-falcon-47");
+  await page.getByLabel("Attach records").setInputFiles(csv);
+  await send(page, "Analyze my sales spreadsheet");
+  const form = page.getByRole("form", { name: "Details needed to continue" });
+  await form.getByRole("textbox").fill("HDFC current account ending 4821");
+  await form
+    .getByRole("button", { name: "Submit answers and continue" })
+    .click();
+  await expect(form.getByRole("alert")).toContainText(
+    "I could not pass your answers on",
+  );
+  await expect(form.getByRole("textbox")).toHaveValue(
+    "HDFC current account ending 4821",
+  );
+  await form.getByRole("button", { name: "Retry sending answers" }).click();
+  await expect(page.getByText("Work finished")).toBeVisible();
+  expect(state.resumes).toHaveLength(2);
+  expect(state.resumes[1]).toEqual(state.resumes[0]);
 });
 
 test("an uncertain case creation is never resent", async ({ page }) => {

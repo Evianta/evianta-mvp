@@ -134,12 +134,6 @@ select:focus-visible {
   letter-spacing: -0.035em;
 }
 
-.brand-subtitle {
-  margin-top: 1px;
-  color: hsl(var(--muted));
-  font-size: 12px;
-}
-
 .nav-caption {
   padding: 0 10px 9px;
   color: hsl(var(--muted));

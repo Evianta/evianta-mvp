@@ -71,8 +71,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <Link className="brand-lockup" href="/">
           <Image src="/logo.svg" alt="" width={36} height={36} priority />
           <span>
-            <span className="brand-name block">evianta</span>
-            <span className="brand-subtitle block">Evidence Atlas</span>
+            <span className="brand-name block">Evianta</span>
           </span>
         </Link>
         <p className="nav-caption">Workspace</p>

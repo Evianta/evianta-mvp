@@ -18,6 +18,7 @@ import { workflowBlurbs, workflowLabels } from "../chat/analysis";
 import {
   formatCost,
   isTerminalStatus,
+  progressTitle,
   type ProgressState,
 } from "../chat/narration";
 import type { ResultSummary } from "../chat/results";
@@ -32,6 +33,7 @@ import { AgentAvatar } from "./AgentAvatar";
 import { Button } from "./Button";
 import { Chip, type ChipTone } from "./Chip";
 import { StreamedText } from "./StreamedText";
+import { RunQuestionForm } from "./RunQuestionForm";
 
 export interface MessageContext {
   progressFor: (runId: string) => ProgressState | null;
@@ -45,6 +47,12 @@ export interface MessageContext {
   onAttach: () => void;
   onSkipSlot: (messageId: string, slotId: string, label: string) => void;
   onAnswer: (messageId: string, answer: string) => void;
+  questionFileAccept: string;
+  onSubmitAnswers: (
+    messageId: string,
+    answers: Record<string, string>,
+    files: File[],
+  ) => Promise<void>;
   onStop: () => void;
   onNoticeAction: (action: NoticeAction) => void;
   onInspect: (target: InspectTarget, caseId?: string) => void;
@@ -276,6 +284,23 @@ export function MessageView({
           </div>
         </EviantaFrame>
       );
+    case "question-form":
+      return (
+        <EviantaFrame wide>
+          <RunQuestionForm
+            messageId={message.id}
+            questions={message.questions}
+            answers={message.answers}
+            submitted={message.submitted}
+            busy={context.busy}
+            error={message.error}
+            accept={context.questionFileAccept}
+            onSubmit={(answers, files) =>
+              context.onSubmitAnswers(message.id, answers, files)
+            }
+          />
+        </EviantaFrame>
+      );
     case "setup":
       return (
         <EviantaFrame wide>
@@ -360,13 +385,7 @@ function ProgressCard({
   return (
     <div className="card-inline progress-card" aria-live="polite">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-medium">
-          {progress.status === "waiting-for-input"
-            ? "Waiting for your answer"
-            : finished
-              ? "Work finished"
-              : "Working on your task"}
-        </p>
+        <p className="text-sm font-medium">{progressTitle(progress.status)}</p>
         <div className="flex items-center gap-3">
           <span className="mono-number text-xs text-muted-foreground">
             {formatCost(progress.costUsd, progress.costUnknown)}

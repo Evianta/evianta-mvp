@@ -324,12 +324,14 @@ export function getAiEnvironment(
   const usage = getUsageEnvironment(env);
   if (provider === "mock") return { provider, usage };
 
+  const sparkModel = getRequiredEnv("MUSE_SPARK_MODEL", env).trim();
+  const wonderModel = getRequiredEnv("MUSE_WONDER_MODEL", env).trim();
   return {
     provider,
     modelApiKey: getRequiredEnv("MODEL_API_KEY", env),
     museBaseUrl: env.MUSE_BASE_URL ?? "https://api.meta.ai/v1",
-    museSparkModel: getRequiredEnv("MUSE_SPARK_MODEL", env),
-    museWonderModel: getRequiredEnv("MUSE_WONDER_MODEL", env),
+    museSparkModel: sparkModel === "spark" ? "muse-spark-1.3" : sparkModel,
+    museWonderModel: wonderModel === "wonder" ? "muse-wonder-1.0" : wonderModel,
     usage,
   };
 }

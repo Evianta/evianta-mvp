@@ -21,7 +21,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Evianta — Evidence Atlas",
+  title: "Evianta",
   description:
     "A calm, source-first workspace for turning business records into clear, reviewable findings.",
 };

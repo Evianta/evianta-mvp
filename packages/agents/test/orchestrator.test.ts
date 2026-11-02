@@ -1476,6 +1476,55 @@ describe("orchestrator", () => {
     ).rejects.toBeInstanceOf(RunNotFoundError);
   });
 
+  it("retries planning after a missing price fails before any tasks exist", async () => {
+    const plan = planOf([{ key: "a" }, { key: "b" }]);
+    const provider = new ScriptedProvider({
+      ...routes("a", "b"),
+      coordinator: () => ({
+        tasks: plan.tasks.map((task) => ({
+          key: task.key,
+          assignedRole: task.role,
+          dependsOn: task.dependsOn,
+          instructions: task.instructions,
+        })),
+      }),
+    });
+    const h = harness({
+      provider,
+      coordinator: true,
+      reviewer: false,
+      plan,
+    });
+    const priceLookup = vi
+      .spyOn(store.repositories.usagePrices, "findActive")
+      .mockResolvedValueOnce(null);
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("failed");
+    expect(await tasksOf(run.id)).toEqual({});
+    expect(provider.calls).toEqual([]);
+    expect(await ledger()).toEqual([]);
+    expect((await eventsOf(run.id)).at(-1)?.payload).toMatchObject({
+      type: "run-failed",
+      error: { code: "usage-admission-rejected" },
+    });
+    priceLookup.mockRestore();
+
+    const retry = await h.orchestrator.retryFailedAsync({
+      ownerId: OWNER,
+      caseId: CASE_ID,
+      priorRunId: run.id,
+    });
+    expect(retry.priorRunId).toBe(run.id);
+    expect(retry.usage.costUsd).toBe(0);
+    expect(retry.terminalEvent).toBeUndefined();
+    expect((await h.worker.runOnceAsync())?.run?.status).toBe("completed");
+    expect(provider.calls).toEqual(["coordinator", "a", "b"]);
+    expect(
+      (await store.repositories.runs.findOwnedById(run.id, OWNER))?.status,
+    ).toBe("failed");
+    expect(await caseUsage()).toEqual(summarizeUsage(await ledger()));
+  });
+
   it("plans multi-agent cases with the coordinator and counts planning usage", async () => {
     const provider = new ScriptedProvider({
       ...routes("a", "b"),

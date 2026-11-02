@@ -29,6 +29,47 @@ function createAccounting(): UsageAccounting {
 }
 
 describe("@evianta/ai", () => {
+  it("reports actionable 404 errors without exposing provider response bodies", async () => {
+    const fetchImplementation: typeof fetch = vi.fn(
+      async () =>
+        new Response("sensitive provider diagnostics", { status: 404 }),
+    );
+    const provider = new MuseProvider({
+      apiKey: "test-key",
+      fetchImplementation,
+    });
+    const model = modelForTier("cheap", {
+      provider: "muse",
+      sparkModel: "muse-spark-1.3",
+    });
+    const request = {
+      model,
+      system: "Respond",
+      input: "hello",
+      maxOutputTokens: 50,
+      signal: new AbortController().signal,
+    };
+    const expected = {
+      code: "provider-request-failed",
+      statusCode: 404,
+      message:
+        "The model provider request failed (404). Check MUSE_BASE_URL and the configured model ID against the provider's available models.",
+    };
+    await expect(
+      provider.generateStructured({
+        ...request,
+        schema: { type: "string" },
+      }),
+    ).rejects.toMatchObject(expected);
+    const consume = async () => {
+      for await (const chunk of provider.streamText(request)) {
+        throw new Error(`Unexpected stream chunk: ${chunk}`);
+      }
+    };
+    await expect(consume()).rejects.toMatchObject(expected);
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
   it("resolves cheap and mid to Spark and high to Wonder", () => {
     expect(modelForTier("cheap", models).model).toBe("mock-spark");
     expect(modelForTier("mid", models).model).toBe("mock-spark");
@@ -862,5 +903,159 @@ describe("@evianta/ai", () => {
         }),
       );
     }
+  });
+
+  it.each(["chat", "responses"] as const)(
+    "reports %s output exhaustion and records reasoning usage without a paid retry",
+    async (protocol) => {
+      const accounting = createAccounting();
+      const usage = {
+        prompt_tokens: 815,
+        completion_tokens: 2048,
+        total_tokens: 2863,
+        completion_tokens_details: { reasoning_tokens: 2046 },
+      };
+      const fetchImplementation: typeof fetch = vi.fn(async () =>
+        Response.json({
+          ...(protocol === "chat"
+            ? {
+                choices: [
+                  {
+                    finish_reason: "length",
+                    message: { content: "" },
+                  },
+                ],
+              }
+            : {
+                status: "incomplete",
+                incomplete_details: { reason: "max_output_tokens" },
+              }),
+          usage,
+        }),
+      );
+      const client = createAi({
+        provider: new MuseProvider({
+          apiKey: "test-key",
+          fetchImplementation,
+        }),
+        accounting,
+        models: {
+          provider: "muse",
+          sparkModel: "muse-spark-1.3",
+          maxInputTokens: 32_000,
+          maxOutputTokens: 2048,
+        },
+      });
+      await expect(
+        client.runStructured({
+          tier: "cheap",
+          inputSchema: z.string(),
+          outputSchema: z.string(),
+          system: "Return a workflow type",
+          input: "data-analysis",
+          usageContext: { userId: "user-1" },
+        }),
+      ).rejects.toMatchObject({
+        code: "provider-truncated",
+        message:
+          "The model exhausted its 2048-token output limit (including reasoning). Increase MODEL_MAX_OUTPUT_TOKENS or request a shorter response, then retry.",
+      });
+      expect(fetchImplementation).toHaveBeenCalledTimes(1);
+      expect(accounting.admit).toHaveBeenCalledTimes(1);
+      expect(accounting.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outcome: "failed",
+          errorCode: "provider-truncated",
+          units: expect.objectContaining({
+            input: 815,
+            output: 2048,
+            reasoning: 2046,
+            total: 2863,
+          }),
+        }),
+      );
+    },
+  );
+
+  it("admits and dispatches the larger reasoning-inclusive output allowance", async () => {
+    const accounting = createAccounting();
+    const fetchImplementation: typeof fetch = vi.fn(async () =>
+      Response.json({
+        choices: [
+          {
+            finish_reason: "stop",
+            message: { content: '"data-analysis"' },
+          },
+        ],
+        usage: {
+          prompt_tokens: 815,
+          completion_tokens: 2500,
+          total_tokens: 3315,
+          completion_tokens_details: { reasoning_tokens: 2046 },
+        },
+      }),
+    );
+    const client = createAi({
+      provider: new MuseProvider({ apiKey: "test-key", fetchImplementation }),
+      accounting,
+      models: {
+        provider: "muse",
+        sparkModel: "muse-spark-1.3",
+        maxInputTokens: 32_000,
+        maxOutputTokens: 16384,
+      },
+    });
+    const result = await client.runStructured({
+      tier: "cheap",
+      inputSchema: UseCaseSchema,
+      outputSchema: UseCaseSchema,
+      system: "Return a workflow type",
+      input: "data-analysis",
+      usageContext: { userId: "user-1" },
+    });
+    expect(result.output).toBe("data-analysis");
+    expect(accounting.admit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxOutputTokens: 16384,
+        settings: { maxOutputTokens: 16384 },
+      }),
+    );
+    const [, init] = vi.mocked(fetchImplementation).mock.calls[0]!;
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      model: "muse-spark-1.3",
+      max_tokens: 16384,
+    });
+    expect(accounting.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "success",
+        units: expect.objectContaining({ output: 2500, reasoning: 2046 }),
+      }),
+    );
+  });
+
+  it("distinguishes streamed token exhaustion from a prematurely ended stream", async () => {
+    const provider = new MuseProvider({
+      apiKey: "test-key",
+      fetchImplementation: async () =>
+        new Response('data: {"choices":[{"finish_reason":"length"}]}\n\n'),
+    });
+    const consume = async () => {
+      for await (const chunk of provider.streamText({
+        model: modelForTier("cheap", {
+          provider: "muse",
+          sparkModel: "muse-spark-1.3",
+        }),
+        system: "Respond",
+        input: "hello",
+        maxOutputTokens: 100,
+        signal: new AbortController().signal,
+      })) {
+        throw new Error(`Unexpected stream chunk: ${chunk}`);
+      }
+    };
+    await expect(consume()).rejects.toMatchObject({
+      code: "provider-truncated",
+      message: expect.stringContaining("100-token output limit"),
+    });
   });
 });

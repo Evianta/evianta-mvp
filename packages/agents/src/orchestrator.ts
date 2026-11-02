@@ -414,7 +414,9 @@ export class Orchestrator {
     }
     const scope = { ownerId: input.ownerId, caseId: caseRecord.id };
     const priorTasks = await this.repos.tasks.listForRun(prior.id, scope);
+    const retryPlanning = prior.status === "failed" && priorTasks.length === 0;
     if (
+      !retryPlanning &&
       !priorTasks.some(
         (task) => task.status === "failed" || task.status === "skipped",
       )

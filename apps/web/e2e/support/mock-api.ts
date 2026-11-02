@@ -25,6 +25,8 @@ export interface MockOptions {
   }[];
   failUploadOnce?: string;
   seedCase?: boolean;
+  questions?: { id: string; text: string }[];
+  failResumeOnce?: boolean;
 }
 
 export interface MockState {
@@ -205,17 +207,21 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
                 severity: "low",
               }),
               severity: "info",
-              openQuestions: [
-                {
-                  id: "t1:input:1:q0",
-                  text: "Which bank account were the payments received in?",
-                  severity: "medium",
-                  status: "open",
-                  resolutionNote: null,
-                  actorId: null,
-                  updatedAt: null,
-                },
-              ],
+              openQuestions: (
+                options.questions ?? [
+                  {
+                    id: "t1:input:1:q0",
+                    text: "Which bank account were the payments received in?",
+                  },
+                ]
+              ).map((question) => ({
+                ...question,
+                severity: "medium",
+                status: "open",
+                resolutionNote: null,
+                actorId: null,
+                updatedAt: null,
+              })),
             },
           ]
         : [];
@@ -362,6 +368,9 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
     state.resumes.push(
       route.request().postDataJSON() as Record<string, unknown>,
     );
+    if (options.failResumeOnce && state.resumes.length === 1) {
+      return route.abort("failed");
+    }
     state.status = "running";
     return json(route, { outcome: "finalized", run: run("running") });
   });

@@ -195,6 +195,25 @@ export function isTerminalStatus(status: ProgressState["status"]): boolean {
   ].includes(status);
 }
 
+export function progressTitle(status: ProgressState["status"]): string {
+  switch (status) {
+    case "completed":
+      return "Work finished";
+    case "partially-completed":
+      return "Work partly finished";
+    case "failed":
+      return "Work could not finish";
+    case "cancelled":
+      return "Work stopped";
+    case "limit-reached":
+      return "Usage limit reached";
+    case "waiting-for-input":
+      return "Waiting for your answer";
+    default:
+      return "Working on your task";
+  }
+}
+
 export function formatCost(costUsd: number | null, unknown: boolean): string {
   if (unknown) return "Cost unknown";
   if (costUsd === null) return "Cost pending";
