@@ -77,17 +77,22 @@ const attachmentMimeTypes: Record<string, string> = {
   ".text": "text/plain",
   ".md": "text/markdown",
   ".markdown": "text/markdown",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".webp": "image/webp",
-  ".gif": "image/gif",
-  ".bmp": "image/bmp",
-  ".tif": "image/tiff",
-  ".tiff": "image/tiff",
 };
 const allowedExtensions = Object.keys(attachmentMimeTypes);
 const allowedMimeTypes = [...new Set(Object.values(attachmentMimeTypes))];
+const tabularSourceExtensions = new Set([
+  ".csv",
+  ".tsv",
+  ".tab",
+  ".xlsx",
+  ".xls",
+  ".json",
+]);
+
+export function isTabularSource(fileName: string): boolean {
+  const extension = /\.[^.]+$/.exec(fileName)?.[0].toLowerCase();
+  return extension !== undefined && tabularSourceExtensions.has(extension);
+}
 
 export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
   "data-analysis": {

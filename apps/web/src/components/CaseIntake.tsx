@@ -23,6 +23,7 @@ import {
   inferIntakeWorkflow,
   formatFileSize,
   intakeCaseDetails,
+  isTabularSource,
   starterPrompts,
   validateUploadFile,
   workflowSpecs,
@@ -283,6 +284,15 @@ function TaskComposer({
         useCase === "data-analysis"
           ? "Attach a source dataset before starting data analysis."
           : "Attach the source records before starting this task.",
+      );
+      return;
+    }
+    if (
+      useCase === "data-analysis" &&
+      !files.some(({ file }) => isTabularSource(file.name))
+    ) {
+      setError(
+        "Attach at least one CSV, TSV, Excel, or JSON dataset before starting data analysis.",
       );
       return;
     }

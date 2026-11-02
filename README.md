@@ -106,12 +106,12 @@ existing model limits. File limits and enabled workflows come from the authentic
 available for live work.
 
 All three workflows accept CSV, TSV, Excel (`.xlsx`/`.xls`), JSON, plain text,
-Markdown (`.md`/`.markdown`), PDF and supported images (PNG, JPEG, WebP, GIF,
-BMP and TIFF). The file picker and drag-and-drop use the same type and size
+Markdown (`.md`/`.markdown`) and PDF. Image uploads are not enabled because OCR
+is not configured. The file picker and drag-and-drop use the same type and size
 checks; the API still validates file contents before extraction. Markdown and
 other text records are extracted without OCR and shown as plain text in the
-evidence viewer, not rendered as HTML. Data analysis still needs a usable
-tabular dataset; supporting documents do not replace it.
+evidence viewer, not rendered as HTML. Data analysis requires at least one CSV,
+TSV, Excel or JSON dataset; supporting documents do not replace it.
 
 For the synthetic tax-notice and MSME test packs, attach only the source files
 for one case at a time. Exclude evaluator answer keys such as

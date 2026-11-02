@@ -6,6 +6,7 @@ import {
   intakeCaseDetails,
   starterPrompts,
   inferIntakeWorkflow,
+  isTabularSource,
 } from "../src/intake.js";
 
 describe("case intake", () => {
@@ -145,14 +146,34 @@ describe("case intake", () => {
           ".csv",
           ".xlsx",
           ".pdf",
-          ".png",
         ]),
       );
+      expect(spec.allowedExtensions).not.toContain(".png");
       for (const name of ["notice.docx", "notice.exe", "notice"]) {
         expect(
           validateUploadFile({ name, size: 100, type: "text/plain" }, spec),
         ).toContain("file type");
       }
+      expect(
+        validateUploadFile(
+          { name: "scan.png", size: 100, type: "image/png" },
+          spec,
+        ),
+      ).toContain("file type");
+    },
+  );
+
+  it.each([".csv", ".tsv", ".tab", ".xlsx", ".xls", ".json"])(
+    "recognizes %s as a tabular data source",
+    (extension) => {
+      expect(isTabularSource(`sales${extension}`)).toBe(true);
+    },
+  );
+
+  it.each([".pdf", ".txt", ".md", ".png"])(
+    "does not recognize %s as a tabular data source",
+    (extension) => {
+      expect(isTabularSource(`supporting-document${extension}`)).toBe(false);
     },
   );
 });
