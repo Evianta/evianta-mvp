@@ -283,6 +283,29 @@ describe("MSME payment workflow", () => {
       openQuestions: [{ severity: "high" }],
     });
     expect(finding?.description).toContain(reason);
+    expect(result.output.summary).toContain("could not be calculated");
+  });
+
+  it("retains source evidence for records that block reconciliation", async () => {
+    const invoice = sourceFinding("invoice amount: INV-1", 100, "invoice-1");
+    documentSource(invoice).confidence = "low";
+
+    const result = await reconciler().run(
+      reconciliationInput([
+        invoice,
+        sourceFinding("payment amount: PAY-1", 50, "payment-1"),
+      ]),
+      contextFor(testAi(), "payment-task"),
+    );
+
+    expect(result.output.findings[0]?.evidence).toContainEqual(
+      expect.objectContaining({
+        kind: "document",
+        sourceRef: "invoice-1#page=1",
+      }),
+    );
+    expect(result.output.findings[0]?.claims).toEqual([]);
+    expect(result.output.summary).toContain("could not be calculated");
   });
 
   it("refuses to calculate when multiple record claims share one finding", async () => {

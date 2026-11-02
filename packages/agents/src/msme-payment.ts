@@ -343,13 +343,13 @@ function collectRecords(
         `The amount of ${name} has no source-linked evidence.`,
       );
     }
+    for (const source of record.sources) sources.add(source);
     if (record.problems.size) {
       problems.push(...record.problems);
       continue;
     }
     total += [...record.amounts][0]!;
     count += 1;
-    for (const source of record.sources) sources.add(source);
   }
   return { total: roundMoney(total), count, sources: [...sources], problems };
 }
@@ -460,9 +460,13 @@ function createMsmePaymentReconciliationAgent(): SpecialistAgent {
         collectRecords(input.priorFindings, "invoice"),
         collectRecords(input.priorFindings, "payment"),
       );
+      const calculated = finding.claims.some(
+        (claim) => claim.label === "outstanding balance",
+      );
       const output = SpecialistOutputSchema.parse({
-        summary:
-          "The outstanding balance is calculated from confirmed invoice and payment totals.",
+        summary: calculated
+          ? "The outstanding balance is calculated from confirmed invoice and payment totals."
+          : "The outstanding balance could not be calculated; resolve the listed record and evidence issues first.",
         findings: [finding],
         inputRequired: null,
       });
