@@ -1485,16 +1485,26 @@ export class Orchestrator {
     const reviewer = this.options.reviewer!;
     const limit = this.options.ai.inputTokenLimit(reviewer.modelTier) - 256;
     const schema = z.toJSONSchema(reviewer.outputSchema);
-    const fits = (candidate: ReviewInput) =>
+    const fits = (findings: PriorFinding[]) =>
       inputTokenAllowance({
         system: reviewer.systemPrompt,
-        input: candidate,
+        input: { ...input, findings },
         schema,
       }) <= limit;
-    if (fits(input)) return input;
-    const trim = (maxChars: number): ReviewInput => ({
+    return {
       ...input,
-      findings: input.findings.map((finding) => ({
+      findings: this.budgetSourceExcerpts(input.findings, fits, "Review"),
+    };
+  }
+
+  private budgetSourceExcerpts(
+    findings: PriorFinding[],
+    fits: (findings: PriorFinding[]) => boolean,
+    label: string,
+  ): PriorFinding[] {
+    if (fits(findings)) return findings;
+    const trim = (maxChars: number): PriorFinding[] =>
+      findings.map((finding) => ({
         ...finding,
         sourceEvidence: finding.sourceEvidence?.map((evidence) => {
           const quote = evidence.location?.textQuote;
@@ -1523,18 +1533,17 @@ export class Orchestrator {
               : {}),
           };
         }),
-      })),
-    });
+      }));
     if (!fits(trim(1))) {
       throw new AiError(
-        "Review findings and source identities exceed the configured input limit even with minimal excerpts.",
+        `${label} findings and source identities exceed the configured input limit even with minimal excerpts.`,
         "input-limit-exceeded",
       );
     }
     let low = 1;
     let high = Math.max(
       1,
-      ...input.findings.flatMap((finding) =>
+      ...findings.flatMap((finding) =>
         (finding.sourceEvidence ?? []).flatMap((evidence) => [
           evidence.location?.textQuote?.length ?? 0,
           evidence.citation?.span?.length ?? 0,
@@ -1547,7 +1556,7 @@ export class Orchestrator {
       else high = mid - 1;
     }
     this.logger.warn(
-      "Review source excerpts were shortened to fit the input budget",
+      `${label} source excerpts were shortened to fit the input budget`,
       {
         maxExcerptChars: low,
       },
@@ -1941,6 +1950,21 @@ export class Orchestrator {
           documents: [],
           humanInput: humanInput ?? null,
         };
+        if (specialist!.usesModelInput) {
+          const schema = z.toJSONSchema(specialist!.outputSchema);
+          const limit =
+            this.options.ai.inputTokenLimit(specialist!.modelTier) - 256;
+          input.priorFindings = this.budgetSourceExcerpts(
+            input.priorFindings,
+            (priorFindings) =>
+              inputTokenAllowance({
+                system: specialist!.systemPrompt,
+                input: { ...input, priorFindings },
+                schema,
+              }) <= limit,
+            "Specialist",
+          );
+        }
         const documents = await this.documentSlicesAsync(
           execution,
           specialist!,

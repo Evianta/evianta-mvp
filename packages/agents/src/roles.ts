@@ -100,6 +100,10 @@ export function createSpecialistAgent(
   profile: AgentProfile,
   systemPrompt: string,
 ): SpecialistAgent {
+  systemPrompt = [
+    systemPrompt,
+    "Source excerpts marked excerptsTruncated are partial. Preserve their evidence IDs and source locations, and flag material assertions that cannot be supported by the supplied excerpts.",
+  ].join("\n");
   const structured = defineStructuredAgent({
     profile,
     systemPrompt,

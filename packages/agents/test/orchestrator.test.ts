@@ -101,6 +101,187 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
+  it.each(["source text ".repeat(250), "é".repeat(2_750)])(
+    "budgets repeated tax drafting excerpts (scenario %#)",
+    async (quote) => {
+      await store.repositories.cases.replaceOwned(
+        makeCase(CASE_ID, { useCase: "tax-notice" }),
+        OWNER,
+      );
+      const provider = new ScriptedProvider({
+        "case-analysis": () => ({
+          summary: "Extracted figures",
+          inputRequired: null,
+          findings: [
+            "return income",
+            "notice income",
+            "claimed credit",
+            "available credit",
+          ].map((label, index) => {
+            const finding = specialistOutput(label).findings[0]!;
+            return {
+              ...finding,
+              confidence: 1,
+              evidence: [
+                { ...finding.evidence[0]!, textQuote: quote },
+                {
+                  kind: "research",
+                  sourceRef: "https://www.incometax.gov.in/",
+                  confidence: "medium",
+                  documentId: null,
+                  page: null,
+                  textQuote: quote,
+                  url: "https://www.incometax.gov.in/",
+                  title: "Official guidance",
+                  claim: "A source for professional verification.",
+                },
+              ],
+              claims: [
+                {
+                  label,
+                  value: 100 + index * 10,
+                  components: null,
+                  date: null,
+                },
+              ],
+            };
+          }),
+        }),
+        "response-preparation": () => specialistOutput("response"),
+        review: () => reviewOutput,
+      });
+      const h = harness({
+        provider,
+        plan: createTaxNoticePlan(),
+        specialists: createTaxNoticeSpecialists(),
+      });
+      const { result } = await startRunAsync(h);
+      expect(result?.run?.status).toBe("completed");
+      const input = SpecialistInputSchema.parse(
+        provider.inputs.get("response-preparation")![0],
+      );
+      const drafter = createTaxNoticeSpecialists().find(
+        (agent) => agent.role === TAX_RESPONSE_DRAFTER_ROLE,
+      )!;
+      expect(
+        inputTokenAllowance({
+          system: drafter.systemPrompt,
+          input,
+          schema: z.toJSONSchema(drafter.outputSchema),
+        }),
+      ).toBeLessThanOrEqual(32_000 - 256);
+      const storedFindings =
+        await store.repositories.findings.listForCase(scope);
+      const storedEvidence =
+        await store.repositories.evidence.listForCase(scope);
+      expect(input.priorFindings).toHaveLength(7);
+      expect(
+        inputTokenAllowance({
+          system: drafter.systemPrompt,
+          input: {
+            ...input,
+            documents: [],
+            priorFindings: input.priorFindings.map((finding) => ({
+              ...finding,
+              sourceEvidence: finding.sourceEvidence?.map((evidence) => ({
+                ...evidence,
+                ...(evidence.location
+                  ? { location: { ...evidence.location, textQuote: quote } }
+                  : {}),
+                ...(evidence.citation
+                  ? { citation: { ...evidence.citation, span: quote } }
+                  : {}),
+              })),
+            })),
+          },
+          schema: z.toJSONSchema(drafter.outputSchema),
+        }),
+      ).toBeGreaterThan(32_000);
+      for (const finding of input.priorFindings) {
+        const stored = storedFindings.find(
+          (item) => item.id === finding.findingId,
+        )!;
+        expect(finding).toMatchObject({
+          description: stored.description,
+          evidenceIds: stored.evidenceIds,
+          assumptions: stored.assumptions,
+          openQuestions: stored.openQuestions,
+        });
+        for (const evidence of finding.sourceEvidence ?? []) {
+          const original = storedEvidence.find(
+            (item) => item.id === evidence.evidenceId,
+          )!;
+          expect(evidence).toMatchObject({
+            sourceRef: original.sourceRef,
+            confidence: original.confidence,
+            excerptsTruncated: true,
+          });
+          if (original.kind === "document") {
+            expect(evidence.location).toEqual({
+              ...original.location,
+              textQuote: expect.any(String),
+            });
+            expect(original.location.textQuote).toBe(quote);
+            expect(evidence.location!.textQuote!.length).toBeLessThan(
+              quote.length,
+            );
+          } else {
+            expect(evidence.citation).toEqual({
+              url: original.citation.url,
+              title: original.citation.title,
+              claim: original.citation.claim,
+              span: expect.any(String),
+            });
+            expect(original.citation.span).toBe(quote);
+            expect(evidence.citation!.span!.length).toBeLessThan(quote.length);
+          }
+        }
+      }
+      const reconciled = input.priorFindings.filter(
+        (finding) => finding.role === TAX_RECONCILIATION_ROLE,
+      );
+      expect(reconciled).toHaveLength(2);
+      expect(reconciled.map((finding) => finding.claims[0]?.value)).toEqual([
+        10, 10,
+      ]);
+      expect(
+        input.priorFindings
+          .filter((finding) => finding.role === TAX_NOTICE_ANALYST_ROLE)
+          .flatMap((finding) => finding.claims),
+      ).toEqual(
+        [
+          "return income",
+          "notice income",
+          "claimed credit",
+          "available credit",
+        ].map((label, index) => ({
+          label,
+          value: 100 + index * 10,
+          components: null,
+          date: null,
+        })),
+      );
+      expect(provider.count("response-preparation")).toBe(1);
+    },
+  );
+
+  it("fails explicitly when mandatory specialist findings exceed the input budget", async () => {
+    const provider = new ScriptedProvider({
+      a: () => specialistOutput("a", { description: "x".repeat(50_000) }),
+      b: () => specialistOutput("b"),
+    });
+    const h = harness({
+      provider,
+      plan: planOf([{ key: "a" }, { key: "b", dependsOn: ["a"] }]),
+    });
+    const { run } = await startRunAsync(h);
+    expect((await tasksOf(run.id)).b).toMatchObject({
+      status: "failed",
+      lastError: { code: "input-limit-exceeded" },
+    });
+    expect(provider.count("b")).toBe(0);
+  });
+
   it("budgets repeated review excerpts without dropping findings or source positions", async () => {
     const keys = ["a", "b", "c"];
     const quote = "é".repeat(14_000);

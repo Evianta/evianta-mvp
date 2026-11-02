@@ -126,11 +126,13 @@ copy those arrays into model inputs.
 Reconciliation requires confidence of at least 0.75 for the extraction and every
 page, no extraction warnings, and no handwritten pages. Model-generated
 confidence cannot override these checks.
-Independent review shortens source excerpts when needed to fit its input budget,
+Model-based specialists and independent review shorten source excerpts when
+needed to fit their input budgets,
 marks them as partial, and retains all findings, claims, evidence IDs and source
 positions. Stored evidence remains unchanged. If the required findings and
-source identities still cannot fit, review fails explicitly rather than dropping
-them.
+source identities still cannot fit, the task fails explicitly rather than dropping
+them. Specialist excerpts are budgeted before adding document slices. Deterministic
+reconciliation retains complete source excerpts.
 Search citations without a claim retain a source
 discovery note, not an inferred legal conclusion; excerpts stay as quotes.
 Unavailable search raises a

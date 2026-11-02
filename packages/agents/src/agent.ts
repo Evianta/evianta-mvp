@@ -127,6 +127,8 @@ export interface Agent<I, O, ModelOutput = O> {
   systemPrompt: string;
   inputSchema: ZodType<I>;
   outputSchema: ZodType<ModelOutput>;
+  /** The complete agent input is sent to the model and must fit its budget. */
+  usesModelInput?: boolean;
   tools?: Tool[];
   profile: AgentProfile;
   run(input: I, ctx: AgentContext): Promise<AgentResult<O>>;
@@ -164,6 +166,7 @@ export function defineStructuredAgent<I, O>(definition: {
     systemPrompt: definition.systemPrompt,
     inputSchema: definition.inputSchema,
     outputSchema: definition.outputSchema,
+    usesModelInput: true,
     tools: definition.tools,
     profile: definition.profile,
     async run(input, ctx) {
