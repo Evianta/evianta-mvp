@@ -25,6 +25,7 @@ export interface MockOptions {
   }[];
   failUploadOnce?: string;
   seedCase?: boolean;
+  seedStatus?: RunDto["status"];
   questions?: { id: string; text: string }[];
   failResumeOnce?: boolean;
 }
@@ -169,7 +170,7 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
       uploadedAt: timestamp,
       processedAt: timestamp,
     });
-    state.status = "completed";
+    state.status = options.seedStatus ?? "completed";
   }
   const run = (status: RunDto["status"]) => ({
     id: "run-1",

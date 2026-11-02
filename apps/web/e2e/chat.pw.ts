@@ -255,6 +255,7 @@ test("a clarification form submits answers and resumes the run", async ({
 test("all clarification answers are submitted together with supporting files", async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
   const questions = [
     { id: "t1:input:1:q0", text: "What TDS credit was claimed?" },
     { id: "t1:input:1:q1", text: "What is the response deadline?" },
@@ -272,6 +273,10 @@ test("all clarification answers are submitted together with supporting files", a
     name: "Submit answers and continue",
   });
   await expect(form.getByRole("textbox")).toHaveCount(3);
+  const accessibility = await new AxeBuilder({ page })
+    .include('form[aria-label="Details needed to continue"]')
+    .analyze();
+  expect(accessibility.violations).toEqual([]);
   await expect(submit).toBeDisabled();
   await form.getByLabel(questions[0]!.text).fill("52000 and 8000");
   await expect(submit).toBeDisabled();
@@ -335,6 +340,74 @@ test("clarification form retries keep answers and the resume idempotency key", a
   await expect(page.getByText("Work finished")).toBeVisible();
   expect(state.resumes).toHaveLength(2);
   expect(state.resumes[1]).toEqual(state.resumes[0]);
+});
+
+test("a saved waiting case opens its clarification form and resumes", async ({
+  page,
+}) => {
+  const state = await mockApi(page, {
+    segments: waitingSegments,
+    seedCase: true,
+    seedStatus: "waiting-for-input",
+  });
+  await page.goto("/?case=case-1#access=jury-amber-falcon-47");
+  const form = page.getByRole("form", { name: "Details needed to continue" });
+  await expect(form).toBeVisible();
+  await form.getByRole("textbox").fill("HDFC current account ending 4821");
+  await form
+    .getByRole("button", { name: "Submit answers and continue" })
+    .click();
+  await expect(page.getByText("Work finished")).toBeVisible();
+  expect(state.runs).toBe(0);
+  expect(state.resumes).toHaveLength(1);
+});
+
+test("clarification attachment errors preserve answers and retry only missing uploads", async ({
+  page,
+}) => {
+  const state = await mockApi(page, {
+    segments: waitingSegments,
+    failUploadOnce: "second.csv",
+  });
+  await page.goto("/#access=jury-amber-falcon-47");
+  await page.getByLabel("Attach records").setInputFiles(csv);
+  await send(page, "Analyze my sales spreadsheet");
+  const form = page.getByRole("form", { name: "Details needed to continue" });
+  await form.getByRole("textbox").fill("HDFC current account ending 4821");
+  const submit = form.getByRole("button", {
+    name: "Submit answers and continue",
+  });
+  await form.getByLabel("Supporting files (optional)").setInputFiles({
+    name: "invalid.exe",
+    mimeType: "application/octet-stream",
+    buffer: Buffer.from("MZ"),
+  });
+  await submit.click();
+  await expect(form.getByRole("alert")).toContainText(
+    "This workflow does not accept that file type.",
+  );
+  expect(state.uploadAttempts).toEqual(["sales.csv"]);
+  await form.getByLabel("Supporting files (optional)").setInputFiles([
+    { ...csv, name: "first.csv" },
+    { ...csv, name: "second.csv" },
+  ]);
+  await submit.click();
+  await expect(form.getByRole("alert")).toContainText(
+    "The file could not be added",
+  );
+  expect(state.resumes).toHaveLength(0);
+  await expect(form.getByRole("textbox")).toHaveValue(
+    "HDFC current account ending 4821",
+  );
+  await submit.click();
+  await expect(page.getByText("Work finished")).toBeVisible();
+  expect(state.resumes).toHaveLength(1);
+  expect(state.uploadAttempts).toEqual([
+    "sales.csv",
+    "first.csv",
+    "second.csv",
+    "second.csv",
+  ]);
 });
 
 test("an uncertain case creation is never resent", async ({ page }) => {
