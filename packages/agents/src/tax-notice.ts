@@ -49,6 +49,8 @@ const profile = (
   ],
   modelTier,
   enabled: true,
+  kind: "specialist",
+  workflows: ["tax-notice"],
 });
 
 export const taxNoticeAnalystProfile = profile(

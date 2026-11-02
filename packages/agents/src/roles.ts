@@ -38,10 +38,10 @@ export const GENERIC_ANALYST_ROLE = "generic-analyst";
 export const coordinatorProfile: AgentProfile = {
   id: "agent-coordinator",
   role: COORDINATOR_ROLE,
-  displayName: "Engagement Coordinator",
-  specialty: "Work planning",
+  displayName: "Evianta",
+  specialty: "Lead agent and work planning",
   summary:
-    "Plans a case into a validated task graph adapted to the uploaded documents.",
+    "Your lead agent. Understands the task, asks for what is missing, plans the work across specialists and brings back a review-ready result.",
   capabilities: [
     "Adapt the reference plan to uploaded documents",
     "Assign specialist roles and dependencies",
@@ -55,6 +55,8 @@ export const coordinatorProfile: AgentProfile = {
   limitations: ["Does not perform specialist analysis itself"],
   modelTier: "mid",
   enabled: true,
+  kind: "lead",
+  workflows: ["data-analysis", "tax-notice", "msme-payment"],
 };
 
 export const reviewerProfile: AgentProfile = {
@@ -78,6 +80,8 @@ export const reviewerProfile: AgentProfile = {
   limitations: ["Does not approve deliverables"],
   modelTier: "high",
   enabled: true,
+  kind: "reviewer",
+  workflows: ["data-analysis", "tax-notice", "msme-payment"],
 };
 
 export const genericAnalystProfile: AgentProfile = {
@@ -94,6 +98,8 @@ export const genericAnalystProfile: AgentProfile = {
   limitations: ["No workflow-specific expertise"],
   modelTier: "cheap",
   enabled: true,
+  kind: "specialist",
+  workflows: [],
 };
 
 export function createSpecialistAgent(

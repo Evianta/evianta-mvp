@@ -4,13 +4,21 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useRef,
   useState,
   type FormEvent,
   type ReactNode,
 } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { KeyRound, LoaderCircle, LockKeyhole, X } from "lucide-react";
+import {
+  Eye,
+  EyeOff,
+  KeyRound,
+  LoaderCircle,
+  LockKeyhole,
+  X,
+} from "lucide-react";
 import { Button } from "./Button";
 import { useSession } from "../session/SessionProvider";
 
@@ -26,14 +34,45 @@ export function AccessKeyDialogProvider({ children }: { children: ReactNode }) {
   const [accessKey, setAccessKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [reveal, setReveal] = useState(false);
   const successCallback = useRef<(() => void) | undefined>(undefined);
-  const { signIn } = useSession();
+  const { signIn, restoring, session } = useSession();
+  const linkHandled = useRef(false);
 
   const openAccessKeyDialog = useCallback((onSuccess?: () => void) => {
     successCallback.current = onSuccess;
     setError(null);
     setOpen(true);
   }, []);
+
+  // A shared link like /#access=<code> signs in once. The fragment never reaches the server and is removed from the address bar immediately.
+  useEffect(() => {
+    if (restoring || linkHandled.current) return;
+    linkHandled.current = true;
+    const match = /^#access=(.+)$/.exec(window.location.hash);
+    if (!match?.[1]) return;
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}`,
+    );
+    if (session) return;
+    let code: string;
+    try {
+      code = decodeURIComponent(match[1]);
+    } catch {
+      setError("That sign-in link is not valid.");
+      setOpen(true);
+      return;
+    }
+    setPending(true);
+    void signIn(code)
+      .catch((reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : "Sign-in failed.");
+        setOpen(true);
+      })
+      .finally(() => setPending(false));
+  }, [restoring, session, signIn]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -63,6 +102,7 @@ export function AccessKeyDialogProvider({ children }: { children: ReactNode }) {
           setOpen(nextOpen);
           if (!nextOpen) {
             setAccessKey("");
+            setReveal(false);
             setError(null);
             successCallback.current = undefined;
           }
@@ -88,8 +128,8 @@ export function AccessKeyDialogProvider({ children }: { children: ReactNode }) {
                     className="mt-1 text-sm text-muted-foreground"
                   >
                     Your key is never saved. This browser saves your session
-                    token to keep you signed in across reloads until the
-                    30-minute session expires or you sign out.
+                    token to keep you signed in across reloads until the session
+                    expires or you sign out.
                   </Dialog.Description>
                 </div>
               </div>
@@ -112,12 +152,27 @@ export function AccessKeyDialogProvider({ children }: { children: ReactNode }) {
                 <input
                   id="access-key"
                   className="text-input"
-                  type="password"
+                  type={reveal ? "text" : "password"}
                   autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   value={accessKey}
                   onChange={(event) => setAccessKey(event.target.value)}
                   required
                 />
+                <button
+                  type="button"
+                  className="icon-button input-trailing"
+                  aria-label={reveal ? "Hide characters" : "Show characters"}
+                  aria-pressed={reveal}
+                  onClick={() => setReveal((current) => !current)}
+                >
+                  {reveal ? (
+                    <EyeOff size={16} aria-hidden="true" />
+                  ) : (
+                    <Eye size={16} aria-hidden="true" />
+                  )}
+                </button>
               </div>
               {error && (
                 <p className="text-sm text-danger" role="alert">
@@ -135,8 +190,8 @@ export function AccessKeyDialogProvider({ children }: { children: ReactNode }) {
                 Continue
               </Button>
               <p className="text-xs leading-relaxed text-muted-foreground">
-                Sessions expire after 30 minutes. Reloading or signing out
-                requires your key again.
+                Your session lasts a limited time. After it ends, or when you
+                sign out, enter your key again.
               </p>
             </form>
           </Dialog.Content>

@@ -5,21 +5,40 @@ import { useRouter } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Command } from "cmdk";
 import { ArrowRight, Command as CommandIcon, Search } from "lucide-react";
+import { useSession } from "../session/SessionProvider";
 
 const commands = [
-  { label: "Start a task", href: "/", keywords: "prompt composer" },
+  {
+    label: "Start a task",
+    href: "/",
+    keywords: "prompt composer chat evianta",
+  },
   {
     label: "Open synthetic samples",
-    href: "/#samples",
+    href: "/samples",
     keywords: "sample replay",
   },
   { label: "View your cases", href: "/cases", keywords: "private workspace" },
-  { label: "Admin usage", href: "/admin/usage", keywords: "cost tokens" },
+  {
+    label: "Meet the AI professionals",
+    href: "/agents",
+    keywords: "agents team directory evianta specialists",
+  },
+  {
+    label: "Admin usage",
+    href: "/admin/usage",
+    keywords: "cost tokens",
+    adminOnly: true,
+  },
 ];
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const router = useRouter();
+  const { profile } = useSession();
+  const visibleCommands = commands.filter(
+    (item) => !item.adminOnly || profile?.role === "admin",
+  );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -78,7 +97,7 @@ export function CommandPalette() {
                   No matching actions.
                 </Command.Empty>
                 <Command.Group heading="Navigate">
-                  {commands.map((item) => (
+                  {visibleCommands.map((item) => (
                     <Command.Item
                       key={item.href}
                       value={`${item.label} ${item.keywords}`}

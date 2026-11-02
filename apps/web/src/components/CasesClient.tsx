@@ -3,7 +3,12 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useAutoAnimate } from "@formkit/auto-animate/react";
-import { ArrowRight, FilePlus2, FolderOpen } from "lucide-react";
+import {
+  ArrowRight,
+  FilePlus2,
+  FolderOpen,
+  MessageSquareText,
+} from "lucide-react";
 import type { Case } from "@evianta/core";
 import { ApiError } from "../api/errors";
 import { formatDate } from "../format";
@@ -27,6 +32,7 @@ export function CasesClient() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -63,6 +69,16 @@ export function CasesClient() {
 
   if (!session) return <PrivateGate />;
 
+  const needle = query.trim().toLowerCase();
+  const visibleCases = [...cases]
+    .filter(
+      (record) =>
+        !needle ||
+        record.title.toLowerCase().includes(needle) ||
+        record.description.toLowerCase().includes(needle),
+    )
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
   return (
     <div>
       <div className="flex flex-wrap items-end justify-between gap-4">
@@ -92,7 +108,7 @@ export function CasesClient() {
             <h2 id="case-list-heading" className="text-sm font-semibold">
               Case register
             </h2>
-            <p className="mt-1 text-[11px] text-muted-foreground">
+            <p className="mt-1 text-xs text-muted-foreground">
               {cases.length} {cases.length === 1 ? "case" : "cases"} · Updated
               time shown in IST
             </p>
@@ -139,63 +155,97 @@ export function CasesClient() {
             }
           />
         ) : (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th scope="col">Case</th>
-                  <th scope="col">Workflow</th>
-                  <th scope="col">Updated</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">
-                    <span className="sr-only">Open case</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody ref={listRef}>
-                {cases.map((record) => (
-                  <tr key={record.id}>
-                    <td>
-                      <Link
-                        className="font-medium hover:text-primary"
-                        href={`/cases/${record.id}`}
-                      >
-                        {record.title}
-                      </Link>
-                      <p className="mt-1 max-w-md truncate text-[11px] text-muted-foreground">
-                        {record.description || "No description"}
-                      </p>
-                    </td>
-                    <td>{workflowNames[record.useCase]}</td>
-                    <td className="text-muted-foreground">
-                      {formatDate(record.updatedAt)}
-                    </td>
-                    <td>
-                      <StatusBadge
-                        tone={
-                          record.status === "active" ? "success" : "neutral"
-                        }
-                      >
-                        {record.status}
-                      </StatusBadge>
-                    </td>
-                    <td className="text-right">
-                      <Link
-                        href={`/cases/${record.id}`}
-                        className="icon-button ml-auto"
-                        aria-label={`Open ${record.title}`}
-                      >
-                        <ArrowRight size={16} aria-hidden="true" />
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <>
+            {cases.length > 4 && (
+              <div className="border-b border-border px-5 py-3">
+                <label htmlFor="case-search" className="sr-only">
+                  Search cases
+                </label>
+                <input
+                  id="case-search"
+                  type="search"
+                  className="text-input"
+                  placeholder="Search by title or description"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              </div>
+            )}
+            {visibleCases.length === 0 ? (
+              <p className="p-5 text-sm text-muted-foreground">
+                No cases match &quot;{query}&quot;.
+              </p>
+            ) : (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Case</th>
+                      <th scope="col">Workflow</th>
+                      <th scope="col">Updated</th>
+                      <th scope="col">Status</th>
+                      <th scope="col">
+                        <span className="sr-only">Actions</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody ref={listRef}>
+                    {visibleCases.map((record) => (
+                      <tr key={record.id}>
+                        <td>
+                          <Link
+                            className="font-medium hover:text-primary"
+                            href={`/cases/${record.id}`}
+                          >
+                            {record.title}
+                          </Link>
+                          <p className="mt-1 max-w-md truncate text-xs text-muted-foreground">
+                            {record.description || "No description"}
+                          </p>
+                        </td>
+                        <td>{workflowNames[record.useCase]}</td>
+                        <td className="text-muted-foreground">
+                          {formatDate(record.updatedAt)}
+                        </td>
+                        <td>
+                          <StatusBadge
+                            tone={
+                              record.status === "active" ? "success" : "neutral"
+                            }
+                          >
+                            {record.status}
+                          </StatusBadge>
+                        </td>
+                        <td className="text-right">
+                          <span className="ml-auto inline-flex items-center gap-1">
+                            <Link
+                              href={`/?case=${encodeURIComponent(record.id)}`}
+                              className="icon-button"
+                              aria-label={`Continue ${record.title} in chat`}
+                              title="Continue in chat"
+                            >
+                              <MessageSquareText size={16} aria-hidden="true" />
+                            </Link>
+                            <Link
+                              href={`/cases/${record.id}`}
+                              className="icon-button"
+                              aria-label={`Open ${record.title}`}
+                              title="Open details"
+                            >
+                              <ArrowRight size={16} aria-hidden="true" />
+                            </Link>
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
         )}
       </section>
-      <p className="mt-4 text-[11px] text-muted-foreground">
+      <p className="mt-4 text-xs text-muted-foreground">
         {error instanceof ApiError && error.status === 401
           ? "Your session expired. Enter your key again to continue."
           : "Private responses use no-store caching and remain scoped to this session."}

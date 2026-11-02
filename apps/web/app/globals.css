@@ -137,13 +137,13 @@ select:focus-visible {
 .brand-subtitle {
   margin-top: 1px;
   color: hsl(var(--muted));
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .nav-caption {
   padding: 0 10px 9px;
   color: hsl(var(--muted));
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -191,7 +191,7 @@ select:focus-visible {
   align-items: flex-start;
   gap: 8px;
   color: hsl(var(--muted));
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -253,7 +253,7 @@ select:focus-visible {
   border-radius: 4px;
   background: hsl(var(--background));
   padding: 2px 4px;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .icon-button {
@@ -379,7 +379,7 @@ select:focus-visible {
   border-radius: 999px;
   background: hsl(var(--surface));
   padding: 6px 12px;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -416,7 +416,7 @@ select:focus-visible {
   align-items: center;
   gap: 8px;
   color: hsl(var(--primary));
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -501,7 +501,7 @@ select:focus-visible {
 .hero-visual-header {
   margin-bottom: 16px;
   color: hsl(var(--muted));
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
 }
@@ -622,7 +622,7 @@ select:focus-visible {
   gap: 5px;
   border-radius: 999px;
   padding: 3px 9px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 570;
   line-height: 1;
 }
@@ -664,7 +664,7 @@ select:focus-visible {
 
 .metric-label {
   color: hsl(var(--muted));
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .metric-value {
@@ -679,7 +679,7 @@ select:focus-visible {
 .metric-caption {
   margin-top: 7px;
   color: hsl(var(--muted));
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .divider {
@@ -786,7 +786,7 @@ select:focus-visible {
   border-bottom: 1px solid hsl(var(--border));
   color: hsl(var(--muted));
   padding: 11px 14px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 620;
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -947,7 +947,7 @@ select:focus-visible {
 .command-item kbd,
 .command-footer {
   color: hsl(var(--muted));
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .command-list {
@@ -959,7 +959,7 @@ select:focus-visible {
 .command-list [cmdk-group-heading] {
   padding: 8px 9px 6px;
   color: hsl(var(--muted));
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1080,7 +1080,7 @@ select:focus-visible {
     flex: none;
     gap: 7px;
     padding: 0 9px;
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .nav-link svg {

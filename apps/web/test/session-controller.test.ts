@@ -27,7 +27,7 @@ describe("SessionController", () => {
     first.setSession("saved-token", now + MAX_SESSION_AGE_MS);
     expect(JSON.parse(saved.getItem(SESSION_STORAGE_KEY)!)).toEqual({
       accessToken: "saved-token",
-      expiresAt: 1801000,
+      expiresAt: 1000 + MAX_SESSION_AGE_MS,
     });
     now += 60000;
     const second = new SessionController(() => now);

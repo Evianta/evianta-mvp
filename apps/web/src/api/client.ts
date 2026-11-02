@@ -1,4 +1,5 @@
 import {
+  AgentProfileSetSchema,
   ApprovalSchema,
   CaseResponseSchema,
   CaseSchema,
@@ -12,8 +13,11 @@ import {
   type ExtractionMethod,
   ListCasesResponseSchema,
   LatestRunResponseSchema,
+  RunDtoSchema,
   RunResponseSchema,
+  UseCaseSchema,
   type Case,
+  type AgentProfile,
   type CaseResponse,
   type CreateCaseRequest,
   type Approval,
@@ -51,27 +55,54 @@ const CaseWorkspaceResponseSchema = z.object({
 const DeliverableResponseSchema = z.object({ deliverable: DeliverableSchema });
 const ApprovalResponseSchema = z.object({ approval: ApprovalSchema });
 
+const UsageTotalsSchema = z.object({
+  attempts: z.number().int().nonnegative(),
+  knownChargesUsd: z.number().finite().nonnegative(),
+  unknownExposureUsd: z.number().finite().nonnegative(),
+  reservedUsd: z.number().finite().nonnegative(),
+});
+
 const AdminUsageResponseSchema = z.object({
-  rows: z.array(
+  entries: z.array(
     z.object({
       id: z.string().min(1),
       ownerId: z.string().min(1),
       caseId: z.string().min(1),
       runId: z.string().min(1),
+      useCase: UseCaseSchema,
       provider: z.string().min(1),
       model: z.string().min(1),
+      outcome: z.enum([
+        "admitted",
+        "success",
+        "failed",
+        "unknown",
+        "cancelled",
+      ]),
       costUsd: z.number().finite().nonnegative().nullable(),
       costStatus: z.enum(["estimated", "unknown"]),
-      recordedAt: z.string().datetime({ offset: true }),
+      reservedUsd: z.number().finite().nonnegative(),
+      reservationStatus: z.enum(["reserved", "settled", "released"]),
+      createdAt: z.string().datetime({ offset: true }),
     }),
   ),
-  totals: z.object({
-    knownCostUsd: z.number().finite().nonnegative(),
-    unknownCostCount: z.number().int().nonnegative(),
+  totals: UsageTotalsSchema,
+  byUseCase: z.record(UseCaseSchema, UsageTotalsSchema),
+  truncated: z.boolean(),
+});
+
+const ProfileResponseSchema = z.object({
+  user: z.object({
+    id: z.string().min(1),
+    email: z.string().nullable().optional(),
+    displayName: z.string().nullable().optional(),
+    role: z.enum(["user", "admin"]),
   }),
+  session: z.object({ expiresAt: z.string().datetime({ offset: true }) }),
 });
 
 export type AdminUsageResponse = z.infer<typeof AdminUsageResponseSchema>;
+export type UserProfile = z.infer<typeof ProfileResponseSchema>["user"];
 export type AuthToken = z.infer<typeof TokenResponseSchema>;
 export type CaseWorkspace = z.infer<typeof CaseWorkspaceResponseSchema>;
 export type ReviewSectionUpdate = {
@@ -115,7 +146,15 @@ export interface WebApiClient {
   startRun(caseId: string, input?: Record<string, unknown>): Promise<RunDto>;
   retryRun(runId: string): Promise<RunDto>;
   cancelRun(runId: string): Promise<RunDto>;
+  resumeRun(
+    caseId: string,
+    runId: string,
+    input: Record<string, unknown>,
+    idempotencyKey: string,
+  ): Promise<RunDto | null>;
   getAdminUsage(): Promise<AdminUsageResponse>;
+  getProfile(): Promise<UserProfile>;
+  listAgentDirectory(): Promise<AgentProfile[]>;
   streamRunEvents(
     runId: string,
     options: {
@@ -296,11 +335,44 @@ export class FetchWebApiClient implements WebApiClient {
     return response.run;
   }
 
+  async resumeRun(
+    caseId: string,
+    runId: string,
+    input: Record<string, unknown>,
+    idempotencyKey: string,
+  ): Promise<RunDto | null> {
+    const response = await this.request(
+      `/cases/${encodeURIComponent(caseId)}/runs/${encodeURIComponent(runId)}/resume`,
+      z.object({ outcome: z.string(), run: RunDtoSchema.nullable() }),
+      this.jsonInit("POST", { idempotencyKey, input }),
+    );
+    return response.run;
+  }
+
   async getAdminUsage(): Promise<AdminUsageResponse> {
     return this.request<AdminUsageResponse>(
-      "/admin/usage",
+      "/admin/usage/cases?limit=200",
       AdminUsageResponseSchema,
     );
+  }
+
+  async getProfile(): Promise<UserProfile> {
+    const response = await this.request("/auth/me", ProfileResponseSchema);
+    return response.user;
+  }
+
+  async listAgentDirectory(): Promise<AgentProfile[]> {
+    const response = await this.fetcher(`${this.baseUrl}/directory/agents`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      credentials: "omit",
+    });
+    if (!response.ok) throw await this.errorFromResponse(response);
+    const parsed = await this.parseResponse(
+      response,
+      z.object({ agents: AgentProfileSetSchema }),
+    );
+    return parsed.agents;
   }
 
   async streamRunEvents(

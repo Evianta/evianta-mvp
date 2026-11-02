@@ -962,6 +962,17 @@ export function registerCaseApiRoutes(
     response.json({ workflows: liveWorkflows, ...services.uploads });
   });
 
+  let directoryCache: { at: number; body: unknown } | null = null;
+  app.get("/directory/agents", async (_request, response) => {
+    if (!directoryCache || Date.now() - directoryCache.at > 60_000) {
+      const profiles = AgentProfileSetSchema.parse(
+        await repositories.agentProfiles.listEnabled(),
+      );
+      directoryCache = { at: Date.now(), body: { agents: profiles } };
+    }
+    response.status(200).json(directoryCache.body);
+  });
+
   app.get("/agents", authenticate, async (_request, response) => {
     const profiles = AgentProfileSetSchema.parse(
       await repositories.agentProfiles.listEnabled(),

@@ -20,6 +20,7 @@ import {
 import type { CaseWorkspace, WebApiClient } from "../api/client";
 import { sourcePreviewMimeType } from "../source-preview";
 import { Button } from "./Button";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 function evidenceLocation(evidence: Evidence): string {
   if (evidence.kind !== "document") return evidence.sourceRef;
@@ -94,6 +95,7 @@ export function ReviewEvidenceWorkspace({
   const [comments, setComments] = useState<Record<string, string>>({});
   const [approvalNote, setApprovalNote] = useState("");
   const [pending, setPending] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const [sourceText, setSourceText] = useState<string | null>(null);
@@ -239,25 +241,21 @@ export function ReviewEvidenceWorkspace({
   const hasUnsavedChanges =
     deliverable?.sections.some(hasSectionChanges) ?? false;
 
-  async function approve() {
+  function approve() {
     if (!deliverable || pending) return;
     if (hasUnsavedChanges) {
       setError("Save your section edits and comments before approving.");
       return;
     }
-    const unresolved = workspace.findings.flatMap((finding) =>
-      finding.openQuestions.filter((question) => question.status === "open"),
-    );
-    const warning = unresolved.length
-      ? `\n\n${unresolved.length} open question(s) will remain unresolved:\n${unresolved.map((question) => `• ${question.text}`).join("\n")}`
-      : "";
-    if (
-      !window.confirm(
-        `Approve ${deliverable.title} version ${deliverable.version}?${warning}`,
-      )
-    ) {
-      return;
-    }
+    setConfirmOpen(true);
+  }
+
+  const unresolvedQuestions = workspace.findings.flatMap((finding) =>
+    finding.openQuestions.filter((question) => question.status === "open"),
+  );
+
+  async function confirmApproval() {
+    if (!deliverable || pending) return;
     setPending(true);
     setError(null);
     try {
@@ -300,7 +298,7 @@ export function ReviewEvidenceWorkspace({
           </span>
           <div>
             <h2 className="text-sm font-semibold">Review and approval</h2>
-            <p className="mt-1 text-[11px] text-muted-foreground">
+            <p className="mt-1 text-xs text-muted-foreground">
               Changes are saved against a deliverable version.
             </p>
           </div>
@@ -309,7 +307,7 @@ export function ReviewEvidenceWorkspace({
           <div className="mt-5 space-y-4">
             <div className="rounded-lg border border-border bg-background p-3">
               <p className="text-xs font-semibold">{deliverable.title}</p>
-              <p className="mt-1 text-[10px] text-muted-foreground">
+              <p className="mt-1 text-xs text-muted-foreground">
                 Version {deliverable.version} · {deliverable.format}
               </p>
             </div>
@@ -320,7 +318,7 @@ export function ReviewEvidenceWorkspace({
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-xs font-semibold">{section.title}</h3>
-                  <span className="text-[10px] capitalize text-muted-foreground">
+                  <span className="text-xs capitalize text-muted-foreground">
                     {section.reviewStatus.replaceAll("-", " ")}
                   </span>
                 </div>
@@ -328,7 +326,7 @@ export function ReviewEvidenceWorkspace({
                   (originalDraft(section) !== null ||
                     typeof section.reviewerContent === "string") && (
                     <div className="mt-3 space-y-2">
-                      <label className="block text-[10px] text-muted-foreground">
+                      <label className="block text-xs text-muted-foreground">
                         Reviewer draft
                         <textarea
                           className="mt-1 min-h-28 w-full rounded-md border border-border bg-surface p-2 text-xs text-foreground"
@@ -343,7 +341,7 @@ export function ReviewEvidenceWorkspace({
                         />
                       </label>
                       {section.reviewerContent !== null && (
-                        <details className="text-[10px] text-muted-foreground">
+                        <details className="text-xs text-muted-foreground">
                           <summary className="cursor-pointer">
                             View original draft
                           </summary>
@@ -369,7 +367,7 @@ export function ReviewEvidenceWorkspace({
                         Save edit
                       </Button>
                       {section.reviewerContent !== null && (
-                        <span className="ml-2 text-[10px] text-info">
+                        <span className="ml-2 text-xs text-info">
                           Edited by reviewer
                         </span>
                       )}
@@ -380,7 +378,7 @@ export function ReviewEvidenceWorkspace({
                     Reviewer note: {section.reviewComment}
                   </p>
                 )}
-                <label className="mt-3 block text-[10px] text-muted-foreground">
+                <label className="mt-3 block text-xs text-muted-foreground">
                   Review comment
                   <textarea
                     className="mt-1 min-h-16 w-full rounded-md border border-border bg-surface p-2 text-xs text-foreground"
@@ -448,7 +446,7 @@ export function ReviewEvidenceWorkspace({
               </p>
             ) : (
               <div className="rounded-lg border border-border bg-background p-3">
-                <label className="block text-[10px] text-muted-foreground">
+                <label className="block text-xs text-muted-foreground">
                   Approval note (optional)
                   <textarea
                     className="mt-1 min-h-16 w-full rounded-md border border-border bg-surface p-2 text-xs text-foreground"
@@ -497,7 +495,7 @@ export function ReviewEvidenceWorkspace({
           </span>
           <div>
             <h2 className="text-sm font-semibold">Evidence viewer</h2>
-            <p className="mt-1 text-[11px] text-muted-foreground">
+            <p className="mt-1 text-xs text-muted-foreground">
               Select an evidence reference to open its private source.
             </p>
           </div>
@@ -508,7 +506,7 @@ export function ReviewEvidenceWorkspace({
               <li key={item.id}>
                 <button
                   type="button"
-                  className={`w-full rounded-md p-2 text-left text-[11px] hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${item.id === selectedEvidenceId ? "bg-muted/20" : ""}`}
+                  className={`w-full rounded-md p-2 text-left text-xs hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${item.id === selectedEvidenceId ? "bg-muted/20" : ""}`}
                   onClick={() => onSelectEvidence(item.id)}
                 >
                   <span className="font-medium">
@@ -538,13 +536,13 @@ export function ReviewEvidenceWorkspace({
                 <p className="text-xs font-semibold">
                   {selectedDocument?.name ?? selectedEvidence.sourceRef}
                 </p>
-                <p className="mt-1 text-[10px] text-muted-foreground">
+                <p className="mt-1 text-xs text-muted-foreground">
                   {evidenceLocation(selectedEvidence)}
                 </p>
               </div>
               {sourceUrl && selectedDocument && (
                 <a
-                  className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline"
+                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
                   href={sourceUrl}
                   download={selectedDocument.name}
                 >
@@ -604,7 +602,7 @@ export function ReviewEvidenceWorkspace({
                 />
               )}
             {sourceText !== null && (
-              <pre className="mt-3 max-h-[26rem] overflow-auto rounded-md border border-border bg-background p-3 text-[10px]">
+              <pre className="mt-3 max-h-[26rem] overflow-auto rounded-md border border-border bg-background p-3 text-xs">
                 {sourceText}
               </pre>
             )}
@@ -628,7 +626,7 @@ export function ReviewEvidenceWorkspace({
                 Open cited source <ArrowUpRight size={13} aria-hidden="true" />
               </a>
             )}
-            <p className="mt-3 flex items-center gap-1 text-[10px] text-muted-foreground">
+            <p className="mt-3 flex items-center gap-1 text-xs text-muted-foreground">
               <MessageSquareText size={12} aria-hidden="true" />
               {selectedEvidence.confidence} confidence ·{" "}
               {selectedEvidence.sourceRef}
@@ -636,6 +634,29 @@ export function ReviewEvidenceWorkspace({
           </div>
         )}
       </div>
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title={`Approve ${deliverable?.title ?? "this deliverable"}?`}
+        description={`This approves version ${deliverable?.version ?? ""} as it is saved now. Later edits will need a new approval.`}
+        confirmLabel="Approve"
+        cancelLabel="Not yet"
+        onConfirm={() => void confirmApproval()}
+      >
+        {unresolvedQuestions.length > 0 && (
+          <div className="mt-4 rounded-md bg-warning/10 p-3 text-xs">
+            <p className="font-medium text-warning">
+              {unresolvedQuestions.length} open question(s) will remain
+              unresolved:
+            </p>
+            <ul className="mt-2 list-disc space-y-1 pl-4">
+              {unresolvedQuestions.map((question) => (
+                <li key={question.id}>{question.text}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </ConfirmDialog>
     </section>
   );
 }

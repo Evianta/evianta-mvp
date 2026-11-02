@@ -370,6 +370,78 @@ describe("FetchWebApiClient", () => {
     await expect(client.getAdminUsage()).rejects.toBeInstanceOf(ApiError);
   });
 
+  it("reads the server's usage summary from the case report endpoint", async () => {
+    const totals = {
+      attempts: 2,
+      knownChargesUsd: 0.12,
+      unknownExposureUsd: 0.5,
+      reservedUsd: 0.5,
+    };
+    const empty = {
+      attempts: 0,
+      knownChargesUsd: 0,
+      unknownExposureUsd: 0,
+      reservedUsd: 0,
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        entries: [
+          {
+            id: "u1",
+            ownerId: "owner",
+            caseId: "case",
+            runId: "run",
+            useCase: "tax-notice",
+            provider: "meta",
+            model: "muse-spark",
+            outcome: "success",
+            costUsd: 0.12,
+            costStatus: "estimated",
+            reservedUsd: 0.2,
+            reservationStatus: "settled",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            settings: { ignored: true },
+          },
+        ],
+        totals,
+        byUseCase: {
+          "data-analysis": empty,
+          "tax-notice": totals,
+          "msme-payment": empty,
+        },
+        truncated: false,
+      }),
+    );
+    const client = new FetchWebApiClient({
+      getToken: () => "admin-token",
+      onUnauthorized: vi.fn(),
+      fetcher,
+    });
+    const usage = await client.getAdminUsage();
+    expect(fetcher.mock.calls[0][0]).toBe("/admin/usage/cases?limit=200");
+    expect(usage.totals.attempts).toBe(2);
+    expect(usage.entries[0]?.useCase).toBe("tax-notice");
+  });
+
+  it("reads the signed-in user's role from the server", async () => {
+    const client = new FetchWebApiClient({
+      getToken: () => "user-token",
+      onUnauthorized: vi.fn(),
+      fetcher: vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json({
+          user: {
+            id: "u",
+            email: "a@example.test",
+            displayName: "A",
+            role: "admin",
+          },
+          session: { expiresAt: "2026-01-01T00:00:00.000Z" },
+        }),
+      ),
+    });
+    await expect(client.getProfile()).resolves.toMatchObject({ role: "admin" });
+  });
+
   it("exchanges access keys without retaining them and revokes sessions on logout", async () => {
     const fetcher = vi
       .fn<typeof fetch>()

@@ -6,6 +6,7 @@ import { AppShell } from "../src/components/AppShell";
 import { ThemeProvider } from "../src/components/ThemeProvider";
 import { SessionProvider } from "../src/session/SessionProvider";
 import "./globals.css";
+import "./workspace.css";
 
 const geist = Geist({
   subsets: ["latin"],

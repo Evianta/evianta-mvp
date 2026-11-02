@@ -267,6 +267,21 @@ describe("case API routes", () => {
       ((await agents.json()) as { agents: unknown[] }).agents,
     ).toHaveLength(4);
 
+    const directory = await fetch(`${baseUrl}/directory/agents`);
+    expect(directory.status).toBe(200);
+    const directoryAgents = (
+      (await directory.json()) as {
+        agents: Array<{ role: string; displayName: string; kind?: string }>;
+      }
+    ).agents;
+    expect(directoryAgents).toContainEqual(
+      expect.objectContaining({
+        role: "coordinator",
+        displayName: "Evianta",
+        kind: "lead",
+      }),
+    );
+
     const created = await createCase();
     const listed = await fetch(`${baseUrl}/cases`, {
       headers: authHeaders(),

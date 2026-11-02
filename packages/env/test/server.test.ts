@@ -281,7 +281,7 @@ describe("getApiEnvironment", () => {
     ).toThrow("WEB_ORIGIN must be an exact http(s) origin");
   });
 
-  it("rejects invalid rate limits, proxy hops, and non-30-minute lifetimes", () => {
+  it("rejects invalid rate limits and proxy hops", () => {
     expect(() =>
       getApiEnvironment({
         ...configuration,
@@ -294,11 +294,32 @@ describe("getApiEnvironment", () => {
         TRUST_PROXY_HOPS: "-1",
       }),
     ).toThrow("TRUST_PROXY_HOPS must be a non-negative integer");
+  });
+
+  it("allows a longer demo session within bounds and validates the pepper", () => {
+    expect(
+      getApiEnvironment({ ...configuration, JWT_TTL_SECONDS: "28800" }),
+    ).toMatchObject({ jwtTtlSeconds: 28800 });
+    for (const value of ["900", "28801", "3600.5"]) {
+      expect(() =>
+        getApiEnvironment({ ...configuration, JWT_TTL_SECONDS: value }),
+      ).toThrow("JWT_TTL_SECONDS must be between 1800 and 28800");
+    }
+    expect(getApiEnvironment(configuration).accessKeyPepper).toBeUndefined();
+    expect(
+      getApiEnvironment({
+        ...configuration,
+        ACCESS_KEY_PEPPER: "a-separate-pepper-that-is-long-enough-123",
+      }).accessKeyPepper,
+    ).toBe("a-separate-pepper-that-is-long-enough-123");
+    expect(() =>
+      getApiEnvironment({ ...configuration, ACCESS_KEY_PEPPER: "short" }),
+    ).toThrow("ACCESS_KEY_PEPPER must be at least 32 bytes");
     expect(() =>
       getApiEnvironment({
         ...configuration,
-        JWT_TTL_SECONDS: "3600",
+        ACCESS_KEY_PEPPER: configuration.JWT_SIGNING_KEY,
       }),
-    ).toThrow("JWT_TTL_SECONDS must be 1800");
+    ).toThrow("ACCESS_KEY_PEPPER must differ from JWT_SIGNING_KEY");
   });
 });

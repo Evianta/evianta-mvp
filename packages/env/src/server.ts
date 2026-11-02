@@ -173,7 +173,8 @@ export interface ApiEnvironment {
   jwtSigningKey: string;
   jwtIssuer: string;
   jwtAudience: string;
-  jwtTtlSeconds: 1800;
+  jwtTtlSeconds: number;
+  accessKeyPepper?: string;
   webOrigin: string;
   apiPort: number;
   authRateLimitPerMinute: number;
@@ -225,6 +226,18 @@ function getPositiveInteger(
   return value;
 }
 
+export function getAccessKeyPepper(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const value = env.ACCESS_KEY_PEPPER?.trim();
+  if (!value || Buffer.byteLength(value, "utf8") < 32) {
+    throw new Error(
+      "ACCESS_KEY_PEPPER must be set to at least 32 bytes to issue passphrase keys",
+    );
+  }
+  return value;
+}
+
 export function getApiEnvironment(
   env: NodeJS.ProcessEnv = process.env,
 ): ApiEnvironment {
@@ -254,8 +267,8 @@ export function getApiEnvironment(
   }
 
   const ttl = Number(env.JWT_TTL_SECONDS ?? "1800");
-  if (ttl !== 1800) {
-    throw new Error("JWT_TTL_SECONDS must be 1800");
+  if (!Number.isInteger(ttl) || ttl < 1800 || ttl > 28800) {
+    throw new Error("JWT_TTL_SECONDS must be between 1800 and 28800");
   }
 
   const apiPort = getPositiveInteger("API_PORT", env, 3001);
@@ -274,11 +287,20 @@ export function getApiEnvironment(
     throw new Error("TRUST_PROXY_HOPS must be a non-negative integer");
   }
 
+  const accessKeyPepper = env.ACCESS_KEY_PEPPER?.trim();
+  if (accessKeyPepper && Buffer.byteLength(accessKeyPepper, "utf8") < 32) {
+    throw new Error("ACCESS_KEY_PEPPER must be at least 32 bytes");
+  }
+  if (accessKeyPepper && accessKeyPepper === jwtSigningKey) {
+    throw new Error("ACCESS_KEY_PEPPER must differ from JWT_SIGNING_KEY");
+  }
+
   return {
     jwtSigningKey,
+    ...(accessKeyPepper ? { accessKeyPepper } : {}),
     jwtIssuer: getRequiredEnv("JWT_ISSUER", env),
     jwtAudience: getRequiredEnv("JWT_AUDIENCE", env),
-    jwtTtlSeconds: 1800,
+    jwtTtlSeconds: ttl,
     webOrigin,
     apiPort,
     authRateLimitPerMinute: getPositiveInteger(

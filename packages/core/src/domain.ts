@@ -307,6 +307,9 @@ export const CaseSchema = z
   });
 export type Case = z.infer<typeof CaseSchema>;
 
+export const AgentKindSchema = z.enum(["lead", "specialist", "reviewer"]);
+export type AgentKind = z.infer<typeof AgentKindSchema>;
+
 export const AgentProfileSchema = z.object({
   id: IdSchema,
   role: IdSchema,
@@ -320,6 +323,8 @@ export const AgentProfileSchema = z.object({
   limitations: z.array(z.string()),
   modelTier: z.enum(["cheap", "mid", "high"]),
   enabled: z.boolean(),
+  kind: AgentKindSchema.optional(),
+  workflows: z.array(UseCaseSchema).optional(),
 });
 export type AgentProfile = z.infer<typeof AgentProfileSchema>;
 

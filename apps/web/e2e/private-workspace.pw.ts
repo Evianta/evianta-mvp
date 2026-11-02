@@ -1,5 +1,6 @@
 import { syntheticWorkflowFixtures, type RunDto } from "@evianta/core";
 import { expect, test, type Page } from "@playwright/test";
+import { mockApi } from "./support/mock-api";
 
 const record = {
   ...syntheticWorkflowFixtures.dataAnalysis.case,
@@ -40,245 +41,128 @@ async function signIn(page: Page) {
 }
 
 for (const phase of ["create", "upload"] as const) {
-  for (const outcome of ["success", "failure"] as const) {
-    test(`discards late ${phase} ${outcome} after signing into another session`, async ({
-      page,
-    }) => {
-      await mockAuth(page);
-      let release!: () => void;
-      const released = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      let reached!: () => void;
-      const pendingRequest = new Promise<void>((resolve) => {
-        reached = resolve;
-      });
-      let uploadCount = 0;
-      await page.route("**/cases", async (route) => {
-        if (route.request().method() !== "POST") {
-          await route.continue();
-          return;
-        }
-        if (phase === "create") {
-          reached();
-          await released;
-        }
-        await route.fulfill({
-          status: phase === "create" && outcome === "failure" ? 500 : 200,
-          json:
-            phase === "create" && outcome === "failure"
-              ? { error: { message: "Old session create failed." } }
-              : { case: record },
-        });
-      });
-      await page.route("**/cases/private-case/documents", async (route) => {
-        uploadCount += 1;
+  test(`never applies a late ${phase} response to the next session`, async ({
+    page,
+  }) => {
+    await mockAuth(page);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached!: () => void;
+    const pendingRequest = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let uploadCount = 0;
+    let runCount = 0;
+    await page.route("**/cases", async (route) => {
+      if (route.request().resourceType() !== "fetch") {
+        await route.continue();
+        return;
+      }
+      if (route.request().method() !== "POST") {
+        await route.fulfill({ json: { cases: [], nextCursor: null } });
+        return;
+      }
+      if (phase === "create") {
         reached();
         await released;
-        await route.fulfill({
-          status: outcome === "failure" ? 500 : 200,
-          json:
-            outcome === "failure"
-              ? { error: { message: "Old session upload failed." } }
-              : {
-                  documents: [
-                    syntheticWorkflowFixtures.dataAnalysis.documents[0],
-                  ],
-                },
-        });
-      });
-
-      await page.goto("/");
-      await expect(
-        page
-          .getByRole("navigation")
-          .getByRole("link", { name: "Start", exact: true }),
-      ).toHaveAttribute("aria-current", "page");
-      await expect(
-        page.getByRole("link", { name: "Cases", exact: true }),
-      ).not.toHaveAttribute("aria-current", "page");
-      await signIn(page);
-      await page
-        .getByLabel("Task prompt", { exact: true })
-        .fill("Private old sales notes");
-      await page.locator("#case-files").setInputFiles([
-        {
-          name: "old.csv",
-          mimeType: "text/csv",
-          buffer: Buffer.from("a,b\n1,2"),
-        },
-        {
-          name: "other.csv",
-          mimeType: "text/csv",
-          buffer: Buffer.from("a,b\n3,4"),
-        },
-      ]);
-      await page
-        .getByRole("button", { name: "Start task", exact: true })
-        .click();
-      await pendingRequest;
-      await page
-        .getByRole("button", { name: "Sign out and revoke this session" })
-        .click();
-      await signIn(page);
-      await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue(
-        "",
-      );
-      await expect(
-        page.getByRole("list", { name: "Selected documents" }),
-      ).toHaveCount(0);
-      await page
-        .getByLabel("Task prompt", { exact: true })
-        .fill("New session title");
-
-      const response = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          new URL(response.url()).pathname ===
-            (phase === "create" ? "/cases" : "/cases/private-case/documents"),
-      );
-      release();
-      await (await response).finished();
-      await page.evaluate(
-        () =>
-          new Promise<void>((resolve) =>
-            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-          ),
-      );
-
-      await expect(page).toHaveURL("/");
-      await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue(
-        "New session title",
-      );
-      await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0);
-      await expect(
-        page.getByRole("link", { name: "Open created case" }),
-      ).toHaveCount(0);
-      await expect(
-        page.getByRole("button", { name: "Start task", exact: true }),
-      ).toBeEnabled();
-      expect(uploadCount).toBe(phase === "create" ? 0 : 1);
+      }
+      await route.fulfill({ status: 201, json: { case: record } });
     });
-  }
-}
-
-test("resumes failed uploads in the existing case", async ({ page }) => {
-  await mockAuth(page);
-  let createCount = 0;
-  let uploadCount = 0;
-  let releaseFirstUpload!: () => void;
-  const firstUploadStarted = new Promise<void>((resolve) => {
-    releaseFirstUpload = resolve;
-  });
-  let finishFirstUpload!: () => void;
-  const firstUploadCanFinish = new Promise<void>((resolve) => {
-    finishFirstUpload = resolve;
-  });
-  await page.route("**/cases", async (route) => {
-    if (route.request().method() !== "POST") {
-      await route.continue();
-      return;
-    }
-    createCount += 1;
-    await route.fulfill({ json: { case: record } });
-  });
-  await page.route("**/cases/private-case/documents", async (route) => {
-    uploadCount += 1;
-    if (uploadCount === 1) {
-      releaseFirstUpload();
-      await firstUploadCanFinish;
+    await page.route("**/cases/private-case/documents", async (route) => {
+      uploadCount += 1;
+      reached();
+      await released;
       await route.fulfill({
+        status: 201,
         json: {
           documents: [syntheticWorkflowFixtures.dataAnalysis.documents[0]],
         },
       });
-      return;
-    }
-    if (uploadCount === 2) {
-      await route.fulfill({
-        status: 400,
-        json: { error: { message: "Temporary upload failure." } },
-      });
-      return;
-    }
-    await route.fulfill({
-      json: {
-        documents: [syntheticWorkflowFixtures.dataAnalysis.documents[0]],
-      },
     });
-  });
+    await page.route("**/runs", async (route) => {
+      runCount += 1;
+      await route.fulfill({ status: 500, json: { error: { message: "no" } } });
+    });
 
-  await page.goto("/");
-  await signIn(page);
-  await page.getByLabel("Task prompt", { exact: true }).fill("Recovery case");
-  await page
-    .getByLabel("Task prompt", { exact: true })
-    .fill("Analyze sales for recovery");
-  await page.locator("#case-files").setInputFiles([
-    {
-      name: "first.csv",
+    await page.goto("/");
+    await signIn(page);
+    await page.getByLabel("Attach records").setInputFiles({
+      name: "old.csv",
       mimeType: "text/csv",
       buffer: Buffer.from("a,b\n1,2"),
-    },
-    {
-      name: "second.csv",
-      mimeType: "text/csv",
-      buffer: Buffer.from("a,b\n3,4"),
-    },
-  ]);
-  await page.getByRole("button", { name: "Start task", exact: true }).click();
-  await firstUploadStarted;
-  const firstDocument = page
-    .getByRole("listitem")
-    .filter({ hasText: "first.csv" });
-  const secondDocument = page
-    .getByRole("listitem")
-    .filter({ hasText: "second.csv" });
-  await expect(
-    firstDocument.getByRole("button", { name: "Remove first.csv" }),
-  ).toBeDisabled();
-  await expect(
-    secondDocument.getByRole("button", { name: "Remove second.csv" }),
-  ).toBeDisabled();
-  finishFirstUpload();
-  await expect(
-    page.getByRole("alert").filter({
-      hasText: "Case created.",
-    }),
-  ).toBeVisible();
-  await expect(
-    firstDocument.getByRole("button", { name: "Remove first.csv" }),
-  ).toBeDisabled();
-  await expect(
-    secondDocument.getByRole("button", { name: "Remove second.csv" }),
-  ).toBeEnabled();
-  await page.route("**/cases/private-case", async (route) => {
-    if (route.request().headers().accept !== "application/json") {
-      await route.continue();
-      return;
-    }
-    await route.fulfill({
-      json: {
-        case: record,
-        documents: [
-          {
-            ...syntheticWorkflowFixtures.dataAnalysis.documents[0],
-            state: "processing",
-          },
-        ],
-        findings: [],
-        evidence: [],
-        deliverables: [],
-      },
     });
+    await page.getByLabel("Message to Evianta").fill("Private old sales notes");
+    await page.getByRole("button", { name: "Send message" }).click();
+    await pendingRequest;
+    await page
+      .getByRole("button", { name: "Sign out and revoke this session" })
+      .click();
+    await signIn(page);
+    await expect(
+      page.getByRole("heading", { name: "Hi, I am Evianta." }),
+    ).toBeVisible();
+    await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
+    await expect(page.getByText("Private old sales notes")).toHaveCount(0);
+    await expect(page.getByRole("list", { name: "Task setup" })).toHaveCount(0);
+
+    const response = page.waitForResponse(
+      (candidate) =>
+        candidate.request().method() === "POST" &&
+        new URL(candidate.url()).pathname ===
+          (phase === "create" ? "/cases" : "/cases/private-case/documents"),
+    );
+    release();
+    await (await response).finished();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await page.waitForTimeout(300);
+
+    await expect(
+      page.getByRole("heading", { name: "Hi, I am Evianta." }),
+    ).toBeVisible();
+    await expect(page.getByRole("log")).toHaveCount(0);
+    await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0);
+    expect(uploadCount).toBe(phase === "create" ? 0 : 1);
+    expect(runCount).toBe(0);
   });
-  await page
-    .getByRole("button", { name: "Retry second.csv", exact: true })
-    .click();
-  await expect.poll(() => uploadCount).toBe(3);
-  await expect(page).toHaveURL(/\/cases\/private-case$/);
-  expect(createCount).toBe(1);
-  expect(uploadCount).toBe(3);
+}
+
+test("retrying after a failed upload reuses the same case and skips finished files", async ({
+  page,
+}) => {
+  const state = await mockApi(page, { failUploadOnce: "second.csv" });
+  await page.goto("/#access=jury-amber-falcon-47");
+  await page.getByLabel("Attach records").setInputFiles(
+    ["first.csv", "second.csv"].map((name) => ({
+      name,
+      mimeType: "text/csv",
+      buffer: Buffer.from("month,revenue\nJan,1"),
+    })),
+  );
+  await page.getByLabel("Message to Evianta").fill("Analyze my sales");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText("Temporary upload failure.")).toBeVisible();
+  await expect(
+    page.getByText("Your case is saved", { exact: false }),
+  ).toBeVisible();
+  expect(state.created).toHaveLength(1);
+  expect(state.uploadAttempts).toEqual(["first.csv", "second.csv"]);
+
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByText("Work finished")).toBeVisible();
+  expect(state.created).toHaveLength(1);
+  expect(state.uploadAttempts).toEqual([
+    "first.csv",
+    "second.csv",
+    "second.csv",
+  ]);
+  expect(state.runs).toBe(1);
 });
 
 for (const status of ["queued", "running", "failed", "none"] as const) {
@@ -364,7 +248,7 @@ for (const status of ["queued", "running", "failed", "none"] as const) {
     if (status !== "none") {
       await expect(
         page.getByRole("list", { name: "Run event timeline" }),
-      ).toContainText("A review task started");
+      ).toContainText("Analyst started");
       expect(streams).toBeGreaterThanOrEqual(2);
     } else {
       expect(streams).toBe(0);

@@ -50,6 +50,8 @@ const profile = (
   ],
   modelTier,
   enabled: true,
+  kind: "specialist",
+  workflows: ["msme-payment"],
 });
 
 export const msmeDocumentAnalysisProfile = profile(
