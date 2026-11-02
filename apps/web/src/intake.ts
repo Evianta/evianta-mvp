@@ -65,6 +65,30 @@ export interface WorkflowSpec {
   allowedMimeTypes: string[];
 }
 
+const attachmentMimeTypes: Record<string, string> = {
+  ".csv": "text/csv",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".pdf": "application/pdf",
+  ".xls": "application/vnd.ms-excel",
+  ".tsv": "text/tab-separated-values",
+  ".tab": "text/tab-separated-values",
+  ".json": "application/json",
+  ".txt": "text/plain",
+  ".text": "text/plain",
+  ".md": "text/markdown",
+  ".markdown": "text/markdown",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+};
+const allowedExtensions = Object.keys(attachmentMimeTypes);
+const allowedMimeTypes = [...new Set(Object.values(attachmentMimeTypes))];
+
 export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
   "data-analysis": {
     label: "Data analysis",
@@ -73,11 +97,8 @@ export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
     recommendedDocuments: ["Data dictionary", "Reporting-period notes"],
     maxFileBytes: 25 * 1024 * 1024,
     maxPdfPages: 80,
-    allowedExtensions: [".csv", ".xlsx"],
-    allowedMimeTypes: [
-      "text/csv",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ],
+    allowedExtensions,
+    allowedMimeTypes,
   },
   "tax-notice": {
     label: "Tax notice",
@@ -86,8 +107,8 @@ export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
     recommendedDocuments: ["Credit statements", "Prior correspondence"],
     maxFileBytes: 25 * 1024 * 1024,
     maxPdfPages: 120,
-    allowedExtensions: [".pdf", ".csv"],
-    allowedMimeTypes: ["application/pdf", "text/csv"],
+    allowedExtensions,
+    allowedMimeTypes,
   },
   "msme-payment": {
     label: "MSME delayed payment",
@@ -96,8 +117,8 @@ export const workflowSpecs: Record<UseCase, WorkflowSpec> = {
     recommendedDocuments: ["Delivery confirmation", "Correspondence"],
     maxFileBytes: 25 * 1024 * 1024,
     maxPdfPages: 120,
-    allowedExtensions: [".pdf", ".csv"],
-    allowedMimeTypes: ["application/pdf", "text/csv"],
+    allowedExtensions,
+    allowedMimeTypes,
   },
 };
 
@@ -129,16 +150,16 @@ export function validateUploadFile(
   if (file.size > spec.maxFileBytes) {
     return `Each file must be at most ${formatFileSize(spec.maxFileBytes)}.`;
   }
-  const extension = file.name.split(".").at(-1)?.toLowerCase();
-  const inferredMimeType =
-    extension === "csv"
-      ? "text/csv"
-      : extension === "pdf"
-        ? "application/pdf"
-        : extension === "xlsx"
-          ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          : file.type;
-  if (!spec.allowedMimeTypes.includes(inferredMimeType)) {
+  const extension = /\.[^.]+$/.exec(file.name)?.[0].toLowerCase();
+  const inferredMimeType = extension
+    ? attachmentMimeTypes[extension]
+    : undefined;
+  if (
+    !extension ||
+    !spec.allowedExtensions.includes(extension) ||
+    !inferredMimeType ||
+    !spec.allowedMimeTypes.includes(inferredMimeType)
+  ) {
     return "This workflow does not accept that file type.";
   }
   return null;
@@ -148,7 +169,7 @@ function normalizeDocumentName(name: string): string {
   return name
     .trim()
     .toLowerCase()
-    .replace(/\.(csv|pdf|xlsx)$/i, "")
+    .replace(/\.[^.]+$/, "")
     .replace(/[-_]+/g, " ")
     .replace(/\s+/g, " ");
 }

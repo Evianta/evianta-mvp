@@ -209,6 +209,7 @@ function TaskComposer({
     }
     const limits = {
       ...workflowSpecs["data-analysis"],
+      allowedExtensions: acceptedExtensions,
       allowedMimeTypes: acceptedMimeTypes,
       maxFileBytes: configuration.uploadMaxBytes,
     };
@@ -279,7 +280,9 @@ function TaskComposer({
     }
     if (!files.length) {
       setError(
-        "Attach a CSV or Excel source dataset before starting data analysis.",
+        useCase === "data-analysis"
+          ? "Attach a source dataset before starting data analysis."
+          : "Attach the source records before starting this task.",
       );
       return;
     }

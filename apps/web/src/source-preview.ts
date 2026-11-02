@@ -24,8 +24,12 @@ export function sourcePreviewMimeType(document: {
     return "text/csv";
   }
   if (
-    mimeType === "text/plain" ||
-    (genericMime && ["txt", "text"].includes(extension ?? ""))
+    mimeType.startsWith("text/") ||
+    mimeType === "application/json" ||
+    (genericMime &&
+      ["txt", "text", "md", "markdown", "json", "tsv", "tab"].includes(
+        extension ?? "",
+      ))
   ) {
     return "text/plain";
   }

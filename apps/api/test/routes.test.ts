@@ -324,6 +324,33 @@ describe("case API routes", () => {
     });
   });
 
+  it.each(["text/markdown", "text/plain", "application/octet-stream"])(
+    "uploads and extracts Markdown evidence declared as %s",
+    async (mimeType) => {
+      const created = await createCase();
+      const text = "# Synthetic evidence\n\nInvoice amount: INR 236,000.\n";
+      const form = new FormData();
+      form.append("files", new Blob([text], { type: mimeType }), "invoice.md");
+      const response = await fetch(
+        `${baseUrl}/cases/${created.case.id}/documents`,
+        { method: "POST", headers: authHeaders(), body: form },
+      );
+      expect(response.status).toBe(201);
+      const body = (await response.json()) as {
+        documents: Array<{ id: string; name: string; state: string }>;
+      };
+      expect(body.documents).toEqual([
+        expect.objectContaining({ name: "invoice.md", state: "ready" }),
+      ]);
+      const download = await fetch(
+        `${baseUrl}/cases/${created.case.id}/documents/${body.documents[0]!.id}/download`,
+        { headers: authHeaders() },
+      );
+      expect(download.status).toBe(200);
+      expect(await download.text()).toBe(text);
+    },
+  );
+
   it("bounds uploads, protects child downloads, and replays persisted run events", async () => {
     const created = await createCase();
     const form = new FormData();

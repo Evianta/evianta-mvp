@@ -97,7 +97,7 @@ describe("case intake", () => {
     ).toBeNull();
     expect(
       validateUploadFile(
-        { name: "notice.pdf", size: 12, type: "application/pdf" },
+        { name: "program.exe", size: 12, type: "text/plain" },
         spec,
       ),
     ).toContain("file type");
@@ -114,4 +114,45 @@ describe("case intake", () => {
       ),
     ).toBeNull();
   });
+
+  it.each(Object.keys(workflowSpecs) as (keyof typeof workflowSpecs)[])(
+    "accepts supported records and supporting documents for %s",
+    (workflow) => {
+      const spec = workflowSpecs[workflow];
+      for (const extension of spec.allowedExtensions) {
+        expect(
+          validateUploadFile(
+            { name: `record${extension}`, size: 100, type: "" },
+            spec,
+          ),
+        ).toBeNull();
+      }
+      for (const type of [
+        "",
+        "text/plain",
+        "text/markdown",
+        "application/octet-stream",
+      ]) {
+        expect(
+          validateUploadFile({ name: "NOTICE.MD", size: 100, type }, spec),
+        ).toBeNull();
+      }
+      expect(spec.allowedExtensions).toEqual(
+        expect.arrayContaining([
+          ".md",
+          ".txt",
+          ".json",
+          ".csv",
+          ".xlsx",
+          ".pdf",
+          ".png",
+        ]),
+      );
+      for (const name of ["notice.docx", "notice.exe", "notice"]) {
+        expect(
+          validateUploadFile({ name, size: 100, type: "text/plain" }, spec),
+        ).toContain("file type");
+      }
+    },
+  );
 });

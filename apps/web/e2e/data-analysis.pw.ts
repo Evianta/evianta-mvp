@@ -4,6 +4,7 @@ import {
   type RunDto,
 } from "@evianta/core";
 import { expect, test } from "@playwright/test";
+import { workflowSpecs } from "../src/intake";
 
 const record = {
   ...syntheticWorkflowFixtures.dataAnalysis.case,
@@ -167,10 +168,13 @@ test("shows each supported workflow's file limits in task intake", async ({
 
   const dropzone = page.locator("#accepted-files");
   await expect(dropzone).toContainText(".csv, .xlsx");
-  await expect(dropzone).not.toContainText("PDF files");
+  await expect(dropzone).toContainText("PDF files are limited to 80 pages");
   await expect(page.locator("#case-files")).toHaveAttribute(
     "accept",
-    ".csv,.xlsx,.pdf,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf",
+    [
+      ...workflowSpecs["data-analysis"].allowedExtensions,
+      ...workflowSpecs["data-analysis"].allowedMimeTypes,
+    ].join(","),
   );
 
   page.once("dialog", (dialog) => dialog.accept());
@@ -261,6 +265,98 @@ test("creates a case with two CSVs without optional supporting documents", async
   expect(uploaded).toBe(2);
   expect(started).toBe(1);
 });
+
+for (const useCase of ["tax-notice", "msme-payment"] as const) {
+  test(`starts ${useCase} with Markdown evidence and CSV records`, async ({
+    page,
+  }) => {
+    const caseRecord = { ...record, useCase };
+    const documents = ["notice.md", "records.csv"].map((name, index) => ({
+      ...workspace.documents[0]!,
+      id: `document-${index}`,
+      name,
+      mimeType: index === 0 ? "application/octet-stream" : "text/csv",
+    }));
+    await page.route("**/intake/configuration", (route) =>
+      route.fulfill({
+        json: {
+          workflows: ["data-analysis", "tax-notice", "msme-payment"],
+          uploadMaxBytes: 25 * 1024 * 1024,
+          uploadMaxFiles: 10,
+          documentMaxPages: 80,
+        },
+      }),
+    );
+    await page.route("**/auth/token", (route) =>
+      route.fulfill({
+        json: {
+          accessToken: "session-token",
+          expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        },
+      }),
+    );
+    let uploaded = 0;
+    let started = 0;
+    await page.route("**/cases", async (route) => {
+      expect(route.request().postDataJSON()).toMatchObject({ useCase });
+      await route.fulfill({ json: { case: caseRecord } });
+    });
+    await page.route("**/cases/private-case/documents", async (route) => {
+      expect(route.request().postData()).toContain(
+        `filename="${documents[uploaded]!.name}"`,
+      );
+      await route.fulfill({ json: { documents: [documents[uploaded++]] } });
+    });
+    await page.route("**/runs", async (route) => {
+      started++;
+      await route.fulfill({ json: { run: completedRun } });
+    });
+    await page.route("**/cases/private-case", (route) =>
+      route.request().headers().accept === "application/json"
+        ? route.fulfill({
+            json: {
+              ...workspace,
+              case: caseRecord,
+              documents,
+              deliverables: [],
+            },
+          })
+        : route.continue(),
+    );
+    await page.route("**/cases/private-case/runs/latest", (route) =>
+      route.fulfill({ json: { run: null } }),
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Enter access key" }).click();
+    await page.getByLabel("Access key").fill("test-key");
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page
+      .getByLabel("Task prompt", { exact: true })
+      .fill(
+        useCase === "tax-notice"
+          ? "Review this income-tax notice and prepare a response."
+          : "Review these MSME overdue payment records.",
+      );
+    await page.locator("#case-files").setInputFiles([
+      {
+        name: "notice.md",
+        mimeType: "application/octet-stream",
+        buffer: Buffer.from("# Synthetic evidence\nSource record.\n"),
+      },
+      {
+        name: "records.csv",
+        mimeType: "text/csv",
+        buffer: Buffer.from("record,amount\nA,100\n"),
+      },
+    ]);
+    await expect(page.getByText("notice.md", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Start task", exact: true }).click();
+    await expect(page).toHaveURL(/\/cases\/private-case$/);
+    expect(uploaded).toBe(2);
+    expect(started).toBe(1);
+  });
+}
 
 test("reopens a completed analysis and renders its report and charts", async ({
   page,

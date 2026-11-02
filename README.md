@@ -105,8 +105,28 @@ existing model limits. File limits and enabled workflows come from the authentic
 `GET /intake/configuration` endpoint. MSME delayed-payment work and tax notices are
 available for live work.
 
+All three workflows accept CSV, TSV, Excel (`.xlsx`/`.xls`), JSON, plain text,
+Markdown (`.md`/`.markdown`), PDF and supported images (PNG, JPEG, WebP, GIF,
+BMP and TIFF). The file picker and drag-and-drop use the same type and size
+checks; the API still validates file contents before extraction. Markdown and
+other text records are extracted without OCR and shown as plain text in the
+evidence viewer, not rendered as HTML. Data analysis still needs a usable
+tabular dataset; supporting documents do not replace it.
+
+For the synthetic tax-notice and MSME test packs, attach only the source files
+for one case at a time. Exclude evaluator answer keys such as
+`expected-outcome.md` and the tax pack's `expected-outcomes` directory.
+The mock provider checks workflow execution only; it does not analyze those
+documents or validate the benchmark's professional recommendations.
+
 MSME payment reconciliation counts one amount per identified invoice or payment
 only when each record claim is in its own finding and linked to a source location.
+Supported credit notes are also individually sourced and deducted once.
+Pending or unreadable credit-note amounts block the balance. Explicitly sourced
+zero-payment records allow an unpaid invoice to be reconciled; absent payment
+records do not establish zero payments. Disputed penalties and unsupported
+set-offs are not deductions. A candidate principal balance does not establish
+acceptance, invoice-level aging, interest or statutory eligibility.
 Low or unassessed evidence, extraction confidence below 0.75, handwriting,
 extraction warnings, and unresolved high-severity questions block the balance.
 Unreadable duplicate claims and grouped records also block calculation, and

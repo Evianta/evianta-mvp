@@ -57,7 +57,7 @@ export const msmeDocumentAnalysisProfile = profile(
   MSME_DOCUMENT_ANALYSIS_ROLE,
   "MSME Document Analyst",
   "Invoice and correspondence analysis",
-  "Extracts invoice, payment, delivery, agreement, and correspondence details with source references.",
+  "Extracts invoice, payment, credit-note, delivery, agreement, and correspondence details with source references.",
   [
     "Extract dates and figures",
     "Link records to source evidence",
@@ -71,10 +71,11 @@ export const msmePaymentReconciliationProfile = profile(
   MSME_PAYMENT_RECONCILIATION_ROLE,
   "Payment Reconciliation Specialist",
   "Invoice and payment reconciliation",
-  "Calculates outstanding amounts from confirmed invoice and payment totals.",
+  "Calculates candidate outstanding amounts from confirmed invoices, payments and supported credit notes.",
   [
     "Reconcile invoice totals",
     "Account for partial payments",
+    "Deduct supported credit notes",
     "Surface unmatched records",
   ],
   "mid",
@@ -144,7 +145,7 @@ export function createMsmePaymentPlan(): ReferencePlan {
         dependsOn: [],
         required: true,
         instructions:
-          "Organize invoices, payments, agreements, delivery records, and correspondence. Extract dates and figures with source locations and confidence; flag uncertainty.",
+          "Organize invoices, payments, credit notes, agreements, delivery records, and correspondence. Extract each record in its own source-linked finding; distinguish supported credits from pending credits and unsupported set-offs.",
       },
       {
         key: "payment-reconciliation",
@@ -153,7 +154,7 @@ export function createMsmePaymentPlan(): ReferencePlan {
         dependsOn: ["document-analysis"],
         required: true,
         instructions:
-          "Use the exact claim labels 'invoice amount: <identifier>' and 'payment amount: <identifier>' from source-linked findings. Sum one amount per distinct record and compute outstanding as invoices minus payments, accounting for partial payments and unmatched records.",
+          "Use the exact claim labels 'invoice amount: <identifier>', 'payment amount: <identifier>' and 'credit note amount: <identifier>' from source-linked findings. Sum each distinct record once and compute candidate outstanding as invoices minus payments and supported credit notes. Unresolved credits block calculation; do not deduct disputed penalties or unsupported set-offs.",
       },
       {
         key: "evidence-analysis",
@@ -209,7 +210,7 @@ const researchResultSchema = z.object({
 const researchQuery =
   "Find current official Indian government guidance on delayed payments to micro and small enterprises, including official routes for seeking assistance. Return only verifiable official sources; do not infer facts about a supplier or transaction.";
 
-type RecordKind = "invoice" | "payment";
+type RecordKind = "invoice" | "payment" | "credit note";
 
 interface RecordSet {
   total: number;
@@ -218,7 +219,7 @@ interface RecordSet {
   problems: string[];
 }
 
-const recordLabelPattern = /^(invoice|payment) amount\s*:\s*(.+)$/;
+const recordLabelPattern = /^(invoice|payment|credit note) amount\s*:\s*(.+)$/;
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
 
@@ -253,8 +254,8 @@ function hasReliableRecordEvidence(
 
 /**
  * Sums one amount per distinct record. A record is identified by the label
- * "<invoice|payment> amount: <identifier>", so repeated extractions of the same
- * record count once while distinct records with equal amounts both count.
+ * "<invoice|payment|credit note> amount: <identifier>". Repeated extractions count
+ * once while distinct records with equal amounts both count.
  */
 function collectRecords(
   findings: readonly PriorFinding[],
@@ -291,6 +292,11 @@ function collectRecords(
       };
       if (claim.value !== null && Number.isFinite(claim.value)) {
         record.amounts.add(claim.value);
+        if (claim.value < 0) {
+          record.problems.add(
+            `The amount of ${kind} "${identifier}" must be nonnegative.`,
+          );
+        }
       } else {
         record.problems.add(
           `The amount of ${kind} "${identifier}" is missing or unreadable.`,
@@ -400,45 +406,61 @@ function formatAmount(value: number): string {
 function paymentReconciliationFinding(
   invoices: RecordSet,
   payments: RecordSet,
+  creditNotes: RecordSet,
 ): SpecialistOutput["findings"][number] {
-  const problems = [...invoices.problems, ...payments.problems];
+  const problems = [
+    ...invoices.problems,
+    ...payments.problems,
+    ...creditNotes.problems,
+  ];
   if (!invoices.count) problems.push("No source-linked invoice records found.");
   if (!payments.count) problems.push("No source-linked payment records found.");
   const evidence = sourceEvidenceDrafts([
     ...invoices.sources,
     ...payments.sources,
+    ...creditNotes.sources,
   ]);
   if (problems.length) {
     return {
       title: "Outstanding balance cannot yet be calculated",
-      description: `Every invoice and payment record needs one source-linked amount before a balance is calculated. ${problems.join(" ")}`,
+      description: `Every invoice, payment and credit-note record needs one source-linked amount before a balance is calculated. ${problems.join(" ")}`,
       severity: "low",
       confidence: 1,
       evidence,
       assumptions: [],
       openQuestions: [
         {
-          text: "Provide or confirm each invoice amount and the payments recorded against those invoices, resolving the listed record issues.",
+          text: "Provide or confirm each invoice amount, payment and credit note, resolving the listed record issues. Confirm zero payments explicitly from source records rather than assuming no payments.",
           severity: "high",
         },
       ],
       claims: [],
     };
   }
-  const outstanding = roundMoney(invoices.total - payments.total);
+  const outstanding = roundMoney(
+    invoices.total - payments.total - creditNotes.total,
+  );
   return {
     title: "Outstanding payment balance",
-    description: `${invoices.count} invoice record(s) total ${formatAmount(invoices.total)} and ${payments.count} payment record(s) total ${formatAmount(payments.total)}. Outstanding balance (invoices minus payments) is ${formatAmount(outstanding)}.`,
+    description: `${invoices.count} invoice record(s) total ${formatAmount(invoices.total)} and ${payments.count} payment record(s) total ${formatAmount(payments.total)}. ${creditNotes.count} supported credit note(s) total ${formatAmount(creditNotes.total)}. Candidate outstanding balance (invoices minus payments and supported credit notes) is ${formatAmount(outstanding)}. Disputed penalties and unsupported set-offs are not deducted; this arithmetic does not establish acceptance, a due date or legal eligibility.`,
     severity: outstanding > 0 ? "medium" : "info",
     confidence: 1,
     evidence,
-    assumptions: [],
+    assumptions: creditNotes.count
+      ? []
+      : [
+          "No credit-note amount was supplied. Confirm that no applicable credit notes are missing before relying on this candidate balance.",
+        ],
     openQuestions: [],
     claims: [
       {
         label: "outstanding balance",
         value: outstanding,
-        components: [invoices.total, -payments.total],
+        components: [
+          invoices.total,
+          -payments.total,
+          ...(creditNotes.count ? [-creditNotes.total] : []),
+        ],
         date: null,
       },
     ],
@@ -459,13 +481,14 @@ function createMsmePaymentReconciliationAgent(): SpecialistAgent {
       const finding = paymentReconciliationFinding(
         collectRecords(input.priorFindings, "invoice"),
         collectRecords(input.priorFindings, "payment"),
+        collectRecords(input.priorFindings, "credit note"),
       );
       const calculated = finding.claims.some(
         (claim) => claim.label === "outstanding balance",
       );
       const output = SpecialistOutputSchema.parse({
         summary: calculated
-          ? "The outstanding balance is calculated from confirmed invoice and payment totals."
+          ? "The candidate outstanding balance is calculated from confirmed invoices, payments and supported credit notes."
           : "The outstanding balance could not be calculated; resolve the listed record and evidence issues first.",
         findings: [finding],
         inputRequired: null,
@@ -649,7 +672,9 @@ export function createMsmePaymentSpecialists(): SpecialistAgent[] {
       [
         "You organize records for a delayed-payment case pack.",
         "Use only supplied document slices and prior findings.",
-        "For each invoice and each payment, report one source-linked claim whose label is exactly 'invoice amount: <invoice number>' or 'payment amount: <payment reference>'. The identifier must uniquely name the record; never combine records into one claim.",
+        "For each invoice, payment and supported credit note, report one source-linked claim per finding whose label is exactly 'invoice amount: <invoice number>', 'payment amount: <payment reference>' or 'credit note amount: <credit note number>'. Use nonnegative gross amounts; the reconciler subtracts payments and credit notes. The identifier must uniquely name the record; never combine records into one finding.",
+        "If supplied payment records explicitly confirm no payments, emit a source-linked zero payment claim labelled 'payment amount: no payments recorded'. Missing payment records do not prove zero payments.",
+        "A promised, disputed or missing credit note is not a supported deduction. Report its amount as null with an unresolved high-severity question under 'credit note amount: <reference>' until resolved. Never treat an unsupported penalty or set-off as a payment or credit note.",
         "Cite the document ID and page or cell for every material item.",
         "Flag uncertain extraction, partial payments, unmatched records, and disputed invoices.",
       ].join("\n"),
@@ -662,6 +687,7 @@ export function createMsmePaymentSpecialists(): SpecialistAgent[] {
         "Use only supplied document slices and prior findings.",
         "Cite a source location for each chronology event and flag disputed or unmatched items.",
         "Do not infer delivery, acceptance, or payment from missing records.",
+        "Check registration timing against supply, distinguish dispatch from acceptance, and keep disputed amounts and payment-allocation conflicts explicit. Block invoice-level aging and interest when acceptance or allocation is unproven; do not invent statutory eligibility or interest rates.",
       ].join("\n"),
     ),
     createMsmeLegalResearchAgent(),

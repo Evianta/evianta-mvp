@@ -229,6 +229,68 @@ describe("MSME payment workflow", () => {
     ]);
   });
 
+  it("deducts supported credit notes once without deducting a disputed penalty", async () => {
+    const result = await reconciler().run(
+      reconciliationInput([
+        sourceFinding("invoice amount: INV-2", 472_000, "invoice"),
+        sourceFinding("payment amount: PAY-1", 150_000, "payment-1"),
+        sourceFinding("payment amount: PAY-2", 100_000, "payment-2"),
+        sourceFinding("credit note amount: CN-2", 47_200, "credit-note"),
+        sourceFinding("credit note amount: CN-2", 47_200, "credit-note-copy"),
+        sourceFinding("disputed penalty: PEN-2", 30_000, "buyer-email"),
+      ]),
+      contextFor(testAi(), "payment-task"),
+    );
+    expect(result.output.findings[0]?.claims).toEqual([
+      {
+        label: "outstanding balance",
+        value: 174_800,
+        components: [472_000, -250_000, -47_200],
+        date: null,
+      },
+    ]);
+    expect(result.output.findings[0]?.evidence).toHaveLength(5);
+    expect(result.output.findings[0]?.description).toContain(
+      "unsupported set-offs are not deducted",
+    );
+  });
+
+  it("reconciles an explicitly source-confirmed zero payment", async () => {
+    const result = await reconciler().run(
+      reconciliationInput([
+        sourceFinding("invoice amount: INV-1", 236_000, "invoice"),
+        sourceFinding("payment amount: no payments recorded", 0, "ledger"),
+      ]),
+      contextFor(testAi(), "payment-task"),
+    );
+    expect(result.output.findings[0]?.claims[0]?.value).toBe(236_000);
+    expect(result.output.findings[0]?.description).toContain(
+      "does not establish acceptance",
+    );
+  });
+
+  it.each([
+    ["unreadable", null],
+    ["negative", -47_200],
+  ])(
+    "blocks a %s credit note instead of overstating principal",
+    async (_reason, amount) => {
+      const result = await reconciler().run(
+        reconciliationInput([
+          sourceFinding("invoice amount: INV-2", 472_000, "invoice"),
+          sourceFinding("payment amount: PAY-1", 250_000, "payment"),
+          sourceFinding("credit note amount: CN-2", amount, "credit-note"),
+        ]),
+        contextFor(testAi(), "payment-task"),
+      );
+      expect(result.output.findings[0]?.claims).toEqual([]);
+      expect(result.output.findings[0]?.description).toContain("CN-2");
+      expect(result.output.findings[0]?.openQuestions[0]?.severity).toBe(
+        "high",
+      );
+    },
+  );
+
   it.each([
     [
       "an invoice amount is unreadable",

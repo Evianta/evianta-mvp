@@ -196,6 +196,27 @@ const ingestRequest = (documentId: string) => ({
 });
 
 describe("deterministic extraction", () => {
+  it.each(["text/markdown", "text/plain", "application/octet-stream"])(
+    "extracts Markdown evidence declared as %s without OCR",
+    async (mimeType) => {
+      const h = await setup({ ocr: null });
+      const text = "# Synthetic notice\n\nProposed adjustment: INR 50,000.\n";
+      const document = await h.addDocument(
+        Buffer.from(text),
+        mimeType,
+        "notice.md",
+      );
+      const result = await h.ingestion.ingest(ingestRequest(document.id));
+      expect(result.status).toBe("ready");
+      expect(result.extraction).toMatchObject({
+        kind: "text",
+        pages: [{ text, method: "parse", confidence: 1 }],
+        warnings: [],
+      });
+      expect(h.generate).not.toHaveBeenCalled();
+    },
+  );
+
   it("does not infer exponent-like identifiers as numbers", async () => {
     const h = await setup();
     const doc = await h.addDocument(
