@@ -105,6 +105,13 @@ existing model limits. File limits and enabled workflows come from the authentic
 `GET /intake/configuration` endpoint. MSME delayed-payment work and tax notices are
 available for live work.
 
+MSME payment reconciliation counts one amount per identified invoice or payment
+only when each record claim is in its own finding and linked to a source location.
+Low or unassessed evidence, extraction confidence below 0.75, handwriting,
+extraction warnings, and unresolved high-severity questions block the balance.
+Unreadable duplicate claims and grouped records also block calculation, and
+distinct evidence locations are retained even when they share a source reference.
+
 Tax notice work analyzes the supplied records, reconciles income and credits,
 researches general official guidance, prepares a response draft and runs an
 independent review. Drafting receives the original notice findings, source
