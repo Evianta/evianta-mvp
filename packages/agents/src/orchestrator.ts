@@ -1536,7 +1536,7 @@ export class Orchestrator {
       }));
     if (!fits(trim(1))) {
       throw new AiError(
-        `${label} findings and source identities exceed the configured input limit even with minimal excerpts.`,
+        `${label} required content and source identities exceed the configured input limit even with minimal excerpts.`,
         "input-limit-exceeded",
       );
     }
@@ -1928,6 +1928,18 @@ export class Orchestrator {
           this.budgetReviewInput({
             case: this.caseInput(execution),
             instructions: this.instructionsFor(execution, task, state),
+            drafts: ancestors.flatMap((source) => {
+              const outcome = state.results[source.id];
+              return outcome?.status === "completed"
+                ? [
+                    {
+                      taskId: source.id,
+                      role: outcome.role,
+                      text: outcome.summary,
+                    },
+                  ]
+                : [];
+            }),
             findings,
             deterministicFlags: flags,
           }),

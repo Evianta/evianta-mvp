@@ -129,11 +129,16 @@ page, no extraction warnings, and no handwritten pages. Model-generated
 confidence cannot override these checks.
 Model-based specialists and independent review shorten source excerpts when
 needed to fit their input budgets,
-marks them as partial, and retains all findings, claims, evidence IDs and source
+mark them as partial, and retain all findings, claims, evidence IDs and source
 positions. Stored evidence remains unchanged. If the required findings and
 source identities still cannot fit, the task fails explicitly rather than dropping
 them. Specialist excerpts are budgeted before adding document slices. Deterministic
 reconciliation retains complete source excerpts.
+Independent review also receives the complete task draft summaries, including
+assertions not repeated in findings. These drafts are never shortened to fit a
+model limit; an oversized required draft fails explicitly before model dispatch.
+The tax workspace shows the latest deliverable's detailed findings, assumptions,
+question status and evidence links alongside the editable draft summaries.
 Search citations without a claim retain a source
 discovery note, not an inferred legal conclusion; excerpts stay as quotes.
 Unavailable search raises a

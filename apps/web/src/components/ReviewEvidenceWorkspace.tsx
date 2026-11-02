@@ -518,7 +518,7 @@ export function ReviewEvidenceWorkspace({
                         )?.name ?? item.documentId)
                       : item.citation.title}
                   </span>
-                  <span className="mt-1 block text-muted-foreground">
+                  <span className="mt-1 block text-foreground">
                     {evidenceLocation(item)} · {item.confidence} confidence
                   </span>
                 </button>
@@ -558,6 +558,19 @@ export function ReviewEvidenceWorkspace({
                   {selectedEvidence.location.textQuote}
                 </blockquote>
               )}
+            {selectedEvidence.kind === "research" && (
+              <div className="mt-3 space-y-2 text-xs">
+                <p className="font-semibold">
+                  {selectedEvidence.citation.title}
+                </p>
+                <p>{selectedEvidence.citation.claim}</p>
+                {selectedEvidence.citation.span && (
+                  <blockquote className="border-l-2 border-primary/40 pl-3 text-muted-foreground">
+                    {selectedEvidence.citation.span}
+                  </blockquote>
+                )}
+              </div>
+            )}
             {sourceLoading && (
               <p className="mt-3 text-xs text-muted-foreground" role="status">
                 Opening source…

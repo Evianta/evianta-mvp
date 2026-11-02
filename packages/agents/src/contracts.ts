@@ -175,6 +175,15 @@ export type ReviewFlag = z.infer<typeof ReviewFlagSchema>;
 export const ReviewInputSchema = z.object({
   case: SpecialistInputSchema.shape.case,
   instructions: z.string(),
+  drafts: z
+    .array(
+      z.object({
+        taskId: z.string(),
+        role: z.string(),
+        text: z.string(),
+      }),
+    )
+    .optional(),
   findings: z.array(PriorFindingSchema),
   deterministicFlags: z.array(ReviewFlagSchema),
 });

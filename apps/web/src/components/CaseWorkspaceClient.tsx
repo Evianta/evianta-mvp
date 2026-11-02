@@ -28,6 +28,7 @@ import { LoadingSkeleton } from "./LoadingSkeleton";
 import { PrivateGate } from "./PrivateGate";
 import { StatusBadge, type StatusTone } from "./Badges";
 import { DataAnalysisResults } from "./DataAnalysisResults";
+import { CaseFindings } from "./CaseFindings";
 import { ReviewEvidenceWorkspace } from "./ReviewEvidenceWorkspace";
 
 const workflowNames: Record<Case["useCase"], string> = {
@@ -682,17 +683,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
               onOpenEvidence={openEvidence}
             />
           ) : (
-            <div className="mt-5 rounded-lg border border-dashed border-border p-4">
-              <p className="text-xs font-medium">
-                {events.some((event) => event.payload.type === "finding-added")
-                  ? "Finding events received"
-                  : "No findings to review yet"}
-              </p>
-              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                Findings appear here only after they are returned by the
-                authenticated API. This page does not invent private results.
-              </p>
-            </div>
+            <CaseFindings workspace={workspace} onOpenEvidence={openEvidence} />
           )}
           <div className="mt-4 grid grid-cols-2 gap-2">
             <div className="rounded-md bg-background p-3">

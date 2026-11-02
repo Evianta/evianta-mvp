@@ -12,6 +12,7 @@ import {
   createReviewAgent,
   SpecialistModelOutputSchema,
   SpecialistInputSchema,
+  ReviewInputSchema,
   type ReviewInput,
   TAX_NOTICE_ANALYST_ROLE,
   TAX_RECONCILIATION_ROLE,
@@ -101,6 +102,69 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
+  it.each(["no findings", "unrelated findings"])(
+    "reviews the displayed tax draft with %s",
+    async (scenario) => {
+      await store.repositories.cases.replaceOwned(
+        makeCase(CASE_ID, { useCase: "tax-notice" }),
+        OWNER,
+      );
+      const draft =
+        "The taxpayer owes no penalty and must respond within seven days.";
+      const concern =
+        "Verify the penalty outcome and deadline; the draft assertions lack supporting evidence.";
+      const provider = new ScriptedProvider({
+        "case-analysis": () => specialistOutput("analysis"),
+        "response-preparation": () => ({
+          summary: draft,
+          findings:
+            scenario === "no findings"
+              ? []
+              : specialistOutput("unrelated").findings,
+          inputRequired: null,
+        }),
+        review: (input) => {
+          const review = ReviewInputSchema.parse(input);
+          expect(review.drafts).toContainEqual({
+            taskId: expect.stringContaining(":response-preparation"),
+            role: TAX_RESPONSE_DRAFTER_ROLE,
+            text: draft,
+          });
+          expect(JSON.stringify(review.findings)).not.toContain(draft);
+          return {
+            summary: "Draft assertions need professional verification.",
+            items: [{ text: concern, severity: "high", findingId: null }],
+          };
+        },
+      });
+      const h = harness({
+        provider,
+        plan: createTaxNoticePlan(),
+        specialists: createTaxNoticeSpecialists(),
+      });
+      const { run, result } = await startRunAsync(h);
+      expect(result?.run?.status).toBe("completed");
+      const pack = (
+        await store.repositories.deliverables.listForRun(run.id, scope)
+      )[0]!;
+      expect(
+        pack.sections.find(
+          (section) => section.producingRole === TAX_RESPONSE_DRAFTER_ROLE,
+        )?.content,
+      ).toMatchObject({ summary: draft });
+      const findings = await store.repositories.findings.listForCase(scope);
+      expect(
+        findings.flatMap((finding) => finding.openQuestions),
+      ).toContainEqual(
+        expect.objectContaining({
+          text: concern,
+          severity: "high",
+          status: "open",
+        }),
+      );
+    },
+  );
+
   it.each(["source text ".repeat(250), "é".repeat(2_750)])(
     "budgets repeated tax drafting excerpts (scenario %#)",
     async (quote) => {
@@ -291,6 +355,7 @@ describe("orchestrator", () => {
           key,
           () => {
             const output = specialistOutput(key);
+            output.summary = `${key} draft ${"complete narrative ".repeat(50)}`;
             output.findings[0]!.evidence[0]!.textQuote = quote;
             output.findings[0]!.evidence.push({
               kind: "research",
@@ -320,6 +385,13 @@ describe("orchestrator", () => {
     expect(result?.run?.status).toBe("completed");
     const input = provider.inputs.get("review")![0] as ReviewInput;
     expect(input.findings).toHaveLength(3);
+    expect(input.drafts).toEqual(
+      keys.map((key) => ({
+        taskId: expect.stringContaining(`:${key}`),
+        role: "analyst",
+        text: `${key} draft ${"complete narrative ".repeat(50)}`,
+      })),
+    );
     const reviewer = createReviewAgent();
     expect(
       inputTokenAllowance({
@@ -363,25 +435,34 @@ describe("orchestrator", () => {
     expect(provider.count("review")).toBe(1);
   });
 
-  it("fails explicitly when mandatory review findings cannot fit even without full excerpts", async () => {
-    const provider = new ScriptedProvider({
-      a: () => specialistOutput("a", { description: "x".repeat(50_000) }),
-      review: () => reviewOutput,
-    });
-    const h = harness({
-      provider,
-      plan: planOf([
-        { key: "a" },
-        { key: "review", role: "independent-reviewer", dependsOn: ["a"] },
-      ]),
-    });
-    const { run } = await startRunAsync(h);
-    expect((await tasksOf(run.id)).review).toMatchObject({
-      status: "failed",
-      lastError: { code: "input-limit-exceeded" },
-    });
-    expect(provider.count("review")).toBe(0);
-  });
+  it.each(["findings", "draft"])(
+    "fails explicitly when mandatory review %s cannot fit",
+    async (content) => {
+      const provider = new ScriptedProvider({
+        a: () => ({
+          ...specialistOutput(
+            "a",
+            content === "findings" ? { description: "x".repeat(50_000) } : {},
+          ),
+          ...(content === "draft" ? { summary: "x".repeat(50_000) } : {}),
+        }),
+        review: () => reviewOutput,
+      });
+      const h = harness({
+        provider,
+        plan: planOf([
+          { key: "a" },
+          { key: "review", role: "independent-reviewer", dependsOn: ["a"] },
+        ]),
+      });
+      const { run } = await startRunAsync(h);
+      expect((await tasksOf(run.id)).review).toMatchObject({
+        status: "failed",
+        lastError: { code: "input-limit-exceeded" },
+      });
+      expect(provider.count("review")).toBe(0);
+    },
+  );
 
   it.each([
     "low-confidence",
