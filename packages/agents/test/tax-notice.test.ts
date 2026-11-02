@@ -143,6 +143,13 @@ describe("tax notice workflow", () => {
     "grouped figures with mixed confidence",
     "mixed source confidence",
     "distinct locations with shared reference",
+    "unreadable amended return",
+    "unknown amended return without questions",
+    "low extraction confidence",
+    "handwritten extraction",
+    "extraction warnings",
+    "unknown extraction reliability",
+    "reliable OCR",
   ])("reconciles only traceable figures: %s", async (scenario) => {
     const ai = createAi({
       provider: new MockProvider({ responses: [] }),
@@ -203,6 +210,12 @@ describe("tax notice workflow", () => {
           confidence: "high" as const,
           documentId,
           location: { page: 1, textQuote: label },
+          extraction: {
+            method: "pdf-text",
+            confidence: 1,
+            warnings: [],
+            pages: [{ index: 0, method: "pdf-text", confidence: 1 }],
+          },
         },
       ],
       claims: [{ label, value, components: null, date: null }],
@@ -229,6 +242,58 @@ describe("tax notice workflow", () => {
       humanInput: null,
     };
     const returnedIncome = input.priorFindings[0]!;
+    if (
+      scenario === "unreadable amended return" ||
+      scenario === "unknown amended return without questions"
+    ) {
+      const amended = sourceFinding("return income", 0, "amended-return");
+      amended.claims[0]!.value = null;
+      if (scenario === "unreadable amended return") {
+        amended.openQuestions = [
+          {
+            id: "amended-income-question",
+            text: "Which return income is current? The amended return is unreadable.",
+            severity: "high",
+            status: "open",
+            resolutionNote: null,
+            actorId: null,
+            updatedAt: null,
+          },
+        ];
+      }
+      input.priorFindings.push(amended);
+    }
+    if (scenario === "unknown extraction reliability") {
+      delete returnedIncome.sourceEvidence![0]!.extraction;
+    }
+    if (
+      scenario === "low extraction confidence" ||
+      scenario === "handwritten extraction" ||
+      scenario === "extraction warnings" ||
+      scenario === "reliable OCR"
+    ) {
+      const extraction = returnedIncome.sourceEvidence![0]!.extraction!;
+      extraction.method =
+        scenario === "handwritten extraction" ? "handwriting" : "ocr";
+      extraction.confidence =
+        scenario === "low extraction confidence" ? 0.4 : 0.9;
+      extraction.pages = [
+        {
+          index: 0,
+          method: extraction.method,
+          confidence: extraction.confidence,
+        },
+      ];
+      if (scenario === "extraction warnings") {
+        extraction.warnings = [
+          {
+            code: "handwriting-needs-review",
+            message: "Verify handwritten text.",
+            pageIndex: 0,
+          },
+        ];
+      }
+    }
     if (scenario === "grouped figures with mixed confidence") {
       const notice = input.priorFindings.splice(1, 1)[0]!;
       returnedIncome.claims.push(...notice.claims);
@@ -314,7 +379,8 @@ describe("tax notice workflow", () => {
       scenario !== "supported" &&
       scenario !== "medium confidence" &&
       scenario !== "resolved extraction" &&
-      scenario !== "distinct locations with shared reference"
+      scenario !== "distinct locations with shared reference" &&
+      scenario !== "reliable OCR"
     ) {
       expect(result.output.findings[0]).toMatchObject({
         title: "Income reconciliation incomplete",

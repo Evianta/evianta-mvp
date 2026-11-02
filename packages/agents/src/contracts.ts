@@ -2,12 +2,25 @@ import {
   DataAnalysisDashboardSchema,
   DataAnalysisReportSchema,
   EvidenceLocationSchema,
+  ExtractedDocumentSchema,
+  ExtractedPageSchema,
   FindingSchema,
   UseCaseSchema,
 } from "@evianta/core";
 import { z } from "zod";
 
 const SeveritySchema = z.enum(["high", "medium", "low"]);
+
+export const ExtractionReliabilitySchema = ExtractedDocumentSchema.pick({
+  method: true,
+  confidence: true,
+  warnings: true,
+}).extend({
+  pages: z.array(
+    ExtractedPageSchema.pick({ index: true, method: true, confidence: true }),
+  ),
+});
+export type ExtractionReliability = z.infer<typeof ExtractionReliabilitySchema>;
 
 export const NumericClaimSchema = z.object({
   label: z.string().min(1),
@@ -90,6 +103,9 @@ export const PriorFindingSchema = z.object({
         sourceRef: z.string().min(1),
         confidence: z.enum(["high", "medium", "low", "unassessed"]),
         documentId: z.string().nullable(),
+        evidenceId: z.string().optional(),
+        excerptsTruncated: z.boolean().optional(),
+        extraction: ExtractionReliabilitySchema.nullable().optional(),
         location: EvidenceLocationSchema.optional(),
         citation: z
           .object({
@@ -109,6 +125,7 @@ export type PriorFinding = z.infer<typeof PriorFindingSchema>;
 export const DocumentSliceSchema = z.object({
   documentId: z.string(),
   name: z.string(),
+  extraction: ExtractionReliabilitySchema.optional(),
   pages: z.array(z.object({ page: z.number().int(), text: z.string() })),
   tables: z
     .array(

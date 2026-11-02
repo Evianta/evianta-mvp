@@ -5,7 +5,7 @@ import {
   isGraphBubbleUp,
   type BaseCheckpointSaver,
 } from "@langchain/langgraph";
-import { inputTokenAllowance, type AiClient } from "@evianta/ai";
+import { AiError, inputTokenAllowance, type AiClient } from "@evianta/ai";
 import type {
   ApprovalRepository,
   Case,
@@ -54,10 +54,11 @@ import {
   type FindingDraft,
   type PriorFinding,
   type ReviewOutput,
+  type ReviewInput,
   type SpecialistInput,
   type SpecialistOutput,
 } from "./contracts.js";
-import { createDocumentAccess } from "./documents.js";
+import { createDocumentAccess, extractionReliability } from "./documents.js";
 import {
   OrchestrationError,
   RunCancelledError,
@@ -1395,6 +1396,36 @@ export class Orchestrator {
     ]);
     const evidenceById = new Map(evidence.map((item) => [item.id, item]));
     const findingsById = new Map(findings.map((item) => [item.id, item]));
+    const referencedEvidenceIds = new Set(
+      sources.flatMap((source) =>
+        (state.results[source.id]?.findings ?? []).flatMap(
+          (finding) => finding.evidenceIds,
+        ),
+      ),
+    );
+    const documentIds = [
+      ...new Set(
+        evidence.flatMap((item) =>
+          item.kind === "document" && referencedEvidenceIds.has(item.id)
+            ? [item.documentId]
+            : [],
+        ),
+      ),
+    ];
+    const reliabilityByDocument = new Map(
+      await Promise.all(
+        documentIds.map(async (id) => {
+          const extraction = await this.repos.extractions.findForDocument(
+            id,
+            execution.scope,
+          );
+          return [
+            id,
+            extraction ? extractionReliability(extraction) : null,
+          ] as const;
+        }),
+      ),
+    );
     return sources.flatMap((source) => {
       const outcome = state.results[source.id];
       if (outcome?.status !== "completed") return [];
@@ -1424,6 +1455,9 @@ export class Orchestrator {
                     sourceRef: item.sourceRef,
                     confidence: item.confidence,
                     documentId: item.documentId,
+                    evidenceId: item.id,
+                    extraction:
+                      reliabilityByDocument.get(item.documentId) ?? null,
                     location: item.location,
                   }
                 : {
@@ -1431,6 +1465,7 @@ export class Orchestrator {
                     sourceRef: item.sourceRef,
                     confidence: item.confidence,
                     documentId: null,
+                    evidenceId: item.id,
                     citation: {
                       url: item.citation.url,
                       title: item.citation.title,
@@ -1444,6 +1479,80 @@ export class Orchestrator {
         };
       });
     });
+  }
+
+  private budgetReviewInput(input: ReviewInput): ReviewInput {
+    const reviewer = this.options.reviewer!;
+    const limit = this.options.ai.inputTokenLimit(reviewer.modelTier) - 256;
+    const schema = z.toJSONSchema(reviewer.outputSchema);
+    const fits = (candidate: ReviewInput) =>
+      inputTokenAllowance({
+        system: reviewer.systemPrompt,
+        input: candidate,
+        schema,
+      }) <= limit;
+    if (fits(input)) return input;
+    const trim = (maxChars: number): ReviewInput => ({
+      ...input,
+      findings: input.findings.map((finding) => ({
+        ...finding,
+        sourceEvidence: finding.sourceEvidence?.map((evidence) => {
+          const quote = evidence.location?.textQuote;
+          const span = evidence.citation?.span;
+          return {
+            ...evidence,
+            ...(evidence.location
+              ? {
+                  location: {
+                    ...evidence.location,
+                    ...(quote ? { textQuote: quote.slice(0, maxChars) } : {}),
+                  },
+                }
+              : {}),
+            ...(evidence.citation
+              ? {
+                  citation: {
+                    ...evidence.citation,
+                    span: span ? span.slice(0, maxChars) : null,
+                  },
+                }
+              : {}),
+            ...((quote?.length ?? 0) > maxChars ||
+            (span?.length ?? 0) > maxChars
+              ? { excerptsTruncated: true }
+              : {}),
+          };
+        }),
+      })),
+    });
+    if (!fits(trim(1))) {
+      throw new AiError(
+        "Review findings and source identities exceed the configured input limit even with minimal excerpts.",
+        "input-limit-exceeded",
+      );
+    }
+    let low = 1;
+    let high = Math.max(
+      1,
+      ...input.findings.flatMap((finding) =>
+        (finding.sourceEvidence ?? []).flatMap((evidence) => [
+          evidence.location?.textQuote?.length ?? 0,
+          evidence.citation?.span?.length ?? 0,
+        ]),
+      ),
+    );
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (fits(trim(mid))) low = mid;
+      else high = mid - 1;
+    }
+    this.logger.warn(
+      "Review source excerpts were shortened to fit the input budget",
+      {
+        maxExcerptChars: low,
+      },
+    );
+    return trim(low);
   }
 
   private async documentSlicesAsync(
@@ -1807,12 +1916,12 @@ export class Orchestrator {
           })),
         ).flags;
         agentResult = await this.options.reviewer!.run(
-          {
+          this.budgetReviewInput({
             case: this.caseInput(execution),
             instructions: this.instructionsFor(execution, task, state),
             findings,
             deterministicFlags: flags,
-          },
+          }),
           context,
         );
       } else {

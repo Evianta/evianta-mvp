@@ -1,12 +1,16 @@
 import { StoreError } from "@evianta/store";
+import { inputTokenAllowance } from "@evianta/ai";
 import { MemorySaver } from "@langchain/langgraph";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   RunConflictError,
   RunNotFoundError,
   deliverableIdFor,
   createTaxNoticePlan,
   createTaxNoticeSpecialists,
+  createReviewAgent,
+  type ReviewInput,
   TAX_NOTICE_ANALYST_ROLE,
   TAX_RECONCILIATION_ROLE,
   TAX_RESPONSE_DRAFTER_ROLE,
@@ -95,6 +99,227 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
+  it("budgets repeated review excerpts without dropping findings or source positions", async () => {
+    const keys = ["a", "b", "c"];
+    const quote = "é".repeat(14_000);
+    const provider = new ScriptedProvider({
+      ...Object.fromEntries(
+        keys.map((key) => [
+          key,
+          () => {
+            const output = specialistOutput(key);
+            output.findings[0]!.evidence[0]!.textQuote = quote;
+            output.findings[0]!.evidence.push({
+              kind: "research",
+              sourceRef: "https://www.incometax.gov.in/",
+              confidence: "medium",
+              documentId: null,
+              page: null,
+              textQuote: quote,
+              url: "https://www.incometax.gov.in/",
+              title: "Official guidance",
+              claim: "A source for professional verification.",
+            });
+            return output;
+          },
+        ]),
+      ),
+      review: () => reviewOutput,
+    });
+    const h = harness({
+      provider,
+      plan: planOf([
+        ...keys.map((key) => ({ key })),
+        { key: "review", role: "independent-reviewer", dependsOn: keys },
+      ]),
+    });
+    const { result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("completed");
+    const input = provider.inputs.get("review")![0] as ReviewInput;
+    expect(input.findings).toHaveLength(3);
+    const reviewer = createReviewAgent();
+    expect(
+      inputTokenAllowance({
+        system: reviewer.systemPrompt,
+        input,
+        schema: z.toJSONSchema(reviewer.outputSchema),
+      }),
+    ).toBeLessThanOrEqual(32_000 - 256);
+    for (const finding of input.findings) {
+      expect(finding.claims).toHaveLength(1);
+      expect(finding.sourceEvidence?.[0]).toMatchObject({
+        evidenceId: finding.evidenceIds[0],
+        sourceRef: "document-1#page=1",
+        documentId: "document-1",
+        location: { page: 1 },
+        excerptsTruncated: true,
+      });
+      expect(
+        finding.sourceEvidence![0]!.location!.textQuote!.length,
+      ).toBeLessThan(quote.length);
+      expect(finding.sourceEvidence?.[1]).toMatchObject({
+        evidenceId: finding.evidenceIds[1],
+        sourceRef: "https://www.incometax.gov.in/",
+        excerptsTruncated: true,
+        citation: {
+          url: "https://www.incometax.gov.in/",
+          title: "Official guidance",
+          claim: "A source for professional verification.",
+        },
+      });
+      expect(finding.sourceEvidence![1]!.citation!.span!.length).toBeLessThan(
+        quote.length,
+      );
+    }
+    const stored = await store.repositories.evidence.listForCase(scope);
+    expect(
+      stored
+        .filter((item) => item.kind === "document")
+        .every((item) => item.location.textQuote === quote),
+    ).toBe(true);
+    expect(provider.count("review")).toBe(1);
+  });
+
+  it("fails explicitly when mandatory review findings cannot fit even without full excerpts", async () => {
+    const provider = new ScriptedProvider({
+      a: () => specialistOutput("a", { description: "x".repeat(50_000) }),
+      review: () => reviewOutput,
+    });
+    const h = harness({
+      provider,
+      plan: planOf([
+        { key: "a" },
+        { key: "review", role: "independent-reviewer", dependsOn: ["a"] },
+      ]),
+    });
+    const { run } = await startRunAsync(h);
+    expect((await tasksOf(run.id)).review).toMatchObject({
+      status: "failed",
+      lastError: { code: "input-limit-exceeded" },
+    });
+    expect(provider.count("review")).toBe(0);
+  });
+
+  it.each([
+    "low-confidence",
+    "handwriting",
+    "warning-bearing",
+    "unreliable-page",
+    "reliable OCR",
+  ])(
+    "uses persisted %s extraction reliability instead of analyst confidence",
+    async (scenario) => {
+      const original = (await store.repositories.extractions.findForDocument(
+        "document-1",
+        scope,
+      ))!;
+      const method = scenario === "handwriting" ? "handwriting" : "ocr";
+      await store.repositories.extractions.saveForDocument(
+        {
+          ...original,
+          method,
+          confidence: scenario === "low-confidence" ? 0.4 : 0.9,
+          pages: original.pages.map((page) => ({
+            ...page,
+            method,
+            confidence: scenario === "unreliable-page" ? 0.4 : 0.9,
+          })),
+          warnings:
+            scenario === "warning-bearing"
+              ? [
+                  {
+                    code: "handwriting-needs-review",
+                    message: "Verify handwritten text against the original.",
+                    pageIndex: 0,
+                  },
+                ]
+              : [],
+        },
+        scope,
+      );
+      await store.repositories.cases.replaceOwned(
+        makeCase(CASE_ID, { useCase: "tax-notice" }),
+        OWNER,
+      );
+      const provider = new ScriptedProvider({
+        "case-analysis": () => ({
+          summary: "Extracted figures",
+          inputRequired: null,
+          findings: [
+            "return income",
+            "notice income",
+            "claimed credit",
+            "available credit",
+          ].map((label, index) => ({
+            ...specialistOutput(label).findings[0]!,
+            confidence: 1,
+            claims: [
+              { label, value: 100 + index * 10, components: null, date: null },
+            ],
+          })),
+        }),
+        "response-preparation": () => specialistOutput("response"),
+        review: () => reviewOutput,
+      });
+      const h = harness({
+        provider,
+        plan: createTaxNoticePlan(),
+        specialists: createTaxNoticeSpecialists(),
+      });
+      const { run, result } = await startRunAsync(h);
+      expect(result?.run?.status).toBe("completed");
+      const analysis = provider.inputs.get("case-analysis")![0]!;
+      expect(analysis.documents).toEqual([
+        expect.objectContaining({
+          extraction: expect.objectContaining({
+            method,
+            confidence: scenario === "low-confidence" ? 0.4 : 0.9,
+          }),
+        }),
+      ]);
+      const pack = (
+        await store.repositories.deliverables.listForRun(run.id, scope)
+      )[0]!;
+      const section = pack.sections.find(
+        (item) => item.producingRole === TAX_RECONCILIATION_ROLE,
+      )!;
+      const content = section.content as {
+        findings: { title: string; claims: unknown[] }[];
+      };
+      if (scenario === "reliable OCR") {
+        expect(
+          content.findings.every((finding) => finding.claims.length === 1),
+        ).toBe(true);
+        const findings = await store.repositories.findings.listForCase(scope);
+        expect(
+          findings
+            .filter((finding) => section.findingIds.includes(finding.id))
+            .every((finding) => finding.confidence === 0.9),
+        ).toBe(true);
+      } else {
+        expect(
+          content.findings.every(
+            (finding) =>
+              finding.title.endsWith("incomplete") &&
+              finding.claims.length === 0,
+          ),
+        ).toBe(true);
+        const findings = await store.repositories.findings.listForCase(scope);
+        expect(
+          findings
+            .filter((finding) => section.findingIds.includes(finding.id))
+            .every((finding) =>
+              finding.openQuestions.some(
+                (question) =>
+                  question.severity === "high" &&
+                  question.text.includes("Verify unreadable"),
+              ),
+            ),
+        ).toBe(true);
+      }
+    },
+  );
+
   it.each(["unavailable search", "search citations", "omitted slices"])(
     "runs the tax DAG and preserves evidence with %s",
     async (scenario) => {

@@ -116,6 +116,17 @@ because their citations cannot be assigned to individual claims. Confidence
 cannot exceed the least reliable supporting document. Distinct source locations
 are retained even when they share a source reference, including when document
 slices are omitted from later tasks to fit model limits.
+Unreadable amended figures also block reconciliation; a readable older figure
+does not override an unknown replacement. Persisted extraction confidence,
+page reliability and warnings accompany slices and prior source evidence.
+Reconciliation requires confidence of at least 0.75 for the extraction and every
+page, no extraction warnings, and no handwritten pages. Model-generated
+confidence cannot override these checks.
+Independent review shortens source excerpts when needed to fit its input budget,
+marks them as partial, and retains all findings, claims, evidence IDs and source
+positions. Stored evidence remains unchanged. If the required findings and
+source identities still cannot fit, review fails explicitly rather than dropping
+them.
 Search citations without a claim retain a source
 discovery note, not an inferred legal conclusion; excerpts stay as quotes.
 Unavailable search raises a

@@ -14,6 +14,7 @@ import type {
   UsageUnits,
 } from "@evianta/core";
 import type { ZodType } from "zod";
+import type { ExtractionReliability } from "./contracts.js";
 
 export type AgentRole = string;
 
@@ -39,6 +40,7 @@ export interface DocumentSummary {
 export interface DocumentSlice {
   documentId: string;
   name: string;
+  extraction?: ExtractionReliability;
   pages: Array<{ page: number; text: string }>;
   tables?: Array<{
     tableId: string;

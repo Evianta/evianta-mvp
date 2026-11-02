@@ -1,9 +1,26 @@
 import type {
   DocumentRepository,
   ExtractionRepository,
+  ExtractedDocument,
   OwnerScope,
 } from "@evianta/core";
 import type { DocumentAccess, DocumentSlice } from "./agent.js";
+import type { ExtractionReliability } from "./contracts.js";
+
+export function extractionReliability(
+  extraction: ExtractedDocument,
+): ExtractionReliability {
+  return {
+    method: extraction.method,
+    confidence: extraction.confidence,
+    warnings: extraction.warnings,
+    pages: extraction.pages.map(({ index, method, confidence }) => ({
+      index,
+      method,
+      confidence,
+    })),
+  };
+}
 
 const DEFAULT_MAX_CHARS = 20_000;
 const MAX_CONCURRENT_DOCUMENT_READS = 4;
@@ -119,6 +136,7 @@ export function createDocumentAccess(
       const slice: DocumentSlice = {
         documentId,
         name: document.name,
+        extraction: extractionReliability(extraction),
         pages: [],
         tables: [],
         truncated: false,

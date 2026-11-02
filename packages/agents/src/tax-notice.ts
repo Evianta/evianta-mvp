@@ -180,12 +180,7 @@ function canonicalClaim(
   label: string,
 ): { value: number; confidence: number; sources: PriorFinding[] } | null {
   const matches = findings.filter((finding) =>
-    finding.claims.some(
-      (claim) =>
-        claim.label.trim().toLowerCase() === label &&
-        claim.value !== null &&
-        Number.isFinite(claim.value),
-    ),
+    finding.claims.some((claim) => claim.label.trim().toLowerCase() === label),
   );
   const values = new Set(
     matches.flatMap((finding) =>
@@ -218,15 +213,31 @@ function canonicalClaim(
     );
     if (!documents.length) return 0;
     const evidenceConfidence = Math.min(
-      ...documents.map((source) =>
-        source.documentId && source.location
-          ? source.confidence === "high"
+      ...documents.map((source) => {
+        const extraction = source.extraction;
+        if (
+          !source.documentId ||
+          !source.location ||
+          !extraction ||
+          extraction.confidence < 0.75 ||
+          extraction.method === "handwriting" ||
+          extraction.warnings.length > 0 ||
+          extraction.pages.some(
+            (page) => page.method === "handwriting" || page.confidence < 0.75,
+          )
+        ) {
+          return 0;
+        }
+        return Math.min(
+          extraction.confidence,
+          ...extraction.pages.map((page) => page.confidence),
+          source.confidence === "high"
             ? 1
             : source.confidence === "medium"
               ? 0.7
-              : 0
-          : 0,
-      ),
+              : 0,
+        );
+      }),
     );
     return Math.min(finding.confidence ?? 0.5, evidenceConfidence);
   });
@@ -296,7 +307,7 @@ function reconciliationFinding(
       assumptions: [],
       openQuestions: [
         {
-          text: `Provide or confirm the source figures for ${leftLabel} and ${rightLabel}.`,
+          text: `Provide or confirm the source figures for ${leftLabel} and ${rightLabel}. Verify unreadable, low-confidence, handwritten, or warning-bearing extraction against the original records before proceeding.`,
           severity: "high",
         },
       ],
@@ -527,6 +538,7 @@ export function createTaxNoticeSpecialists(): SpecialistAgent[] {
         "Put each numeric figure in a separate finding with only that figure's source evidence. Use the exact claim labels 'return income', 'notice income', 'claimed credit', or 'available credit'. Never group figures into one finding.",
         "Cite the document ID and page or cell for each material finding.",
         "Report uncertain extraction as an open question; do not invent deadlines or legal conclusions.",
+        "Document extraction reliability and warnings are supplied with each slice. Flag low-confidence or handwritten extraction for professional verification; never override those warnings with your own confidence label.",
       ].join("\n"),
     ),
     createTaxReconciliationAgent(),
