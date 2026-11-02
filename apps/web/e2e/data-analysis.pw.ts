@@ -1,4 +1,8 @@
-import { syntheticWorkflowFixtures, type RunDto } from "@evianta/core";
+import {
+  syntheticWorkflowFixtures,
+  type Deliverable,
+  type RunDto,
+} from "@evianta/core";
 import { expect, test } from "@playwright/test";
 
 const record = {
@@ -308,7 +312,15 @@ test("reopens a completed analysis and renders its report and charts", async ({
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
-  await expect(page.getByText("Revenue total: 1,000")).toBeVisible();
+  const executiveSummary = page.locator("section").filter({
+    has: page.getByRole("heading", {
+      name: "Executive summary",
+      exact: true,
+    }),
+  });
+  await expect(
+    executiveSummary.getByText("Revenue total: 1,000"),
+  ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(
     page.getByText("Revenue by month", { exact: true }),
@@ -326,4 +338,143 @@ test("reopens a completed analysis and renders its report and charts", async ({
   await expect(page.getByText("Rows 101–200 of 205")).toBeVisible();
   await expect(page.getByText("quarterly-sales.csv")).toBeVisible();
   await expect(page.getByText("rows 2–7")).toBeVisible();
+});
+
+test("preserves unsaved reviews and approves only the saved content", async ({
+  page,
+}) => {
+  const first = workspace.deliverables[0];
+  let deliverable: Deliverable = {
+    ...first,
+    sections: [
+      first.sections[0],
+      {
+        ...first.sections[0],
+        id: "second-section",
+        title: "Second section",
+        content: "Second original draft",
+      },
+    ],
+  };
+  let approvalRequests = 0;
+  await page.route("**/auth/token", (route) =>
+    route.fulfill({
+      json: {
+        accessToken: "session-token",
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      },
+    }),
+  );
+  await page.route("**/cases/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().headers().accept !== "application/json") {
+      await route.continue();
+      return;
+    }
+    if (url.pathname.endsWith("/runs/latest")) {
+      await route.fulfill({ json: { run: null } });
+      return;
+    }
+    if (route.request().method() === "PATCH") {
+      const update = route.request().postDataJSON();
+      expect(update.expectedVersion).toBe(deliverable.version);
+      const sectionId = url.pathname.split("/").at(-1);
+      deliverable = {
+        ...deliverable,
+        version: deliverable.version + 1,
+        sections: deliverable.sections.map((section) =>
+          section.id === sectionId
+            ? {
+                ...section,
+                reviewerContent:
+                  update.reviewerContent ?? section.reviewerContent,
+                reviewComment:
+                  update.reviewComment === undefined
+                    ? section.reviewComment
+                    : update.reviewComment,
+                reviewStatus: update.reviewStatus ?? "pending",
+              }
+            : section,
+        ),
+      };
+      await route.fulfill({ json: { deliverable } });
+      return;
+    }
+    if (url.pathname.endsWith("/approve")) {
+      approvalRequests += 1;
+      expect(route.request().postDataJSON()).toMatchObject({
+        deliverableVersion: deliverable.version,
+      });
+      await route.fulfill({
+        json: {
+          approval: {
+            id: "saved-approval",
+            caseId: record.id,
+            deliverableId: deliverable.id,
+            deliverableVersion: deliverable.version,
+            actorId: record.ownerId,
+            approvedAt: record.updatedAt,
+            unresolvedQuestionIds: [],
+            note: "",
+          },
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: { ...workspace, deliverables: [deliverable] },
+    });
+  });
+
+  await page.goto(`/cases/${record.id}`);
+  await page.getByRole("button", { name: "Enter access key" }).click();
+  await page.getByLabel("Access key").fill("test-key");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  const review = page.getByRole("region", {
+    name: "Review and evidence workspace",
+  });
+  const sections = review.locator("article");
+  await expect(sections).toHaveCount(2);
+  const firstDraft = sections.nth(0).getByLabel("Reviewer draft");
+  const secondDraft = sections.nth(1).getByLabel("Reviewer draft");
+  const secondComment = sections.nth(1).getByLabel("Review comment");
+  await expect(firstDraft).toHaveValue(
+    "6 row(s) analyzed. Revenue total: 1,000; average: 166.67.",
+  );
+  await firstDraft.fill("Reviewer-adjusted interpretation");
+  await secondDraft.fill("Unsaved second draft");
+  await secondComment.fill("Review note to preserve");
+  const approve = review.getByRole("button", {
+    name: "Approve deliverable",
+    exact: true,
+  });
+  await expect(approve).toBeDisabled();
+  await sections.nth(0).getByRole("button", { name: "Save edit" }).click();
+  await expect(review.getByText("Version 2", { exact: false })).toBeVisible();
+  await expect(secondDraft).toHaveValue("Unsaved second draft");
+  await expect(secondComment).toHaveValue("Review note to preserve");
+  await expect(approve).toBeDisabled();
+  await expect(
+    page
+      .getByRole("paragraph")
+      .filter({ hasText: "Reviewer-adjusted interpretation" }),
+  ).toBeVisible();
+  await expect(page.getByText("revenue total", { exact: true })).toBeVisible();
+  await expect(page.getByText("1,000", { exact: true })).toBeVisible();
+
+  await sections
+    .nth(1)
+    .getByRole("button", { name: "Approve section", exact: true })
+    .click();
+  await expect(review.getByText("Version 3", { exact: false })).toBeVisible();
+  expect(deliverable.sections[1]).toMatchObject({
+    reviewerContent: "Unsaved second draft",
+    reviewComment: "Review note to preserve",
+    reviewStatus: "accepted",
+  });
+  await expect(approve).toBeEnabled();
+  page.once("dialog", (dialog) => dialog.accept());
+  await approve.click();
+  await expect(review.getByText(/^Approved on/)).toBeVisible();
+  expect(approvalRequests).toBe(1);
 });

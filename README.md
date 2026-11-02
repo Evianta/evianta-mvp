@@ -193,7 +193,7 @@ application database is required. ESLint includes Next.js and React Hooks
 rules. Prettier and EditorConfig use two-space indentation and LF line endings;
 Git preserves LF on checkout, including Windows. CSV byte fixtures retain their
 original bytes. Vitest and Playwright each use at most two workers to avoid
-oversubscribing local databases and the Next.js development server. There are
+oversubscribing local databases and the browser test server. There are
 no Git hooks.
 
 Install Chromium once before running browser tests:
@@ -204,8 +204,9 @@ pnpm test:e2e
 ```
 
 Browser tests use a separate `.next-e2e` build directory so they do not overwrite
-an active development server's `.next` output. Navigation assertions allow cold
-Next.js compilation; they are functional checks, not latency measurements.
+an active development server's `.next` output. They build and start a production
+server before running assertions, keeping cold compilation out of navigation
+checks.
 
 The browser suite owns port 3100 and starts a dedicated fixture-backed web server;
 it never reuses a running development server. Free that port before testing.
@@ -213,6 +214,22 @@ Next.js commands still share generated TypeScript entry files; avoid concurrent
 Next.js commands when validating types or production builds.
 CI runs the same quality gates and a separate Chromium browser job, retaining
 browser reports and traces on failure.
+
+## Reviewing deliverables
+
+The case workspace lets reviewers edit plain-text sections, accept sections,
+request changes with a comment, and approve a saved deliverable version.
+Section decisions save the current draft and comment together. Saving one
+section preserves unsaved work in other sections; save all edits and comments
+before approving the deliverable. Editing accepted content resets its section
+to pending unless the same request includes a new review decision.
+
+Reviewer edits replace the executive summary text in the data-analysis report,
+not its computed metrics, narrative interpretation, or charts. Any saved review
+changes increment the deliverable version and invalidate its previous approval.
+A deliverable cannot be approved while any section has requested changes.
+Concurrent edits or approvals against an older version return a conflict;
+reload before retrying.
 
 ## Workspace responsibilities
 

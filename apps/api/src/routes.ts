@@ -16,6 +16,7 @@ import {
   type ApprovalRepository,
   type Case,
   type CaseRepository,
+  type Deliverable,
   type DeliverableRepository,
   type DocumentMetadataDto,
   type DocumentMetadataRecord,
@@ -105,7 +106,7 @@ const CancelInputSchema = z
 const ReviewSectionInputSchema = z
   .object({
     expectedVersion: z.number().int().positive(),
-    reviewerContent: z.string().max(50_000).optional(),
+    reviewerContent: z.string().trim().min(1).max(50_000).optional(),
     reviewStatus: z
       .enum(["pending", "accepted", "changes-requested"])
       .optional(),
@@ -180,12 +181,73 @@ function hasPlainTextSectionContent(section: {
   ) {
     return true;
   }
-  return (
-    typeof section.content === "object" &&
-    section.content !== null &&
+  if (typeof section.content !== "object" || section.content === null) {
+    return false;
+  }
+  if (
     "summary" in section.content &&
     typeof section.content.summary === "string"
+  ) {
+    return true;
+  }
+  return (
+    "report" in section.content &&
+    typeof section.content.report === "object" &&
+    section.content.report !== null &&
+    "summary" in section.content.report &&
+    typeof section.content.report.summary === "string"
   );
+}
+
+async function findSettledDeliverable(
+  repositories: Pick<CaseRepositories, "deliverables" | "runs">,
+  deliverableId: string,
+  scope: { ownerId: string; caseId: string },
+  response: Response,
+): Promise<Deliverable | null> {
+  const reference = await repositories.deliverables.findOwnedById(
+    deliverableId,
+    scope,
+  );
+  if (!reference) {
+    sendApiError(response, 404, "not-found", "Resource not found");
+    return null;
+  }
+  const run = await repositories.runs.findOwnedById(
+    reference.runId,
+    scope.ownerId,
+  );
+  if (
+    !run ||
+    run.caseId !== scope.caseId ||
+    ["queued", "running", "waiting-for-input"].includes(run.status)
+  ) {
+    sendApiError(
+      response,
+      409,
+      "conflict",
+      "Wait for the analysis run to finish before reviewing this deliverable.",
+    );
+    return null;
+  }
+  const deliverable = await repositories.deliverables.findOwnedById(
+    deliverableId,
+    scope,
+  );
+  if (!deliverable) {
+    sendApiError(response, 404, "not-found", "Resource not found");
+    return null;
+  }
+  if (deliverable.runId !== reference.runId) {
+    sendApiError(
+      response,
+      409,
+      "conflict",
+      "This deliverable changed. Reload it before reviewing.",
+    );
+    return null;
+  }
+  return deliverable;
 }
 
 function sendValidationError(
@@ -1701,14 +1763,17 @@ export function registerCaseApiRoutes(
       if (!principal || !record || !deliverableId || !sectionId || !input)
         return;
       const scope = { ownerId: principal.userId, caseId: record.id };
-      const deliverable = await repositories.deliverables.findOwnedById(
+      const deliverable = await findSettledDeliverable(
+        repositories,
         deliverableId,
         scope,
+        response,
       );
-      const section = deliverable?.sections.find(
+      if (!deliverable) return;
+      const section = deliverable.sections.find(
         (item) => item.id === sectionId,
       );
-      if (!deliverable || !section) {
+      if (!section) {
         sendApiError(response, 404, "not-found", "Resource not found");
         return;
       }
@@ -1733,6 +1798,25 @@ export function registerCaseApiRoutes(
         );
         return;
       }
+      const contentChanged =
+        input.reviewerContent !== undefined &&
+        input.reviewerContent !== section.reviewerContent;
+      const reviewStatus =
+        input.reviewStatus ??
+        (contentChanged ? "pending" : section.reviewStatus);
+      const reviewComment =
+        input.reviewComment === undefined
+          ? section.reviewComment
+          : input.reviewComment;
+      if (reviewStatus === "changes-requested" && !reviewComment?.trim()) {
+        sendApiError(
+          response,
+          400,
+          "validation-failed",
+          "A comment is required when requesting changes.",
+        );
+        return;
+      }
       const reviewedAt = new Date().toISOString();
       const updated = {
         ...deliverable,
@@ -1746,11 +1830,8 @@ export function registerCaseApiRoutes(
                 ...(input.reviewerContent === undefined
                   ? {}
                   : { reviewerContent: input.reviewerContent }),
-                reviewStatus: input.reviewStatus ?? item.reviewStatus,
-                reviewComment:
-                  input.reviewComment === undefined
-                    ? item.reviewComment
-                    : input.reviewComment,
+                reviewStatus,
+                reviewComment,
                 reviewerId: principal.userId,
                 reviewedAt,
               },
@@ -1759,7 +1840,7 @@ export function registerCaseApiRoutes(
       const saved = await repositories.deliverables.replaceOwned(
         updated,
         scope,
-        { expectedVersion: input.expectedVersion },
+        { expectedVersion: input.expectedVersion, requireSettledRun: true },
       );
       if (!saved) {
         sendApiError(
@@ -1784,14 +1865,13 @@ export function registerCaseApiRoutes(
       const input = parseInput(ApproveInputSchema, request.body, response);
       if (!principal || !record || !input) return;
       const scope = { ownerId: principal.userId, caseId: record.id };
-      const deliverable = await repositories.deliverables.findOwnedById(
+      const deliverable = await findSettledDeliverable(
+        repositories,
         input.deliverableId,
         scope,
+        response,
       );
-      if (!deliverable) {
-        sendApiError(response, 404, "not-found", "Resource not found");
-        return;
-      }
+      if (!deliverable) return;
       if (deliverable.version !== input.deliverableVersion) {
         sendApiError(
           response,
@@ -1809,6 +1889,28 @@ export function registerCaseApiRoutes(
         response.status(200).json({ approval: existing });
         return;
       }
+      if (
+        deliverable.sections.some(
+          (section) => section.reviewStatus === "changes-requested",
+        )
+      ) {
+        sendApiError(
+          response,
+          409,
+          "conflict",
+          "Resolve sections with requested changes before approving.",
+        );
+        return;
+      }
+      if (existing) {
+        sendApiError(
+          response,
+          409,
+          "conflict",
+          "This deliverable changed. Reload it before approving.",
+        );
+        return;
+      }
       const findings = await repositories.findings.listForCase(scope);
       const approval = ApprovalSchema.parse({
         id: randomUUID(),
@@ -1824,14 +1926,10 @@ export function registerCaseApiRoutes(
         ),
         note: input.note,
       });
-      if (existing) {
-        await repositories.approvals.invalidateForDeliverable(
-          deliverable.id,
-          scope,
-        );
-      }
       try {
-        await repositories.approvals.insert(approval, scope);
+        await repositories.approvals.insert(approval, scope, {
+          requireSettledRun: true,
+        });
       } catch (error) {
         if (error instanceof StoreError && error.code === "stale-approval") {
           sendApiError(
