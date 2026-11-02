@@ -128,7 +128,7 @@ export function createTaxNoticePlan(): ReferencePlan {
         dependsOn: [],
         required: true,
         instructions:
-          "Extract notice issues, dates, requested information, and figures. For figures, use one source-linked claim per source record with the exact labels 'return income', 'notice income', 'claimed credit', or 'available credit'. Cite each source document and location. Flag uncertain extraction.",
+          "Extract notice issues, dates, requested information, and figures. Put each numeric figure in its own finding with its own source evidence, using the exact claim labels 'return income', 'notice income', 'claimed credit', or 'available credit'. Cite each source document and location. Flag uncertain extraction.",
       },
       {
         key: "reconciliation",
@@ -201,6 +201,10 @@ function canonicalClaim(
   );
   if (values.size !== 1) return null;
   const confidences = matches.map((finding) => {
+    // Finding-level citations cannot distinguish support for grouped figures.
+    if (finding.claims.filter((claim) => claim.value !== null).length !== 1) {
+      return 0;
+    }
     if (
       finding.openQuestions?.some(
         (question) =>
@@ -209,10 +213,13 @@ function canonicalClaim(
     ) {
       return 0;
     }
-    const evidenceConfidence = Math.max(
-      0,
-      ...(finding.sourceEvidence ?? []).map((source) =>
-        source.kind === "document" && source.documentId && source.location
+    const documents = (finding.sourceEvidence ?? []).filter(
+      (source) => source.kind === "document",
+    );
+    if (!documents.length) return 0;
+    const evidenceConfidence = Math.min(
+      ...documents.map((source) =>
+        source.documentId && source.location
           ? source.confidence === "high"
             ? 1
             : source.confidence === "medium"
@@ -231,7 +238,7 @@ function canonicalClaim(
 function priorEvidenceDrafts(
   findings: readonly PriorFinding[],
 ): EvidenceDraft[] {
-  const bySourceRef = new Map<string, EvidenceDraft>();
+  const byIdentity = new Map<string, EvidenceDraft>();
   for (const finding of findings) {
     for (const source of finding.sourceEvidence ?? []) {
       const evidence: EvidenceDraft =
@@ -259,10 +266,10 @@ function priorEvidenceDrafts(
               title: source.citation?.title ?? null,
               claim: source.citation?.claim ?? null,
             };
-      bySourceRef.set(evidence.sourceRef, evidence);
+      byIdentity.set(JSON.stringify(evidence), evidence);
     }
   }
-  return [...bySourceRef.values()];
+  return [...byIdentity.values()];
 }
 
 function formatAmount(value: number): string {
@@ -467,7 +474,6 @@ function createTaxResearchAgent(): SpecialistAgent {
                     title: citation.title,
                     claim:
                       citation.claim?.trim() ||
-                      citation.span?.trim() ||
                       `Provider search returned "${citation.title}" as a source for professional verification; currency and applicability have not been verified.`,
                   })),
                   assumptions: [],
@@ -518,7 +524,7 @@ export function createTaxNoticeSpecialists(): SpecialistAgent[] {
       [
         "You analyze income-tax notices for a qualified professional.",
         "Use only supplied document slices and prior findings.",
-        "For figures, use one source-linked numeric claim per source record with the exact labels 'return income', 'notice income', 'claimed credit', or 'available credit'.",
+        "Put each numeric figure in a separate finding with only that figure's source evidence. Use the exact claim labels 'return income', 'notice income', 'claimed credit', or 'available credit'. Never group figures into one finding.",
         "Cite the document ID and page or cell for each material finding.",
         "Report uncertain extraction as an open question; do not invent deadlines or legal conclusions.",
       ].join("\n"),

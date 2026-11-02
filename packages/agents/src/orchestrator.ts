@@ -1837,7 +1837,16 @@ export class Orchestrator {
           specialist!,
           input,
         );
-        documentIds = new Set(documents.map((document) => document.documentId));
+        documentIds = new Set([
+          ...documents.map((document) => document.documentId),
+          ...input.priorFindings.flatMap((finding) =>
+            (finding.sourceEvidence ?? []).flatMap((evidence) =>
+              evidence.kind === "document" && evidence.documentId
+                ? [evidence.documentId]
+                : [],
+            ),
+          ),
+        ]);
         agentResult = await specialist!.run({ ...input, documents }, context);
       }
     } catch (error) {

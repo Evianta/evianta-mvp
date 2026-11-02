@@ -305,7 +305,7 @@ export interface HarnessOptions {
   repositories: Repositories;
   checkpointer?: BaseCheckpointSaver;
   clock?: Clock;
-  provider: ScriptedProvider;
+  provider: ModelProvider;
   plan: ReferencePlan;
   specialists?: readonly SpecialistAgent[];
   roles?: string[];

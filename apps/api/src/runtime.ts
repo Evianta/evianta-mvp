@@ -42,6 +42,28 @@ export interface ApiRuntime {
   close(): Promise<void>;
 }
 
+export function createApiMockProvider(): MockProvider {
+  return new MockProvider({
+    responses: [
+      JSON.stringify({
+        summary: "Analysis completed using the supplied case record.",
+        findings: [],
+        inputRequired: null,
+        interpretation:
+          "No significant trend was identified in the supplied records.",
+        insights: [],
+        tasks: createTaxNoticePlan().tasks.map((task) => ({
+          key: task.key,
+          assignedRole: task.role,
+          dependsOn: task.dependsOn,
+          instructions: task.instructions,
+        })),
+        items: [],
+      }),
+    ],
+  });
+}
+
 export async function createApiRuntime(): Promise<ApiRuntime> {
   const uploads = getUploadEnvironment();
   const documentStoreConfig = getDocumentStoreConfig();
@@ -96,18 +118,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
             apiKey: aiEnvironment.modelApiKey ?? "",
             baseUrl: aiEnvironment.museBaseUrl,
           })
-        : new MockProvider({
-            responses: [
-              JSON.stringify({
-                summary: "Analysis completed using the supplied case record.",
-                findings: [],
-                inputRequired: null,
-                interpretation:
-                  "No significant trend was identified in the supplied records.",
-                insights: [],
-              }),
-            ],
-          });
+        : createApiMockProvider();
     const ai = createAi({
       provider,
       accounting,

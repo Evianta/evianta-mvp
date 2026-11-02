@@ -95,13 +95,15 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
-  it.each([false, true])(
-    "runs the tax DAG and preserves context with search citations: %s",
-    async (withCitations) => {
+  it.each(["unavailable search", "search citations", "omitted slices"])(
+    "runs the tax DAG and preserves evidence with %s",
+    async (scenario) => {
+      const withCitations = scenario === "search citations";
       const plan = createTaxNoticePlan();
       const citation = {
         url: "https://www.incometax.gov.in/",
         title: "Income Tax Department guidance",
+        span: "A provider excerpt that is not an applicability determination.",
       };
       const provider = new ScriptedProvider(
         {
@@ -131,6 +133,12 @@ describe("orchestrator", () => {
                     components: null,
                     date: null,
                   },
+                ],
+              },
+              {
+                ...specialistOutput("claimed-credit").findings[0]!,
+                title: "Claimed credit",
+                claims: [
                   {
                     label: "claimed credit",
                     value: 80_000,
@@ -150,6 +158,12 @@ describe("orchestrator", () => {
                     components: null,
                     date: null,
                   },
+                ],
+              },
+              {
+                ...specialistOutput("available-credit").findings[0]!,
+                title: "Available credit",
+                claims: [
                   {
                     label: "available credit",
                     value: 75_000,
@@ -181,7 +195,19 @@ describe("orchestrator", () => {
       const h = harness({
         provider,
         plan,
-        specialists: createTaxNoticeSpecialists(),
+        specialists: createTaxNoticeSpecialists().map((specialist) =>
+          scenario === "omitted slices" &&
+          specialist.role === TAX_RECONCILIATION_ROLE
+            ? {
+                ...specialist,
+                systemPrompt: "x".repeat(150_000),
+                async run(input, context) {
+                  expect(input.documents).toEqual([]);
+                  return specialist.run(input, context);
+                },
+              }
+            : specialist,
+        ),
         coordinator: true,
         ...(withCitations
           ? {
@@ -290,6 +316,22 @@ describe("orchestrator", () => {
         "Verify the response deadline against the full notice.",
       );
       const evidence = await store.repositories.evidence.listForCase(scope);
+      const reconciliation = deliverable?.sections.find(
+        (section) => section.producingRole === TAX_RECONCILIATION_ROLE,
+      );
+      expect(reconciliation?.evidenceIds).toHaveLength(2);
+      expect(
+        evidence.filter((item) =>
+          reconciliation?.evidenceIds.includes(item.id),
+        ),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "document",
+            documentId: "document-1",
+          }),
+        ]),
+      );
       if (withCitations) {
         expect(evidence).toEqual(
           expect.arrayContaining([
@@ -300,6 +342,7 @@ describe("orchestrator", () => {
                 claim: expect.stringContaining(
                   "currency and applicability have not been verified",
                 ),
+                span: citation.span,
               }),
             }),
           ]),

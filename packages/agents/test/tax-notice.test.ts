@@ -140,6 +140,9 @@ describe("tax notice workflow", () => {
     "resolved extraction",
     "conflicting figures",
     "matching unsupported figures",
+    "grouped figures with mixed confidence",
+    "mixed source confidence",
+    "distinct locations with shared reference",
   ])("reconciles only traceable figures: %s", async (scenario) => {
     const ai = createAi({
       provider: new MockProvider({ responses: [] }),
@@ -226,6 +229,31 @@ describe("tax notice workflow", () => {
       humanInput: null,
     };
     const returnedIncome = input.priorFindings[0]!;
+    if (scenario === "grouped figures with mixed confidence") {
+      const notice = input.priorFindings.splice(1, 1)[0]!;
+      returnedIncome.claims.push(...notice.claims);
+      returnedIncome.sourceEvidence!.push({
+        ...notice.sourceEvidence![0]!,
+        confidence: "low",
+      });
+    }
+    if (scenario === "mixed source confidence") {
+      returnedIncome.sourceEvidence!.push({
+        ...returnedIncome.sourceEvidence![0]!,
+        confidence: "unassessed",
+        location: { page: 2 },
+      });
+    }
+    if (scenario === "distinct locations with shared reference") {
+      const noticedIncome = input.priorFindings[1]!;
+      noticedIncome.sourceEvidence![0]!.documentId = "return-document";
+      noticedIncome.sourceEvidence![0]!.sourceRef =
+        returnedIncome.sourceEvidence![0]!.sourceRef;
+      noticedIncome.sourceEvidence![0]!.location = {
+        page: 2,
+        textQuote: "notice income",
+      };
+    }
     if (
       scenario === "missing evidence" ||
       scenario === "matching unsupported figures"
@@ -285,7 +313,8 @@ describe("tax notice workflow", () => {
     if (
       scenario !== "supported" &&
       scenario !== "medium confidence" &&
-      scenario !== "resolved extraction"
+      scenario !== "resolved extraction" &&
+      scenario !== "distinct locations with shared reference"
     ) {
       expect(result.output.findings[0]).toMatchObject({
         title: "Income reconciliation incomplete",
@@ -299,6 +328,11 @@ describe("tax notice workflow", () => {
       result.output.findings.map((finding) => finding.claims[0]?.value),
     ).toEqual([150_000, -5_000]);
     expect(result.output.findings[0]?.evidence).toHaveLength(2);
+    if (scenario === "distinct locations with shared reference") {
+      expect(
+        result.output.findings[0]?.evidence.map((evidence) => evidence.page),
+      ).toEqual([1, 2]);
+    }
     expect(result.output.findings[0]?.confidence).toBe(
       scenario === "medium confidence" ? 0.7 : 0.8,
     );

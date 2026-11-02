@@ -110,11 +110,19 @@ researches general official guidance, prepares a response draft and runs an
 independent review. Drafting receives the original notice findings, source
 references, assumptions and unresolved questions. Reconciliation requires
 traceable document evidence for each figure and does not calculate a difference
-when extraction has unresolved high-severity questions. Its confidence cannot
-exceed that of its inputs. Search citations without a claim retain a source
-discovery note, not an inferred legal conclusion. Unavailable search raises a
+when extraction has unresolved high-severity questions. Each figure must have
+its own finding and reliable source locations; grouped figures remain incomplete
+because their citations cannot be assigned to individual claims. Confidence
+cannot exceed the least reliable supporting document. Distinct source locations
+are retained even when they share a source reference, including when document
+slices are omitted from later tasks to fit model limits.
+Search citations without a claim retain a source
+discovery note, not an inferred legal conclusion; excerpts stay as quotes.
+Unavailable search raises a
 professional-verification question. All response materials require professional
 review; the workflow does not approve or submit filings.
+Mock mode supplies schema-valid planning and review responses so the full tax
+workflow can run without a paid provider.
 
 Ready sources start a run automatically. Sources still being read open in the case
 workspace with preparation status and **Start analysis** when ready. Completed
