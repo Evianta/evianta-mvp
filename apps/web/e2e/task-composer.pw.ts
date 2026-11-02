@@ -37,7 +37,7 @@ const source = {
   buffer: Buffer.from("month,revenue\nJan,100\nFeb,200"),
 };
 const settings = {
-  workflows: ["data-analysis", "tax-notice"],
+  workflows: ["data-analysis", "tax-notice", "msme-payment"],
   uploadMaxBytes: 1024,
   uploadMaxFiles: 2,
   documentMaxPages: 20,
@@ -173,8 +173,18 @@ test("unclear prompts ask for selection without replacing text; file limits and 
   await expect(prompt).toHaveValue("My own question");
   await page.getByRole("button", { name: "Start task", exact: true }).click();
   await expect(page.getByRole("main").getByRole("alert")).toContainText(
-    "Attach a CSV or Excel",
+    "Attach a CSV, TSV, Excel, or JSON dataset",
   );
+  await page.locator("#case-files").setInputFiles({
+    name: "sales-report.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.4"),
+  });
+  await page.getByRole("button", { name: "Start task", exact: true }).click();
+  await expect(page.getByRole("main").getByRole("alert")).toContainText(
+    "at least one CSV, TSV, Excel, or JSON dataset",
+  );
+  expect(calls.create).toBe(0);
   await page
     .locator("#case-files")
     .setInputFiles({ ...source, buffer: Buffer.alloc(1025) });
@@ -277,20 +287,18 @@ test("conflicting message and data ask for selection; choosing never replaces th
   ).toBeVisible();
   await page
     .getByRole("button", {
-      name: "Choose MSME delayed payment - Coming next",
+      name: "Choose MSME delayed payment",
       exact: true,
     })
     .click();
   await expect(
     page.getByRole("button", { name: "Start task", exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
   await expect(prompt).toHaveValue("Review my overdue invoices");
   expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
 });
 
-test("tax messages are available while MSME remains unavailable", async ({
-  page,
-}) => {
+test("tax and MSME messages are both available", async ({ page }) => {
   const calls = await setup(page);
   await page.goto("/");
   await signIn(page);
@@ -307,8 +315,8 @@ test("tax messages are available while MSME remains unavailable", async ({
     page
       .getByRole("status")
       .filter({ hasText: "Detected: MSME delayed payment" }),
-  ).toContainText("Coming next");
-  await expect(start).toBeDisabled();
+  ).not.toContainText("Coming next");
+  await expect(start).toBeEnabled();
   expect(calls).toMatchObject({ create: 0, upload: 0, start: 0 });
 });
 

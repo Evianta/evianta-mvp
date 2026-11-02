@@ -50,8 +50,8 @@ function workspaceOf(): CaseWorkspace {
       {
         id: "notice-document",
         caseId: record.id,
-        name: "notice.txt",
-        mimeType: "text/plain",
+        name: "notice.md",
+        mimeType: "text/markdown",
         sizeBytes: 40,
         state: "ready",
         uploadedAt: record.createdAt,
@@ -197,7 +197,7 @@ test("renders tax details and opens document and research evidence", async ({
     "Draft response for professional verification.",
   );
   await findings
-    .getByRole("button", { name: "Evidence: notice.txt (page 2)" })
+    .getByRole("button", { name: "Evidence: notice.md (page 2)" })
     .click();
   const evidence = page.getByRole("region", {
     name: "Review and evidence workspace",

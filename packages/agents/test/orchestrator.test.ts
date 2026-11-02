@@ -6,7 +6,14 @@ import { z } from "zod";
 import {
   RunConflictError,
   RunNotFoundError,
+  createMsmePaymentPlan,
+  createMsmePaymentSpecialists,
   deliverableIdFor,
+  MSME_CASE_PREPARATION_ROLE,
+  MSME_DOCUMENT_ANALYSIS_ROLE,
+  MSME_EVIDENCE_ANALYSIS_ROLE,
+  MSME_LEGAL_RESEARCH_ROLE,
+  MSME_PAYMENT_RECONCILIATION_ROLE,
   createTaxNoticePlan,
   createTaxNoticeSpecialists,
   createReviewAgent,
@@ -102,6 +109,127 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
+  const MSME_DOCUMENT_ID = "msme-document-1";
+  it("runs the MSME case-pack DAG with unavailable research safely flagged", async () => {
+    const plan = createMsmePaymentPlan();
+    const invoiceEvidence = specialistOutput(
+      "invoices",
+    ).findings[0]!.evidence.map((item) => ({
+      ...item,
+      sourceRef: `${MSME_DOCUMENT_ID}#page=1`,
+      documentId: MSME_DOCUMENT_ID,
+    }));
+    const provider = new ScriptedProvider({
+      ...routes("document-analysis", "evidence-analysis", "case-preparation"),
+      coordinator: () => ({
+        tasks: plan.tasks.map((task) => ({
+          key: task.key,
+          assignedRole: task.role,
+          dependsOn: task.dependsOn,
+          instructions: task.instructions,
+        })),
+      }),
+      "document-analysis": () => ({
+        summary: "Extracted synthetic invoice and payment amounts.",
+        findings: [
+          {
+            ...specialistOutput("invoices").findings[0]!,
+            title: "Invoice records",
+            evidence: invoiceEvidence,
+            claims: [
+              {
+                label: "invoice amount: INV-1",
+                value: 150_000,
+                components: null,
+                date: null,
+              },
+            ],
+          },
+          {
+            ...specialistOutput("payments").findings[0]!,
+            title: "Payment records",
+            evidence: invoiceEvidence,
+            claims: [
+              {
+                label: "payment amount: PAY-1",
+                value: 60_000,
+                components: null,
+                date: null,
+              },
+            ],
+          },
+        ],
+        inputRequired: null,
+      }),
+      "legal-search": () => ({
+        summary: "No search citations returned.",
+        sources: [],
+      }),
+    });
+    const h = harness({
+      provider,
+      plan,
+      specialists: createMsmePaymentSpecialists(),
+      coordinator: true,
+    });
+    await seedAsync(
+      store.repositories,
+      "msme-workflow-case",
+      { useCase: "msme-payment" },
+      MSME_DOCUMENT_ID,
+    );
+    const msmeCase = makeCase("msme-workflow-case", {
+      useCase: "msme-payment",
+    });
+    const run = await h.orchestrator.createRunAsync({
+      ownerId: OWNER,
+      caseId: msmeCase.id,
+    });
+
+    const result = await h.worker.runOnceAsync();
+    const tasks = await store.repositories.tasks.listForRun(run.id, {
+      ownerId: OWNER,
+      caseId: msmeCase.id,
+    });
+
+    expect(result?.run?.status).toBe("completed");
+    expect(
+      tasks.map((task) => [task.role, task.status, task.lastError]),
+    ).toEqual(
+      expect.arrayContaining(
+        [
+          MSME_DOCUMENT_ANALYSIS_ROLE,
+          MSME_PAYMENT_RECONCILIATION_ROLE,
+          MSME_EVIDENCE_ANALYSIS_ROLE,
+          MSME_LEGAL_RESEARCH_ROLE,
+          MSME_CASE_PREPARATION_ROLE,
+          "independent-reviewer",
+        ].map((role) => [role, "completed", null]),
+      ),
+    );
+    const deliverables = await store.repositories.deliverables.listForRun(
+      run.id,
+      { ownerId: OWNER, caseId: msmeCase.id },
+    );
+    const deliverable = deliverables[0];
+    expect(deliverable).toMatchObject({
+      format: "document",
+      title: "MSME delayed-payment case pack",
+    });
+    expect(
+      deliverable?.sections.some((section) =>
+        JSON.stringify(section).includes("90000"),
+      ),
+    ).toBe(true);
+    expect(
+      deliverable?.sections.some((section) =>
+        JSON.stringify(section).includes(
+          "No legal research sources were verified",
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it.each(["no findings", "unrelated findings"])(
     "reviews the displayed tax draft with %s",
     async (scenario) => {

@@ -10,11 +10,14 @@ import {
   RunWorker,
   Orchestrator,
   BUSINESS_DATA_ANALYST_ROLE,
+  createCoordinatorAgent,
+  createReviewAgent,
+  createMsmePaymentPlan,
+  createMsmePaymentSpecialists,
+  msmePaymentProfiles,
   createBusinessDataAnalystAgent,
   createGenericAnalystAgent,
   createMongoCheckpointerAsync,
-  createCoordinatorAgent,
-  createReviewAgent,
   createTaxNoticePlan,
   createTaxNoticeSpecialists,
   taxNoticeProfiles,
@@ -34,6 +37,7 @@ import {
   StoreError,
 } from "@evianta/store";
 import type { CaseApiServices } from "./routes.js";
+import { respondToMockRequest } from "./mock-responses.js";
 
 export interface ApiRuntime {
   services: CaseApiServices;
@@ -43,25 +47,7 @@ export interface ApiRuntime {
 }
 
 export function createApiMockProvider(): MockProvider {
-  return new MockProvider({
-    responses: [
-      JSON.stringify({
-        summary: "Analysis completed using the supplied case record.",
-        findings: [],
-        inputRequired: null,
-        interpretation:
-          "No significant trend was identified in the supplied records.",
-        insights: [],
-        tasks: createTaxNoticePlan().tasks.map((task) => ({
-          key: task.key,
-          assignedRole: task.role,
-          dependsOn: task.dependsOn,
-          instructions: task.instructions,
-        })),
-        items: [],
-      }),
-    ],
-  });
+  return new MockProvider({ respond: respondToMockRequest });
 }
 
 export async function createApiRuntime(): Promise<ApiRuntime> {
@@ -88,6 +74,10 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       dbName: store.databaseName,
     });
     await seedAgentDirectoryAsync(store.repositories.agentProfiles);
+    await seedAgentDirectoryAsync(
+      store.repositories.agentProfiles,
+      msmePaymentProfiles.map((profile) => ({ profile })),
+    );
     await seedAgentDirectoryAsync(
       store.repositories.agentProfiles,
       taxNoticeProfiles.map((profile) => ({ profile })),
@@ -147,7 +137,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
     const plans = new PlanRegistry()
       .register(dataAnalysisPlan)
       .register(createTaxNoticePlan())
-      .register(createTrivialReferencePlan("msme-payment"));
+      .register(createMsmePaymentPlan());
     const ingestion = createDocumentIngestion({
       documents: store.repositories.documents,
       extractions: store.repositories.extractions,
@@ -172,6 +162,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       specialists: [
         createBusinessDataAnalystAgent(),
         createGenericAnalystAgent(),
+        ...createMsmePaymentSpecialists(),
         ...createTaxNoticeSpecialists(),
       ],
       coordinator: createCoordinatorAgent(),

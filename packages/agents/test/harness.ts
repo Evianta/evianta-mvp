@@ -88,9 +88,13 @@ export class ScriptedProvider implements ModelProvider {
         ? "review"
         : request.system.startsWith("You are a careful business data analyst.")
           ? "business-data-analyst"
-          : request.system.startsWith("You are a tax research assistant")
-            ? "tax-search"
-            : (input.task as { key: string }).key;
+          : request.system.startsWith(
+                "You are a legal research assistant preparing general guidance",
+              )
+            ? "legal-search"
+            : request.system.startsWith("You are a tax research assistant")
+              ? "tax-search"
+              : (input.task as { key: string }).key;
     this.calls.push(route);
     this.inputs.set(route, [...(this.inputs.get(route) ?? []), input]);
     this.active += 1;
@@ -246,13 +250,15 @@ export async function seedAsync(
     "cases" | "documents" | "extractions" | "usagePrices"
   >,
   caseId = CASE_ID,
+  caseOverrides: Partial<Case> = {},
+  documentId = DOCUMENT_ID,
 ): Promise<void> {
   const at = new Date(START).toISOString();
-  await repositories.cases.insert(makeCase(caseId));
+  await repositories.cases.insert(makeCase(caseId, caseOverrides));
   const scope = { ownerId: OWNER, caseId };
   await repositories.documents.insert(
     {
-      id: DOCUMENT_ID,
+      id: documentId,
       caseId,
       name: "ledger.pdf",
       mimeType: "application/pdf",
@@ -260,14 +266,14 @@ export async function seedAsync(
       state: "ready",
       uploadedAt: at,
       processedAt: at,
-      objectKey: "object-key",
-      contentHash: "content-hash",
+      objectKey: `object-key-${documentId}`,
+      contentHash: `content-hash-${documentId}`,
     },
     scope,
   );
   await repositories.extractions.saveForDocument(
     {
-      documentId: DOCUMENT_ID,
+      documentId,
       kind: "text",
       method: "pdf-text",
       confidence: 1,
@@ -285,7 +291,7 @@ export async function seedAsync(
       tables: [],
       warnings: [],
       cacheIdentity: {
-        contentHash: "content-hash",
+        contentHash: `content-hash-${documentId}`,
         extractorVersion: "1",
         modelVersion: null,
       },

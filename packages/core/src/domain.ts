@@ -15,6 +15,7 @@ export type UseCase = z.infer<typeof UseCaseSchema>;
 
 export const liveWorkflows: readonly UseCase[] = [
   "data-analysis",
+  "msme-payment",
   "tax-notice",
 ];
 

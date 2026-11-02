@@ -163,8 +163,24 @@ describe("case API routes", () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      workflows: ["data-analysis", "tax-notice"],
+      workflows: ["data-analysis", "msme-payment", "tax-notice"],
       ...services.uploads,
+    });
+  });
+
+  it("allows MSME-payment cases to be created", async () => {
+    const response = await fetch(`${baseUrl}/cases`, {
+      method: "POST",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Synthetic MSME payment",
+        description: "Reconcile invoices and payments",
+        useCase: "msme-payment",
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      case: { useCase: "msme-payment", title: "Synthetic MSME payment" },
     });
   });
 
@@ -183,53 +199,6 @@ describe("case API routes", () => {
       case: { useCase: "tax-notice", title: "Synthetic tax notice" },
     });
   });
-
-  it.each(["msme-payment"] as const)(
-    "blocks live %s creation, upload and run admission",
-    async (useCase) => {
-      const response = await fetch(`${baseUrl}/cases`, {
-        method: "POST",
-        headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ title: "Not available", useCase }),
-      });
-      expect(response.status).toBe(409);
-      expect(await repositories.cases.listOwned(user.id)).toEqual([]);
-      const record = {
-        ...syntheticWorkflowFixtures.dataAnalysis.case,
-        id: `disabled-${useCase}`,
-        ownerId: user.id,
-        isSample: false,
-        synthetic: false,
-        useCase,
-      };
-      await repositories.cases.insert(record);
-      for (const [path, body] of [
-        ["/runs", { caseId: record.id }],
-        [`/cases/${record.id}/run`, {}],
-        [`/cases/${record.id}/retry`, { priorRunId: "absent" }],
-        [`/cases/${record.id}/documents`, {}],
-      ] as const) {
-        const blocked = await fetch(`${baseUrl}${path}`, {
-          method: "POST",
-          headers: { ...authHeaders(), "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        expect(blocked.status).toBe(409);
-        expect(await blocked.json()).toMatchObject({
-          error: { message: expect.stringContaining("coming next") },
-        });
-      }
-      expect(
-        await repositories.documents.listOwned({
-          ownerId: user.id,
-          caseId: record.id,
-        }),
-      ).toEqual([]);
-      expect(await repositories.runs.listForCase(record.id, user.id)).toEqual(
-        [],
-      );
-    },
-  );
 
   it.each([undefined, null, "sample-sales-quarter"])(
     "accepts the web client's case-creation request with source %s",
@@ -354,6 +323,33 @@ describe("case API routes", () => {
       copyUrl: expect.stringContaining("/copy"),
     });
   });
+
+  it.each(["text/markdown", "text/plain", "application/octet-stream"])(
+    "uploads and extracts Markdown evidence declared as %s",
+    async (mimeType) => {
+      const created = await createCase();
+      const text = "# Synthetic evidence\n\nInvoice amount: INR 236,000.\n";
+      const form = new FormData();
+      form.append("files", new Blob([text], { type: mimeType }), "invoice.md");
+      const response = await fetch(
+        `${baseUrl}/cases/${created.case.id}/documents`,
+        { method: "POST", headers: authHeaders(), body: form },
+      );
+      expect(response.status).toBe(201);
+      const body = (await response.json()) as {
+        documents: Array<{ id: string; name: string; state: string }>;
+      };
+      expect(body.documents).toEqual([
+        expect.objectContaining({ name: "invoice.md", state: "ready" }),
+      ]);
+      const download = await fetch(
+        `${baseUrl}/cases/${created.case.id}/documents/${body.documents[0]!.id}/download`,
+        { headers: authHeaders() },
+      );
+      expect(download.status).toBe(200);
+      expect(await download.text()).toBe(text);
+    },
+  );
 
   it("bounds uploads, protects child downloads, and replays persisted run events", async () => {
     const created = await createCase();
@@ -930,6 +926,9 @@ describe("case API routes", () => {
       },
     );
     expect(nextReview.status).toBe(200);
+    const nextVersion = (
+      (await nextReview.json()) as { deliverable: { version: number } }
+    ).deliverable.version;
     const updatedDetails = await fetch(`${baseUrl}/cases/${created.case.id}`, {
       headers: authHeaders(),
     });
@@ -945,12 +944,12 @@ describe("case API routes", () => {
         body: JSON.stringify(update),
       });
     const accepted = await patchReview({
-      expectedVersion: reviewedDeliverable.version + 1,
+      expectedVersion: nextVersion,
       reviewStatus: "accepted",
     });
     expect(accepted.status).toBe(200);
     const edited = await patchReview({
-      expectedVersion: reviewedDeliverable.version + 2,
+      expectedVersion: nextVersion + 1,
       reviewerContent: "A further corrected summary.",
     });
     expect(edited.status).toBe(200);
@@ -965,13 +964,13 @@ describe("case API routes", () => {
       },
     });
     const changesRequested = await patchReview({
-      expectedVersion: reviewedDeliverable.version + 3,
+      expectedVersion: nextVersion + 2,
       reviewStatus: "changes-requested",
       reviewComment: "Check the interpretation.",
     });
     expect(changesRequested.status).toBe(200);
     const clearedComment = await patchReview({
-      expectedVersion: reviewedDeliverable.version + 4,
+      expectedVersion: nextVersion + 3,
       reviewComment: null,
     });
     expect(clearedComment.status).toBe(400);
@@ -981,7 +980,7 @@ describe("case API routes", () => {
     });
     expect(staleEdit.status).toBe(409);
     const emptyEdit = await patchReview({
-      expectedVersion: reviewedDeliverable.version + 4,
+      expectedVersion: nextVersion + 3,
       reviewerContent: "   ",
     });
     expect(emptyEdit.status).toBe(400);
@@ -992,13 +991,13 @@ describe("case API routes", () => {
         headers: { ...authHeaders(), "content-type": "application/json" },
         body: JSON.stringify({
           deliverableId: deliverable.id,
-          deliverableVersion: reviewedDeliverable.version + 4,
+          deliverableVersion: nextVersion + 3,
         }),
       },
     );
     expect(approveWithChangesRequested.status).toBe(409);
     const resolved = await patchReview({
-      expectedVersion: reviewedDeliverable.version + 4,
+      expectedVersion: nextVersion + 3,
       reviewStatus: "accepted",
     });
     expect(resolved.status).toBe(200);

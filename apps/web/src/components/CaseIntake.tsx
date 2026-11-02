@@ -23,6 +23,7 @@ import {
   inferIntakeWorkflow,
   formatFileSize,
   intakeCaseDetails,
+  isTabularSource,
   starterPrompts,
   validateUploadFile,
   workflowSpecs,
@@ -209,6 +210,7 @@ function TaskComposer({
     }
     const limits = {
       ...workflowSpecs["data-analysis"],
+      allowedExtensions: acceptedExtensions,
       allowedMimeTypes: acceptedMimeTypes,
       maxFileBytes: configuration.uploadMaxBytes,
     };
@@ -279,7 +281,18 @@ function TaskComposer({
     }
     if (!files.length) {
       setError(
-        "Attach a CSV or Excel source dataset before starting data analysis.",
+        useCase === "data-analysis"
+          ? "Attach a CSV, TSV, Excel, or JSON dataset before starting data analysis."
+          : "Attach the source records before starting this task.",
+      );
+      return;
+    }
+    if (
+      useCase === "data-analysis" &&
+      !files.some(({ file }) => isTabularSource(file.name))
+    ) {
+      setError(
+        "Attach at least one CSV, TSV, Excel, or JSON dataset before starting data analysis.",
       );
       return;
     }

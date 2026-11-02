@@ -1187,6 +1187,8 @@ export class MuseProvider implements ModelProvider {
 
 export interface MockProviderOptions {
   responses?: readonly string[];
+  /** Answers a request directly; returning undefined falls back to `responses`. */
+  respond?: (request: StructuredGenerationRequest) => string | undefined;
   units?: UsageUnits;
   failure?: Error;
 }
@@ -1205,7 +1207,9 @@ export class MockProvider implements ModelProvider {
     const responses = this.options.responses ?? [
       '{"text":"Synthetic transcription","method":"ocr","confidence":0.95}',
     ];
-    const text = responses[Math.min(this.index, responses.length - 1)];
+    const text =
+      this.options.respond?.(request) ??
+      responses[Math.min(this.index, responses.length - 1)];
     this.index += 1;
     return {
       text,

@@ -102,8 +102,35 @@ need a choice. Sample-origin entry uses Start at `/?source=<sample-id>`.
 Enter submits, Shift+Enter adds a line, and IME composition does not submit.
 Starting authorizes private case creation, upload/extraction and execution under
 existing model limits. File limits and enabled workflows come from the authenticated
-`GET /intake/configuration` endpoint. Tax notice work is available; MSME remains
-**Coming next**, and the API rejects live creation, uploads and execution for it.
+`GET /intake/configuration` endpoint. MSME delayed-payment work and tax notices are
+available for live work.
+
+All three workflows accept CSV, TSV, Excel (`.xlsx`/`.xls`), JSON, plain text,
+Markdown (`.md`/`.markdown`) and PDF. Image uploads are not enabled because OCR
+is not configured. The file picker and drag-and-drop use the same type and size
+checks; the API still validates file contents before extraction. Markdown and
+other text records are extracted without OCR and shown as plain text in the
+evidence viewer, not rendered as HTML. Data analysis requires at least one CSV,
+TSV, Excel or JSON dataset; supporting documents do not replace it.
+
+For the synthetic tax-notice and MSME test packs, attach only the source files
+for one case at a time. Exclude evaluator answer keys such as
+`expected-outcome.md` and the tax pack's `expected-outcomes` directory.
+The mock provider checks workflow execution only; it does not analyze those
+documents or validate the benchmark's professional recommendations.
+
+MSME payment reconciliation counts one amount per identified invoice or payment
+only when each record claim is in its own finding and linked to a source location.
+Supported credit notes are also individually sourced and deducted once.
+Pending or unreadable credit-note amounts block the balance. Explicitly sourced
+zero-payment records allow an unpaid invoice to be reconciled; absent payment
+records do not establish zero payments. Disputed penalties and unsupported
+set-offs are not deductions. A candidate principal balance does not establish
+acceptance, invoice-level aging, interest or statutory eligibility.
+Low or unassessed evidence, extraction confidence below 0.75, handwriting,
+extraction warnings, and unresolved high-severity questions block the balance.
+Unreadable duplicate claims and grouped records also block calculation, and
+distinct evidence locations are retained even when they share a source reference.
 
 Tax notice work analyzes the supplied records, reconciles income and credits,
 researches general official guidance, prepares a response draft and runs an
@@ -146,8 +173,8 @@ discovery note, not an inferred legal conclusion; excerpts stay as quotes.
 Unavailable search raises a
 professional-verification question. All response materials require professional
 review; the workflow does not approve or submit filings.
-Mock mode supplies schema-valid planning and review responses so the full tax
-workflow can run without a paid provider.
+Mock mode supplies schema-valid planning and review responses so workflows can
+run without a paid provider.
 
 Ready sources start a run automatically. Sources still being read open in the case
 workspace with preparation status and **Start analysis** when ready. Completed
