@@ -15,6 +15,23 @@ const execute = promisify(execFile);
 const root = fileURLToPath(new URL("..", import.meta.url));
 
 describe("developer tooling", () => {
+  it("deploys Node entrypoints without PM2's import wrapper", async () => {
+    const workflow = await readFile(
+      join(root, ".github", "workflows", "deploy.yml"),
+      "utf8",
+    );
+    expect(workflow).toContain('node_bin="$(command -v node)"');
+    expect(workflow).toContain("options=(--interpreter none");
+    expect(workflow.match(/pm2 start "\$node_bin"/g)).toHaveLength(3);
+    for (const entrypoint of [
+      "$root/apps/api/dist/server.js",
+      "$root/apps/api/dist/worker.js",
+      "$root/apps/web/node_modules/next/dist/bin/next",
+    ]) {
+      expect(workflow).toContain(`-- "--env-file=$root/.env" "${entrypoint}"`);
+    }
+  });
+
   it("provides valid local API defaults after supplying a signing key", async () => {
     const example = parseEnv(
       await readFile(join(root, ".env.example"), "utf8"),

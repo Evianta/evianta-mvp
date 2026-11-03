@@ -203,17 +203,21 @@ jobs:
           getUploadEnvironment();
           getUsageEnvironment();
           NODE
-          options=(--interpreter node --node-args "--env-file=$root/.env"
+          node_bin="$(command -v node)"
+          options=(--interpreter none
             --kill-timeout 30000 --restart-delay 3000 --max-restarts 5 --time)
-          NODE_ENV=production pm2 start "$root/apps/api/dist/server.js" \
-            --name evianta-api --cwd "$root/apps/api" "${options[@]}"
+          NODE_ENV=production pm2 start "$node_bin" \
+            --name evianta-api --cwd "$root/apps/api" "${options[@]}" \
+            -- "--env-file=$root/.env" "$root/apps/api/dist/server.js"
           : > "$root/worker-out.log"
-          NODE_ENV=production pm2 start "$root/apps/api/dist/worker.js" \
+          NODE_ENV=production pm2 start "$node_bin" \
             --name evianta-worker --cwd "$root/apps/api" "${options[@]}" \
-            --output "$root/worker-out.log" --error "$root/worker-error.log"
-          NODE_ENV=production pm2 start "$root/apps/web/node_modules/next/dist/bin/next" \
+            --output "$root/worker-out.log" --error "$root/worker-error.log" \
+            -- "--env-file=$root/.env" "$root/apps/api/dist/worker.js"
+          NODE_ENV=production pm2 start "$node_bin" \
             --name evianta-web --cwd "$root/apps/web" "${options[@]}" \
-            -- start --hostname 127.0.0.1 --port 3000
+            -- "--env-file=$root/.env" "$root/apps/web/node_modules/next/dist/bin/next" \
+            start --hostname 127.0.0.1 --port 3000
           ready=false
           for attempt in {1..30}; do
             if curl --fail --silent --max-time 5 http://127.0.0.1:3001/healthz > /dev/null \
