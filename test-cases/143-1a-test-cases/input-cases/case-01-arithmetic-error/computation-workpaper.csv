@@ -1,0 +1,10 @@
+line_item,amount_inr,source_or_note
+Salary income,1280000,Filed return extract
+Income from other sources,36000,Filed return extract
+Gross total income,1316000,Salary plus other sources
+Standard deduction,-50000,Filed return extract
+Section 80C deduction,-150000,Filed return extract
+Section 80D deduction,-25000,Filed return extract
+Recomputed total income,1091000,Arithmetic check
+Total income declared in Part B-TI,1061000,Filed return extract
+Difference,30000,Recomputed total less declared total

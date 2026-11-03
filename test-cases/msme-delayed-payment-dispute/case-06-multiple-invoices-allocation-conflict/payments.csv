@@ -1,0 +1,3 @@
+transaction_date,utr_reference,amount_inr,supplier_ledger_allocation,buyer_ap_allocation,remittance_advice,notes
+2026-08-01,SYNTH-UTR-0801,50000,SYNTH-INV-260520F,SYNTH-INV-260610G,Not supplied,"Both ledgers show the payment, but allocation conflicts"
+2026-09-01,SYNTH-UTR-0901,25000,SYNTH-INV-260520F,SYNTH-INV-260520F,Not supplied,"Allocation matches, but no remittance advice supplied"
