@@ -1,9 +1,106 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
+import { createInMemoryStore } from "../../../packages/store/src/memory.js";
+import { DocumentStoreError } from "../../../packages/store/src/document-errors.js";
+import { createApiApp } from "../src/app.js";
 import { getErrorLogDetails } from "../src/error-logging.js";
 
 describe("startup error logging", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  describe("API request error logging", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+
+    it.each([
+      ["s3-write-failed", "AccessDenied", "AccessDenied"],
+      ["write-failed", "Error", "EACCES"],
+    ])(
+      "logs %s with its underlying cause and request ID without exposing secrets",
+      async (code, causeName, causeCode) => {
+        vi.stubEnv("AWS_ACCESS_KEY_ID", "test-aws-access-key");
+        vi.stubEnv("AWS_SECRET_ACCESS_KEY", "test-aws-secret-key");
+        vi.stubEnv("AWS_SESSION_TOKEN", "test-aws-session-token");
+        const cause = Object.assign(
+          new Error(
+            "Upload rejected: test-aws-access-key test-aws-secret-key test-aws-session-token",
+          ),
+          { name: causeName, code: causeCode },
+        );
+        const error = new DocumentStoreError("Document upload failed", code, {
+          cause,
+        });
+        const log = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { app } = createApiApp({
+          repositories: createInMemoryStore().repositories,
+          configuration: {
+            jwtSigningKey: "a-test-only-signing-key-that-is-at-least-32-bytes",
+            jwtIssuer: "evianta-test",
+            jwtAudience: "evianta-api-test",
+            jwtTtlSeconds: 1800,
+            authRateLimitPerMinute: 10,
+            apiRateLimitPerMinute: 60,
+            webOrigin: "https://app.example.test",
+            trustProxyHops: 0,
+            sessionRecheckSeconds: 30,
+          },
+          registerRoutes: ({ app }) => {
+            app.post("/test-upload", (_request, _response, next) =>
+              next(error),
+            );
+          },
+        });
+        const server = app.listen(0, "127.0.0.1");
+        try {
+          await once(server, "listening");
+          const address = server.address() as AddressInfo;
+          const response = await fetch(
+            `http://127.0.0.1:${address.port}/test-upload`,
+            { method: "POST" },
+          );
+          expect(response.status).toBe(500);
+          const body = await response.json();
+          expect(body).toEqual({
+            error: {
+              code: "internal-error",
+              message: "An unexpected error occurred",
+              requestId: response.headers.get("x-request-id"),
+              details: [],
+            },
+          });
+          expect(log).toHaveBeenCalledExactlyOnceWith(
+            "API request failed",
+            expect.objectContaining({
+              method: "POST",
+              requestId: response.headers.get("x-request-id"),
+              errorName: "DocumentStoreError",
+              error: expect.objectContaining({
+                name: "DocumentStoreError",
+                code,
+                cause: expect.objectContaining({
+                  name: causeName,
+                  code: causeCode,
+                  message: "Upload rejected: [REDACTED] [REDACTED] [REDACTED]",
+                }),
+              }),
+            }),
+          );
+          const logged = JSON.stringify(log.mock.calls);
+          expect(logged).not.toContain("test-aws-access-key");
+          expect(logged).not.toContain("test-aws-secret-key");
+          expect(logged).not.toContain("test-aws-session-token");
+        } finally {
+          await new Promise<void>((resolve, reject) => {
+            server.close((error) => (error ? reject(error) : resolve()));
+          });
+        }
+      },
+    );
   });
 
   it("includes causes and stack details while redacting configured secrets", () => {

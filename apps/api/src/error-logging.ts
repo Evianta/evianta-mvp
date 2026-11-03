@@ -13,7 +13,7 @@ function redact(value: string): string {
   );
   for (const [name, secret] of Object.entries(process.env)) {
     if (
-      /(?:SECRET|PASSWORD|TOKEN|API_KEY|SIGNING_KEY|MONGODB_URI|PRIVATE_KEY)/i.test(
+      /(?:SECRET|PASSWORD|TOKEN|API_KEY|SIGNING_KEY|MONGODB_URI|PRIVATE_KEY|AWS_ACCESS_KEY_ID)/i.test(
         name,
       ) &&
       secret
