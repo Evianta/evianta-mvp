@@ -1,0 +1,7 @@
+case_id,scenario,benchmark_response,adjustment_amount,notice_basis,primary_test
+EV-143-01,Arithmetic mismatch,Agree,"₹30,000",143(1)(a)(i),Straightforward arithmetic; total-income reconciliation
+EV-143-02,Salary from second employer omitted,Agree in principle,"₹2,40,000",143(1)(a)(vi),Multiple source documents; omitted salary and TDS reconciliation
+EV-143-03,"Notice alleges salary omission, but return already includes it",Disagree,"₹2,20,000 proposed addition should be challenged",143(1)(a)(vi) stated in mock notice,Adversarial false positive; detect double counting
+EV-143-04,Brought-forward business loss claimed after prior return filed late,"Agree in principle, verify legal facts","₹2,10,000",143(1)(a)(iii),Due date and loss-category caveats
+EV-143-05,Audit report disallowance absent from computation,Agree in principle after professional review,"₹90,000",143(1)(a)(iv),30% calculation plus missing statutory-relief evidence
+EV-143-06,Section 80C amount exceeds case limit,Agree,"₹30,000",143(1)(a)(ii),Distinguish actual investment from deduction cap

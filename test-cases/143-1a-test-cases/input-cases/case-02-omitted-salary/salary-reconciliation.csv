@@ -1,0 +1,4 @@
+source,salary_inr,return_inclusion_in_supplied_extract,notes
+Northstar Systems Pvt. Ltd. Form 16,840000,Included,Employer A
+Meridian Design Services Pvt. Ltd. Form 16,240000,Not included,Employer B
+Total salary in the two Form 16 summaries,1080000,Return reports only 840000,Reconcile before response
