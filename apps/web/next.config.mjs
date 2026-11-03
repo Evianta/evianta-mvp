@@ -1,6 +1,5 @@
-import type { NextConfig } from "next";
-
-const config: NextConfig = {
+/** @type {import("next").NextConfig} */
+const config = {
   poweredByHeader: false,
   distDir: process.env.EVIANTA_E2E === "1" ? ".next-e2e" : ".next",
 };
