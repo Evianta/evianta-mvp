@@ -1,0 +1,2 @@
+transaction_date,transaction_type,reference,amount_inr,allocation,evidence_note
+2026-07-30,Payment,SYNTH-UTR-0730,283200,SYNTH-INV-260705C,Payment equals 80% of invoice gross total

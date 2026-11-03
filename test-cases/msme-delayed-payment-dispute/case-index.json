@@ -1,0 +1,75 @@
+{
+  "dataset_name": "MSME Delayed-Payment Dispute Synthetic Evaluation Pack",
+  "version": "1.0.0",
+  "snapshot_date": "2026-10-18",
+  "currency": "INR",
+  "synthetic_data": true,
+  "cases": [
+    {
+      "id": "SYNTH-MSME-001",
+      "folder": "case-01-clear-overdue",
+      "scenario": "clear overdue accepted goods",
+      "expected_disposition": "STRONG_EVIDENCE_OVERDUE",
+      "gross_invoice_inr": 236000,
+      "payments_inr": 0,
+      "credit_notes_inr": 0,
+      "expected_principal_inr": 236000
+    },
+    {
+      "id": "SYNTH-MSME-002",
+      "folder": "case-02-partial-payment-credit-note",
+      "scenario": "partial payments plus supported credit note and unsupported penalty",
+      "expected_disposition": "PARTIALLY_RECONCILED",
+      "gross_invoice_inr": 472000,
+      "payments_inr": 250000,
+      "credit_notes_inr": 47200,
+      "expected_principal_inr": 174800,
+      "separate_disputed_penalty_inr": 30000
+    },
+    {
+      "id": "SYNTH-MSME-003",
+      "folder": "case-03-quality-dispute",
+      "scenario": "20 percent quality rejection and promised but missing credit note",
+      "expected_disposition": "CONTESTED_QUALITY_RESOLUTION",
+      "gross_invoice_inr": 354000,
+      "payments_inr": 283200,
+      "credit_notes_inr": 0,
+      "arithmetic_balance_inr": 70800,
+      "expected_principal_inr": null,
+      "contested_amount_inr": 70800
+    },
+    {
+      "id": "SYNTH-MSME-004",
+      "folder": "case-04-delivery-proof-missing",
+      "scenario": "delivery and acceptance not proven",
+      "expected_disposition": "EVIDENCE_INCOMPLETE",
+      "gross_invoice_inr": 212400,
+      "payments_inr": 0,
+      "credit_notes_inr": 0,
+      "claimed_amount_inr": 212400,
+      "expected_principal_inr": null
+    },
+    {
+      "id": "SYNTH-MSME-005",
+      "folder": "case-05-registration-after-supply",
+      "scenario": "accepted service, Udyam registration after supply",
+      "expected_disposition": "MSMED_SPECIFIC_ELIGIBILITY_REVIEW_REQUIRED",
+      "gross_invoice_inr": 118000,
+      "payments_inr": 0,
+      "credit_notes_inr": 0,
+      "contractual_candidate_principal_inr": 118000,
+      "expected_principal_inr": 118000
+    },
+    {
+      "id": "SYNTH-MSME-006",
+      "folder": "case-06-multiple-invoices-allocation-conflict",
+      "scenario": "two invoices, conflicting payment allocation and unsupported penalty",
+      "expected_disposition": "AGGREGATE_BALANCE_RECONCILED_ALLOCATION_UNRESOLVED",
+      "gross_invoice_inr": 177000,
+      "payments_inr": 75000,
+      "credit_notes_inr": 0,
+      "expected_principal_inr": 102000,
+      "separate_disputed_penalty_inr": 25000
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+investment_type,amount_inr,document_in_pack,synthetic_evidence_note
+EPF employee contribution,75000,Salary statement summary,Amount supported in simplified pack
+PPF contribution,70000,PPF contribution statement summary,Amount supported in simplified pack
+ELSS investment,35000,Mutual fund transaction summary,Amount supported in simplified pack
+Total claimed,180000,,Sum of items above
+Maximum deduction applied by this synthetic case,150000,,Case assumes old regime and applicable combined statutory cap
+Excess over cap,30000,,180000 minus 150000
