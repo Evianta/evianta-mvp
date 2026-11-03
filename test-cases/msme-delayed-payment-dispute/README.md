@@ -1,6 +1,6 @@
 # MSME Delayed-Payment Dispute — Synthetic Case Pack
 
-**Purpose:** Test a professional-workflow assistant that examines invoices, purchase orders, delivery/acceptance evidence, payment records and communications; reconciles the claim; identifies gaps; and prepares a review-ready case summary.
+**Purpose:** Test a professional-workflow assistant that examines supplied evidence, reconciles the claim and prepares the appropriate actual document for review. Findings explain the document in the UX, not in the default exported letter.
 
 **All data is synthetic.** All businesses, people, identifiers, transactions, emails and document numbers are invented for product testing. IDs starting with `SYNTH-` are placeholders, not valid government identifiers. Do not file these examples or represent them as real cases.
 
@@ -17,7 +17,20 @@
 
 Snapshot date used in these cases: **18 October 2026**. Amounts are in Indian rupees (INR). Monetary arithmetic is the expected ground truth for this dataset; legal eligibility, limitation, jurisdiction and statutory interest require a qualified review against the facts and current law.
 
+The additional `case-07-multiple-buyers/` fixture checks two isolated notices:
+Northstar INR 125,000 across two invoices, and Riverbend INR 60,000.
+
 ## What the system should produce for each case
+
+Default exported work products are actual letters: a payment demand for Case 1,
+a demand and reconciliation schedule for Case 2, a dispute-resolution letter for
+Case 3, an evidence-request letter for Case 4, a contractual reminder for Case 5,
+and an allocation-confirmation letter with an aggregate schedule for Case 6.
+Do not turn the following review information into the outward-facing letter.
+
+Supplied originals are referenced, not regenerated or included in generated-file
+downloads. A mentioned invoice or certificate is not evidence of an uploaded original.
+Missing originals and unverified destination requirements block filing readiness.
 
 1. **Case summary:** supplier, buyer, transaction, snapshot date, claim amount and current status.
 2. **Evidence inventory:** PO/contract, invoice(s), delivery/acceptance proof, payment ledger, credit/debit notes and communications.
@@ -39,7 +52,7 @@ Snapshot date used in these cases: **18 October 2026**. Amounts are in Indian ru
 
 ## Folder contents
 
-Each case folder contains a `case-facts.md`, source-style documents, one or more CSV/JSON records where helpful, and an `expected-outcome.md` with test assertions. Files intentionally include realistic ambiguity in Cases 3–6.
+Each case folder contains a `case-facts.md`, source-style documents, one or more CSV/JSON records where helpful, and an `expected-outcome.md` with test assertions. Files intentionally include realistic ambiguity in Cases 3–6. Never upload `expected-outcome.md` to the model; it is an evaluator answer key.
 
 ## Suggested evaluation rubric (0–2 points each)
 

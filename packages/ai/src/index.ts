@@ -177,6 +177,15 @@ export class ProviderRequestError extends AiError {
   }
 }
 
+export class ModelTimeoutError extends AiError {
+  constructor(timeoutMs: number) {
+    super(
+      `The model request exceeded its ${timeoutMs / 1000}-second time limit. Increase MODEL_REQUEST_TIMEOUT_MS for longer analyses, then retry. Provider usage may still be charged.`,
+      "model-timeout",
+    );
+  }
+}
+
 export class ProviderRefusalError extends AiError {
   constructor(readonly units?: UsageUnits) {
     super("The model refused the request", "provider-refusal");
@@ -184,8 +193,16 @@ export class ProviderRefusalError extends AiError {
 }
 
 export class ProviderTruncationError extends AiError {
-  constructor(readonly units?: UsageUnits) {
-    super("The model response was truncated", "provider-truncated");
+  constructor(
+    readonly units?: UsageUnits,
+    maxOutputTokens?: number,
+  ) {
+    super(
+      maxOutputTokens === undefined
+        ? "The model response was truncated"
+        : `The model exhausted its ${maxOutputTokens}-token output limit (including reasoning). Increase MODEL_MAX_OUTPUT_TOKENS or request a shorter response, then retry.`,
+      "provider-truncated",
+    );
   }
 }
 
@@ -288,7 +305,7 @@ function combineSignals(
 ): { signal: AbortSignal; clear: () => void } {
   const controller = new AbortController();
   const timer = setTimeout(
-    () => controller.abort(new Error("Model request timed out")),
+    () => controller.abort(new ModelTimeoutError(timeoutMs)),
     timeoutMs,
   );
   const abort = () => controller.abort(callerSignal?.reason);
@@ -586,7 +603,10 @@ export function createAi(options: AiClientOptions): AiClient {
               images: request.images,
               webSearch: request.webSearch,
             });
-          } catch (error) {
+          } catch (caught) {
+            const error = providerSignals.signal.aborted
+              ? (providerSignals.signal.reason ?? caught)
+              : caught;
             const retryable = isRetryable(error);
             await options.accounting.record({
               ...usageAttempt,
@@ -745,7 +765,11 @@ export function createAi(options: AiClientOptions): AiClient {
     // A consumer that stops pulling never resumes the generator, so settle
     // the dispatched attempt (and stop its lease heartbeat) on abort directly.
     const onAbort = (): void => {
-      void recordUnknown("provider-cancelled").catch(() => undefined);
+      void recordUnknown(
+        providerSignals.signal.reason instanceof ModelTimeoutError
+          ? providerSignals.signal.reason.code
+          : "provider-cancelled",
+      ).catch(() => undefined);
     };
     providerSignals.signal.addEventListener("abort", onAbort, { once: true });
 
@@ -759,7 +783,10 @@ export function createAi(options: AiClientOptions): AiClient {
       })) {
         yield chunk;
       }
-    } catch (error) {
+    } catch (caught) {
+      const error = providerSignals.signal.aborted
+        ? (providerSignals.signal.reason ?? caught)
+        : caught;
       await recordUnknown(
         error instanceof AiError ? error.code : "provider-unknown",
       );
@@ -821,10 +848,24 @@ function normalizeUsage(usage: ApiUsage | undefined): UsageUnits {
   };
 }
 
-function responseText(body: Record<string, unknown>): string {
+function responseText(
+  body: Record<string, unknown>,
+  maxOutputTokens: number,
+): string {
   const units = normalizeUsage(body.usage as ApiUsage | undefined);
   if (body.status === "refused") throw new ProviderRefusalError(units);
-  if (body.status === "incomplete") throw new ProviderTruncationError(units);
+  if (body.status === "incomplete") {
+    const details = body.incomplete_details;
+    const tokenLimitReached =
+      details !== null &&
+      typeof details === "object" &&
+      "reason" in details &&
+      details.reason === "max_output_tokens";
+    throw new ProviderTruncationError(
+      units,
+      tokenLimitReached ? maxOutputTokens : undefined,
+    );
+  }
   if (typeof body.output_text === "string") return body.output_text;
   const choices = body.choices;
   if (Array.isArray(choices)) {
@@ -836,7 +877,7 @@ function responseText(body: Record<string, unknown>): string {
       | undefined;
     if (choice?.message?.refusal) throw new ProviderRefusalError(units);
     if (choice?.finish_reason === "length") {
-      throw new ProviderTruncationError(units);
+      throw new ProviderTruncationError(units, maxOutputTokens);
     }
     if (typeof choice?.message?.content === "string") {
       return choice.message.content;
@@ -1025,7 +1066,7 @@ export class MuseProvider implements ModelProvider {
         };
 
     const response = await this.request(endpoint, body, request.signal);
-    const text = responseText(response);
+    const text = responseText(response, request.maxOutputTokens);
     return {
       text,
       units: normalizeUsage(response.usage as ApiUsage | undefined),
@@ -1115,7 +1156,10 @@ export class MuseProvider implements ModelProvider {
             throw new ProviderRefusalError();
           }
           if (choice?.finish_reason === "length") {
-            throw new ProviderTruncationError();
+            throw new ProviderTruncationError(
+              undefined,
+              request.maxOutputTokens,
+            );
           }
           if (typeof choice?.delta?.content === "string") {
             yield choice.delta.content;
@@ -1178,7 +1222,9 @@ export class MuseProvider implements ModelProvider {
         ? Math.max(0, retryDate - Date.now())
         : undefined;
     return new ProviderRequestError(
-      `The model provider request failed (${response.status})`,
+      response.status === 404
+        ? "The model provider request failed (404). Check MUSE_BASE_URL and the configured model ID against the provider's available models."
+        : `The model provider request failed (${response.status})`,
       response.status,
       retryAfterMs,
     );

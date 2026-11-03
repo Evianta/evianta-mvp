@@ -1,5 +1,7 @@
 import { StoreError } from "@evianta/store";
-import { inputTokenAllowance } from "@evianta/ai";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { AiError, inputTokenAllowance, ModelTimeoutError } from "@evianta/ai";
 import { MemorySaver } from "@langchain/langgraph";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -17,6 +19,7 @@ import {
   createTaxNoticePlan,
   createTaxNoticeSpecialists,
   createReviewAgent,
+  createSpecialistAgent,
   SpecialistModelOutputSchema,
   SpecialistInputSchema,
   ReviewInputSchema,
@@ -43,6 +46,7 @@ import {
   seedAsync,
   specialistOutput,
   makeCase,
+  profileFor,
   type HarnessOptions,
   type Store,
 } from "./harness.js";
@@ -109,6 +113,417 @@ async function ledger() {
 }
 
 describe("orchestrator", () => {
+  it("carries multi-buyer fixture evidence without evaluator keys into two grouped document outputs", async () => {
+    const folder = join(
+      process.cwd(),
+      "test-cases",
+      "msme-delayed-payment-dispute",
+      "case-07-multiple-buyers",
+    );
+    const [facts, transactions] = await Promise.all([
+      readFile(join(folder, "case-facts.md"), "utf8"),
+      readFile(join(folder, "transactions.csv"), "utf8"),
+    ]);
+    const extraction = await store.repositories.extractions.findForDocument(
+      "document-1",
+      scope,
+    );
+    if (!extraction) throw new Error("Missing synthetic extraction.");
+    await store.repositories.extractions.saveForDocument(
+      {
+        ...extraction,
+        pages: [{ ...extraction.pages[0]!, text: `${facts}\n${transactions}` }],
+      },
+      scope,
+    );
+    const sourceDetails = {
+      claimant: "BluePeak Precision Components",
+      sources: [
+        {
+          documentId: "document-1",
+          reference: "Supplied transaction schedule",
+        },
+      ],
+      missingOriginals: [
+        "Original invoices",
+        "Original acceptance confirmations",
+        "Original registration certificate",
+      ],
+    };
+    const provider = new ScriptedProvider({
+      prepare: (input) => {
+        const supplied = JSON.stringify(
+          SpecialistInputSchema.parse(input).documents,
+        );
+        expect(supplied).toContain("INV-A-002");
+        expect(supplied).toContain("INV-B-001");
+        expect(supplied).not.toContain("Evaluator assertions");
+        return {
+          ...specialistOutput("prepare"),
+          workProducts: [
+            {
+              ...preparedDocuments()[0]!,
+              ...sourceDetails,
+              key: "northstar",
+              counterparty: "Northstar Appliances",
+              body: "To: Northstar Appliances\nSubject: Payment reminder for INV-A-001 and INV-A-002\nPlease reconcile INR 125,000.\nFor BluePeak Precision Components: [unsigned]",
+              schedules: [
+                {
+                  title: "Northstar reconciliation",
+                  columns: ["Invoice", "Gross INR", "Paid INR", "Balance INR"],
+                  columnFormats: ["text", "currency", "currency", "currency"],
+                  currencyCode: "INR",
+                  rows: [
+                    ["INV-A-001", 100000, 25000, 75000],
+                    ["INV-A-002", 50000, 0, 50000],
+                  ],
+                },
+              ],
+            },
+            {
+              ...preparedDocuments()[1]!,
+              ...sourceDetails,
+              key: "riverbend",
+              counterparty: "Riverbend Equipment",
+              body: "To: Riverbend Equipment\nSubject: Payment reminder for INV-B-001\nPlease reconcile INR 60,000.\nFor BluePeak Precision Components: [unsigned]",
+            },
+          ],
+        };
+      },
+    });
+    const h = harness({
+      provider,
+      plan: planOf([{ key: "prepare" }]),
+      reviewer: false,
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("completed");
+    const products = (
+      await store.repositories.deliverables.listForRun(run.id, scope)
+    ).filter((item) => item.workProduct);
+    expect(products).toHaveLength(2);
+    const northstar = products.find(
+      (item) => item.workProduct!.counterparty === "Northstar Appliances",
+    )!.workProduct!;
+    const riverbend = products.find(
+      (item) => item.workProduct!.counterparty === "Riverbend Equipment",
+    )!.workProduct!;
+    expect(northstar.body).toContain("125,000");
+    expect(northstar.body).not.toContain("Riverbend");
+    expect(northstar.schedules[0]!.rows).toHaveLength(2);
+    expect(northstar.missingOriginals).toContain("Original invoices");
+    expect(riverbend.body).toContain("60,000");
+    expect(riverbend.body).not.toContain("INV-A");
+  });
+
+  function preparedDocuments() {
+    return ["Customer A", "Customer B"].map((counterparty, index) => ({
+      key: `buyer-${index + 1}`,
+      type: "payment-demand" as const,
+      title: `Payment notice - ${counterparty}`,
+      claimant: "Supplier",
+      counterparty,
+      body: `To: ${counterparty}\nSubject: Payment request\nPlease reconcile the supplied records.\nFor Supplier: [unsigned]`,
+      sources: [
+        { documentId: "document-1", reference: "User-supplied ledger.pdf" },
+      ],
+      missingOriginals: ["Original registration certificate"],
+      reviewBlockers: ["Verify eligibility."],
+      schedules: [],
+    }));
+  }
+
+  it("recovers missing work-product files after an interrupted result commit without rerunning the model", async () => {
+    const provider = new ScriptedProvider({
+      prepare: () => ({
+        ...specialistOutput("prepare"),
+        workProducts: preparedDocuments(),
+      }),
+    });
+    const h = harness({
+      provider,
+      plan: planOf([{ key: "prepare" }]),
+      reviewer: false,
+    });
+    const commit = store.repositories.tasks.commitResult.bind(
+      store.repositories.tasks,
+    );
+    let interrupted = false;
+    const spy = vi
+      .spyOn(store.repositories.tasks, "commitResult")
+      .mockImplementation(async (...args) => {
+        if (
+          !interrupted &&
+          args[1].deliverable?.workProduct?.counterparty === "Customer B"
+        ) {
+          interrupted = true;
+          throw new WorkerAbortedError();
+        }
+        return commit(...args);
+      });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.outcome).toBe("aborted");
+    spy.mockRestore();
+    h.clock.advance(LEASE_TTL_SECONDS + 1);
+    expect((await h.worker.runOnceAsync())?.run?.status).toBe("completed");
+    const products = (
+      await store.repositories.deliverables.listForRun(run.id, scope)
+    ).filter((item) => item.workProduct);
+    expect(products).toHaveLength(2);
+    expect(provider.count("prepare")).toBe(1);
+  });
+
+  it("isolates products from different producing tasks even when their roles and keys match", async () => {
+    const provider = new ScriptedProvider(
+      Object.fromEntries(
+        ["a", "b"].map((key, index) => [
+          key,
+          () => ({
+            ...specialistOutput(key),
+            workProducts: [{ ...preparedDocuments()[index]!, key: "notice" }],
+          }),
+        ]),
+      ),
+    );
+    const h = harness({
+      provider,
+      plan: planOf([{ key: "a" }, { key: "b" }]),
+      specialists: [
+        createSpecialistAgent(
+          profileFor("analyst"),
+          "Return workProducts containing the actual test drafts.",
+        ),
+      ],
+      reviewer: false,
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("completed");
+    const products = (
+      await store.repositories.deliverables.listForRun(run.id, scope)
+    ).filter((item) => item.workProduct);
+    expect(new Set(products.map((item) => item.id)).size).toBe(2);
+    expect(
+      new Set(products.map((item) => item.workProduct!.counterparty)),
+    ).toEqual(new Set(["Customer A", "Customer B"]));
+  });
+
+  it("persists separate work products and reviews their full bodies across retry", async () => {
+    let failReview = true;
+    const editedBody =
+      "To: Customer A\nProfessionally edited payment draft.\nFor Supplier: [unsigned]";
+    const provider = new ScriptedProvider({
+      prepare: () => ({
+        ...specialistOutput("prepare"),
+        workProducts: preparedDocuments(),
+      }),
+      review: (input) => {
+        const review = ReviewInputSchema.parse(input);
+        for (const product of preparedDocuments()) {
+          const body =
+            !failReview && product.counterparty === "Customer A"
+              ? editedBody
+              : product.body;
+          expect(
+            review.drafts?.some((draft) =>
+              draft.text.includes(body.replaceAll("\n", "\\n")),
+            ),
+          ).toBe(true);
+        }
+        if (failReview) throw new Error("Synthetic review outage");
+        return reviewOutput;
+      },
+    });
+    const h = harness({
+      provider,
+      plan: planOf([
+        { key: "prepare" },
+        { key: "review", role: "independent-reviewer", dependsOn: ["prepare"] },
+      ]),
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("partially-completed");
+    const products = (
+      await store.repositories.deliverables.listForRun(run.id, scope)
+    ).filter((item) => item.workProduct);
+    expect(products).toHaveLength(2);
+    expect(products[0]!.workProduct!.body).not.toContain("Customer B");
+    expect(products[1]!.workProduct!.body).not.toContain("Customer A");
+    const edited = products.find(
+      (item) => item.workProduct!.counterparty === "Customer A",
+    )!;
+    expect(
+      await store.repositories.deliverables.replaceOwned(
+        {
+          ...edited,
+          version: edited.version + 1,
+          sections: [{ ...edited.sections[0]!, reviewerContent: editedBody }],
+        },
+        scope,
+        { expectedVersion: edited.version },
+      ),
+    ).toBe(true);
+    failReview = false;
+    const retry = await h.orchestrator.retryFailedAsync({
+      ownerId: OWNER,
+      caseId: CASE_ID,
+      priorRunId: run.id,
+    });
+    await h.worker.runOnceAsync();
+    expect(provider.count("prepare")).toBe(1);
+    const copied = (
+      await store.repositories.deliverables.listForRun(retry.id, scope)
+    ).filter((item) => item.workProduct);
+    expect(copied).toHaveLength(2);
+    expect(
+      copied.find((item) => item.workProduct!.counterparty === "Customer A")
+        ?.sections[0]?.reviewerContent,
+    ).toBe(editedBody);
+    expect(copied.map((item) => item.workProduct)).toEqual(
+      products.map((item) => item.workProduct),
+    );
+    const terminal = (await eventsOf(retry.id)).find(
+      (event) => event.payload.type === "run-completed",
+    );
+    expect(terminal?.payload).toMatchObject({
+      deliverableIds: copied.map((item) => item.id),
+    });
+  });
+
+  it("fails explicitly before committing a document that references an unavailable original", async () => {
+    const provider = new ScriptedProvider({
+      prepare: () => ({
+        ...specialistOutput("prepare"),
+        workProducts: [
+          {
+            ...preparedDocuments()[0]!,
+            sources: [
+              {
+                documentId: "another-owner-document",
+                reference: "Invented original",
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    const h = harness({
+      provider,
+      plan: planOf([{ key: "prepare" }]),
+      reviewer: false,
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("failed");
+    expect((await tasksOf(run.id)).prepare.lastError?.code).toBe(
+      "invalid-work-product",
+    );
+    expect(
+      await store.repositories.deliverables.listForRun(run.id, scope),
+    ).toHaveLength(0);
+  });
+
+  it("completes a useful draft while missing originals and professional questions remain", async () => {
+    const provider = new ScriptedProvider({
+      prepare: () => ({
+        ...specialistOutput("prepare", {
+          openQuestions: [
+            { text: "Verify statutory eligibility.", severity: "high" },
+          ],
+        }),
+        workProducts: [
+          { ...preparedDocuments()[0]!, type: "evidence-request" },
+        ],
+      }),
+    });
+    const h = harness({
+      provider,
+      plan: planOf([{ key: "prepare" }]),
+      reviewer: false,
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("completed");
+    const [product] = (
+      await store.repositories.deliverables.listForRun(run.id, scope)
+    ).filter((item) => item.workProduct);
+    expect(product?.workProduct?.missingOriginals).toEqual([
+      "Original registration certificate",
+    ]);
+    const internal = await store.repositories.deliverables.findOwnedById(
+      deliverableIdFor(run.id),
+      scope,
+    );
+    expect(internal?.summary).toBe(
+      "Prepared 1 document for professional review.",
+    );
+  });
+
+  it("normalizes nullable model schedule metadata before validating and saving the work product", async () => {
+    const provider = new ScriptedProvider({
+      prepare: () => ({
+        ...specialistOutput("prepare"),
+        workProducts: [
+          {
+            ...preparedDocuments()[0]!,
+            schedules: [
+              {
+                title: "Reconciliation",
+                columns: ["Amount INR"],
+                columnFormats: null,
+                currencyCode: null,
+                rows: [[236000]],
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    const h = harness({
+      provider,
+      plan: planOf([{ key: "prepare", role: MSME_CASE_PREPARATION_ROLE }]),
+      specialists: createMsmePaymentSpecialists(),
+      reviewer: false,
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("completed");
+    const [document] = (
+      await store.repositories.deliverables.listForRun(run.id, scope)
+    ).filter((item) => item.workProduct);
+    expect(document?.workProduct?.schedules[0]).toEqual({
+      title: "Reconciliation",
+      columns: ["Amount INR"],
+      columnFormats: undefined,
+      currencyCode: undefined,
+      rows: [[236000]],
+    });
+  });
+
+  it("preserves a genuine blocking source request without inventing a completed draft", async () => {
+    const provider = new ScriptedProvider({
+      prepare: () => ({
+        ...specialistOutput("prepare"),
+        workProducts: [],
+        inputRequired: {
+          questions: [
+            {
+              text: "Supply the source transaction document identifying the supplier and buyer.",
+              severity: "high",
+            },
+          ],
+        },
+      }),
+    });
+    const h = harness({
+      provider,
+      plan: planOf([{ key: "prepare", role: MSME_CASE_PREPARATION_ROLE }]),
+      specialists: createMsmePaymentSpecialists(),
+      reviewer: false,
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("waiting-for-input");
+    expect(
+      await store.repositories.deliverables.listForRun(run.id, scope),
+    ).toHaveLength(0);
+  });
+
   const MSME_DOCUMENT_ID = "msme-document-1";
   it("runs the MSME case-pack DAG with unavailable research safely flagged", async () => {
     const plan = createMsmePaymentPlan();
@@ -244,6 +659,7 @@ describe("orchestrator", () => {
       const provider = new ScriptedProvider({
         "case-analysis": () => specialistOutput("analysis"),
         "response-preparation": () => ({
+          ...specialistOutput("response"),
           summary: draft,
           findings:
             scenario === "no findings"
@@ -358,7 +774,7 @@ describe("orchestrator", () => {
       expect(
         inputTokenAllowance({
           system: drafter.systemPrompt,
-          input,
+          input: drafter.prepareModelInput?.(input) ?? input,
           schema: z.toJSONSchema(drafter.outputSchema),
         }),
       ).toBeLessThanOrEqual(32_000 - 256);
@@ -457,6 +873,57 @@ describe("orchestrator", () => {
     },
   );
 
+  it("sends compact evidence input while keeping all findings and source metadata available", async () => {
+    const provider = new ScriptedProvider({
+      a: () => {
+        const output = specialistOutput("a");
+        output.findings = Array.from({ length: 8 }, (_, index) => ({
+          ...output.findings[0]!,
+          title: `Record ${index}`,
+          evidence: Array.from({ length: 8 }, (_, document) => ({
+            ...output.findings[0]!.evidence[0]!,
+            sourceRef: `document-1#record=${document}`,
+            textQuote: `Record ${document}: accepted or disputed transaction.`,
+          })),
+        }));
+        return output;
+      },
+      b: () => specialistOutput("b"),
+    });
+    const h = harness({
+      provider,
+      plan: planOf([{ key: "a" }, { key: "b", dependsOn: ["a"] }]),
+      reviewer: false,
+    });
+    const { result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("completed");
+    const wire = z
+      .object({
+        priorFindings: z.array(
+          z.object({
+            sourceEvidenceRefs: z.array(
+              z.object({ index: z.number(), evidenceId: z.string() }),
+            ),
+          }),
+        ),
+        sourceEvidenceCatalog: z.array(z.unknown()),
+        extractionCatalog: z.array(z.unknown()),
+      })
+      .parse(provider.modelInputs[1]);
+    expect(wire.priorFindings).toHaveLength(8);
+    expect(
+      wire.priorFindings.every(
+        (finding) => finding.sourceEvidenceRefs.length === 8,
+      ),
+    ).toBe(true);
+    expect(wire.extractionCatalog).toHaveLength(1);
+    expect(
+      SpecialistInputSchema.parse(
+        provider.inputs.get("b")![0],
+      ).priorFindings.every((finding) => finding.sourceEvidence?.length === 8),
+    ).toBe(true);
+  });
+
   it("fails explicitly when mandatory specialist findings exceed the input budget", async () => {
     const provider = new ScriptedProvider({
       a: () => specialistOutput("a", { description: "x".repeat(50_000) }),
@@ -526,7 +993,7 @@ describe("orchestrator", () => {
       expect(
         inputTokenAllowance({
           system: reviewer.systemPrompt,
-          input,
+          input: reviewer.prepareModelInput?.(input) ?? input,
           schema: z.toJSONSchema(reviewer.outputSchema),
         }),
       ).toBeLessThanOrEqual(32_000 - 256);
@@ -603,7 +1070,7 @@ describe("orchestrator", () => {
     const allowance = (input: ReviewInput) =>
       inputTokenAllowance({
         system: reviewer.systemPrompt,
-        input,
+        input: reviewer.prepareModelInput?.(input) ?? input,
         schema: z.toJSONSchema(reviewer.outputSchema),
       });
     const trimmed = (cap: number): ReviewInput => ({
@@ -1452,6 +1919,61 @@ describe("orchestrator", () => {
     expect(await caseUsage()).toEqual(summarizeUsage(entries));
   });
 
+  it("retains the failed task's timeout in durable terminal state and events", async () => {
+    const timeout = new ModelTimeoutError(180_000);
+    const provider = new ScriptedProvider({
+      a: () => {
+        throw timeout;
+      },
+    });
+    const h = harness({
+      provider,
+      reviewer: false,
+      plan: planOf([{ key: "a" }, { key: "b", dependsOn: ["a"] }]),
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("failed");
+    const error = {
+      code: "model-timeout",
+      message: `The analyst task failed: ${timeout.message}`,
+    };
+    expect(result?.run?.terminalEvent?.error).toEqual(error);
+    expect((await eventsOf(run.id)).at(-1)?.payload).toEqual({
+      type: "run-failed",
+      error,
+    });
+    const tasks = await tasksOf(run.id);
+    expect(tasks.a.lastError).toEqual({
+      code: "model-timeout",
+      message: timeout.message,
+    });
+    expect(tasks.b.lastError?.code).toBe("blocked-by-dependency");
+    expect(provider.calls).toEqual(["a"]);
+    expect(result?.run?.usage.costStatus).toBe("unknown");
+  });
+
+  it("keeps terminal task errors within the public error message limit", async () => {
+    const h = harness({
+      provider: new ScriptedProvider({
+        a: () => {
+          throw new AiError("x".repeat(500), "provider-request-failed");
+        },
+      }),
+      reviewer: false,
+      plan: planOf([{ key: "a" }]),
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("failed");
+    const terminal = (await eventsOf(run.id)).at(-1)?.payload;
+    expect(terminal).toMatchObject({
+      type: "run-failed",
+      error: {
+        code: "provider-request-failed",
+        message: `The analyst task failed: ${"x".repeat(500)}`.slice(0, 500),
+      },
+    });
+  });
+
   it("refuses to retry runs without failed work or with an active run", async () => {
     const provider = new ScriptedProvider(routes("a"));
     const h = harness({
@@ -1474,6 +1996,55 @@ describe("orchestrator", () => {
         priorRunId: run.id,
       }),
     ).rejects.toBeInstanceOf(RunNotFoundError);
+  });
+
+  it("retries planning after a missing price fails before any tasks exist", async () => {
+    const plan = planOf([{ key: "a" }, { key: "b" }]);
+    const provider = new ScriptedProvider({
+      ...routes("a", "b"),
+      coordinator: () => ({
+        tasks: plan.tasks.map((task) => ({
+          key: task.key,
+          assignedRole: task.role,
+          dependsOn: task.dependsOn,
+          instructions: task.instructions,
+        })),
+      }),
+    });
+    const h = harness({
+      provider,
+      coordinator: true,
+      reviewer: false,
+      plan,
+    });
+    const priceLookup = vi
+      .spyOn(store.repositories.usagePrices, "findActive")
+      .mockResolvedValueOnce(null);
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("failed");
+    expect(await tasksOf(run.id)).toEqual({});
+    expect(provider.calls).toEqual([]);
+    expect(await ledger()).toEqual([]);
+    expect((await eventsOf(run.id)).at(-1)?.payload).toMatchObject({
+      type: "run-failed",
+      error: { code: "usage-admission-rejected" },
+    });
+    priceLookup.mockRestore();
+
+    const retry = await h.orchestrator.retryFailedAsync({
+      ownerId: OWNER,
+      caseId: CASE_ID,
+      priorRunId: run.id,
+    });
+    expect(retry.priorRunId).toBe(run.id);
+    expect(retry.usage.costUsd).toBe(0);
+    expect(retry.terminalEvent).toBeUndefined();
+    expect((await h.worker.runOnceAsync())?.run?.status).toBe("completed");
+    expect(provider.calls).toEqual(["coordinator", "a", "b"]);
+    expect(
+      (await store.repositories.runs.findOwnedById(run.id, OWNER))?.status,
+    ).toBe("failed");
+    expect(await caseUsage()).toEqual(summarizeUsage(await ledger()));
   });
 
   it("plans multi-agent cases with the coordinator and counts planning usage", async () => {

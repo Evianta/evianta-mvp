@@ -243,6 +243,81 @@ describe("getUsageEnvironment", () => {
   });
 });
 
+describe("Muse model configuration", () => {
+  const configuration = {
+    EVIANTA_AI_PROVIDER: "muse",
+    EVIANTA_USAGE_MODE: "enforced",
+    MODEL_API_KEY: "test-key",
+    MUSE_SPARK_MODEL: "spark",
+    MUSE_WONDER_MODEL: "wonder",
+    MODEL_MAX_INPUT_TOKENS: "32000",
+    MODEL_MAX_OUTPUT_TOKENS: "2048",
+    USER_MAX_CONCURRENT_RUNS: "2",
+    GLOBAL_MAX_CONCURRENT_RUNS: "10",
+    USER_SPEND_LIMIT_USD: "5",
+    GLOBAL_SPEND_LIMIT_USD: "100",
+    SPEND_PERIOD_SECONDS: "86400",
+  };
+
+  it("defaults model requests to three minutes for document analyses", () => {
+    expect(getAiEnvironment(configuration).modelRequestTimeoutMs).toBe(180_000);
+    expect(
+      getAiEnvironment({
+        EVIANTA_AI_PROVIDER: "mock",
+        EVIANTA_USAGE_MODE: "test",
+      }).modelRequestTimeoutMs,
+    ).toBe(180_000);
+  });
+
+  it("accepts an explicit model request timeout", () => {
+    expect(
+      getAiEnvironment({
+        ...configuration,
+        MODEL_REQUEST_TIMEOUT_MS: "300000",
+      }).modelRequestTimeoutMs,
+    ).toBe(300_000);
+  });
+
+  it.each(["0", "-1", "1.5", "", "abc", "2147483648"])(
+    "rejects invalid model timeout %j",
+    (value) => {
+      expect(() =>
+        getAiEnvironment({
+          ...configuration,
+          MODEL_REQUEST_TIMEOUT_MS: value,
+        }),
+      ).toThrow("MODEL_REQUEST_TIMEOUT_MS");
+    },
+  );
+
+  it("resolves legacy shorthand to published Standard-mode API IDs", () => {
+    expect(getAiEnvironment(configuration)).toMatchObject({
+      museBaseUrl: "https://api.meta.ai/v1",
+      museSparkModel: "muse-spark-1.3",
+      museWonderModel: "muse-wonder-1.0",
+    });
+  });
+
+  it("preserves explicit model versions and trims configuration whitespace", () => {
+    expect(
+      getAiEnvironment({
+        ...configuration,
+        MUSE_SPARK_MODEL: " muse-spark-1.2 ",
+        MUSE_WONDER_MODEL: " muse-wonder-1.0 ",
+      }),
+    ).toMatchObject({
+      museSparkModel: "muse-spark-1.2",
+      museWonderModel: "muse-wonder-1.0",
+    });
+  });
+
+  it("still requires nonblank model configuration", () => {
+    expect(() =>
+      getAiEnvironment({ ...configuration, MUSE_SPARK_MODEL: " " }),
+    ).toThrow('Required environment variable "MUSE_SPARK_MODEL" is not set');
+  });
+});
+
 describe("getApiEnvironment", () => {
   const configuration = {
     JWT_SIGNING_KEY: "test-only-signing-key-that-is-at-least-32-bytes",
@@ -281,7 +356,7 @@ describe("getApiEnvironment", () => {
     ).toThrow("WEB_ORIGIN must be an exact http(s) origin");
   });
 
-  it("rejects invalid rate limits, proxy hops, and non-30-minute lifetimes", () => {
+  it("rejects invalid rate limits and proxy hops", () => {
     expect(() =>
       getApiEnvironment({
         ...configuration,
@@ -294,11 +369,32 @@ describe("getApiEnvironment", () => {
         TRUST_PROXY_HOPS: "-1",
       }),
     ).toThrow("TRUST_PROXY_HOPS must be a non-negative integer");
+  });
+
+  it("allows a longer demo session within bounds and validates the pepper", () => {
+    expect(
+      getApiEnvironment({ ...configuration, JWT_TTL_SECONDS: "28800" }),
+    ).toMatchObject({ jwtTtlSeconds: 28800 });
+    for (const value of ["900", "28801", "3600.5"]) {
+      expect(() =>
+        getApiEnvironment({ ...configuration, JWT_TTL_SECONDS: value }),
+      ).toThrow("JWT_TTL_SECONDS must be between 1800 and 28800");
+    }
+    expect(getApiEnvironment(configuration).accessKeyPepper).toBeUndefined();
+    expect(
+      getApiEnvironment({
+        ...configuration,
+        ACCESS_KEY_PEPPER: "a-separate-pepper-that-is-long-enough-123",
+      }).accessKeyPepper,
+    ).toBe("a-separate-pepper-that-is-long-enough-123");
+    expect(() =>
+      getApiEnvironment({ ...configuration, ACCESS_KEY_PEPPER: "short" }),
+    ).toThrow("ACCESS_KEY_PEPPER must be at least 32 bytes");
     expect(() =>
       getApiEnvironment({
         ...configuration,
-        JWT_TTL_SECONDS: "3600",
+        ACCESS_KEY_PEPPER: configuration.JWT_SIGNING_KEY,
       }),
-    ).toThrow("JWT_TTL_SECONDS must be 1800");
+    ).toThrow("ACCESS_KEY_PEPPER must differ from JWT_SIGNING_KEY");
   });
 });

@@ -18,6 +18,12 @@ import {
 import type { NextFunction, Request, Response } from "express";
 import { z } from "zod";
 import { sendApiError } from "./errors.js";
+import {
+  isLegacyAccessKey,
+  normalizePassphrase,
+  passphraseKeyHash,
+  passphraseKeyId,
+} from "./passphrase.js";
 
 const TokenClaimsSchema = z
   .object({
@@ -46,7 +52,8 @@ export interface AuthConfiguration {
   jwtSigningKey: string;
   jwtIssuer: string;
   jwtAudience: string;
-  jwtTtlSeconds: 1800;
+  jwtTtlSeconds: number;
+  accessKeyPepper?: string;
   authRateLimitPerMinute: number;
   apiRateLimitPerMinute: number;
 }
@@ -198,27 +205,13 @@ export class AuthenticationService {
   async exchangeAccessKey(plaintext: unknown): Promise<{
     accessToken: string;
     tokenType: "Bearer";
-    expiresIn: 1800;
+    expiresIn: number;
     expiresAt: string;
   } | null> {
-    const parsedInput = AccessKeyInputSchema.safeParse(plaintext);
-    if (!parsedInput.success) return null;
-    const keyMatch = /^evk_([A-Za-z0-9_-]+)\./.exec(parsedInput.data);
-    const keyId = keyMatch?.[1];
-    if (!keyId) return null;
-
     const now = this.now();
     const timestamp = now.toISOString();
-    const accessKey = await this.repositories.accessKeys.findActiveById(
-      keyId,
-      timestamp,
-    );
-    if (
-      !accessKey ||
-      !secureEqualHex(accessKey.keyHash, hashAccessKey(parsedInput.data))
-    ) {
-      return null;
-    }
+    const accessKey = await this.resolveAccessKey(plaintext, timestamp);
+    if (!accessKey) return null;
     const user = await this.repositories.users.findById(accessKey.userId);
     if (!user || user.disabledAt !== null) return null;
 
@@ -250,7 +243,44 @@ export class AuthenticationService {
       },
       this.configuration.jwtSigningKey,
     );
-    return { accessToken, tokenType: "Bearer", expiresIn: 1800, expiresAt };
+    return {
+      accessToken,
+      tokenType: "Bearer",
+      expiresIn: this.configuration.jwtTtlSeconds,
+      expiresAt,
+    };
+  }
+
+  private async resolveAccessKey(
+    input: unknown,
+    timestamp: string,
+  ): Promise<AccessKeyRecord | null> {
+    if (typeof input !== "string" || input.length > 256) return null;
+    if (isLegacyAccessKey(input)) {
+      const parsed = AccessKeyInputSchema.safeParse(input.trim());
+      if (!parsed.success) return null;
+      const keyId = /^evk_([A-Za-z0-9_-]+)\./.exec(parsed.data)?.[1];
+      if (!keyId) return null;
+      const record = await this.repositories.accessKeys.findActiveById(
+        keyId,
+        timestamp,
+      );
+      return record &&
+        secureEqualHex(record.keyHash, hashAccessKey(parsed.data))
+        ? record
+        : null;
+    }
+    const pepper = this.configuration.accessKeyPepper;
+    const normalized = normalizePassphrase(input);
+    if (!pepper || !normalized) return null;
+    const record = await this.repositories.accessKeys.findActiveById(
+      passphraseKeyId(pepper, normalized),
+      timestamp,
+    );
+    return record &&
+      secureEqualHex(record.keyHash, passphraseKeyHash(pepper, normalized))
+      ? record
+      : null;
   }
 
   async authenticate(token: string): Promise<AuthContext> {

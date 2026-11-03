@@ -38,7 +38,7 @@ export function PublicSampleCard({
         </span>
         <StatusBadge tone="info">Synthetic sample</StatusBadge>
       </div>
-      <p className="mt-5 text-[10px] font-semibold uppercase tracking-[0.09em] text-muted-foreground">
+      <p className="mt-5 text-xs font-semibold uppercase tracking-[0.09em] text-muted-foreground">
         {labels[fixture.case.useCase]}
       </p>
       <h3 className="mt-2 text-base font-semibold tracking-tight">
@@ -49,7 +49,7 @@ export function PublicSampleCard({
       </p>
       <div className="sample-card-footer">
         <span>
-          <span className="block text-[10px] text-muted-foreground">
+          <span className="block text-xs text-muted-foreground">
             {metric.label}
           </span>
           <span className="mono-number mt-1 block text-sm font-medium">

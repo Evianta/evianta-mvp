@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import {
   liveWorkflows,
+  type AgentProfile,
   type Approval,
   type Case,
   type Deliverable,
@@ -20,9 +21,11 @@ import {
   type RunEvent,
 } from "@evianta/core";
 import type { CaseWorkspace } from "../api/client";
+import { agentNameForRole } from "../agents";
 import { formatDate } from "../format";
 import { useSession } from "../session/SessionProvider";
 import { Button } from "./Button";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { EmptyState } from "./EmptyState";
 import { LoadingSkeleton } from "./LoadingSkeleton";
 import { PrivateGate } from "./PrivateGate";
@@ -50,6 +53,23 @@ const eventLabels: Record<RunEvent["payload"]["type"], string> = {
   "limit-reached": "Usage limit reached",
   "input-required": "Your input is needed",
 };
+
+function describeEvent(
+  event: RunEvent,
+  nameOf: (role: string) => string,
+): string {
+  const payload = event.payload;
+  switch (payload.type) {
+    case "task-started":
+      return `${nameOf(payload.role)} started`;
+    case "task-completed":
+      return `${nameOf(payload.role)} finished`;
+    case "task-failed":
+      return `${nameOf(payload.role)} needs attention`;
+    default:
+      return eventLabels[payload.type];
+  }
+}
 
 const terminalStatuses = new Set([
   "completed",
@@ -102,6 +122,22 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState(false);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [profiles, setProfiles] = useState<AgentProfile[]>([]);
+  const nameOf = (role: string) => agentNameForRole(role, profiles);
+
+  useEffect(() => {
+    let active = true;
+    void api
+      .listAgentDirectory()
+      .then((result) => {
+        if (active) setProfiles(result);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [api]);
   const [uncertainAction, setUncertainAction] = useState(false);
   const actionInFlight = useRef(false);
   const lastSequence = useRef(0);
@@ -311,15 +347,13 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
     }
   }
 
-  async function cancelRun() {
-    if (
-      !run ||
-      !window.confirm(
-        "Cancel this analysis? Work already completed will remain available.",
-      )
-    ) {
-      return;
-    }
+  function cancelRun() {
+    if (!run) return;
+    setCancelOpen(true);
+  }
+
+  async function confirmCancel() {
+    if (!run) return;
     setError(null);
     setPendingAction(true);
     try {
@@ -476,7 +510,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
           <p className="page-description">
             {record.description || "No case description provided."}
           </p>
-          <p className="mt-3 text-[11px] text-muted-foreground">
+          <p className="mt-3 text-xs text-muted-foreground">
             Updated {formatDate(record.updatedAt)}
           </p>
         </div>
@@ -579,7 +613,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
               <h2 id="run-progress-heading" className="text-sm font-semibold">
                 Progress and decisions
               </h2>
-              <p className="mt-1 text-[11px] text-muted-foreground">
+              <p className="mt-1 text-xs text-muted-foreground">
                 Typed updates from the run stream
               </p>
             </div>
@@ -595,8 +629,10 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
             <div className="p-5">
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-background p-4">
                 <div>
-                  <p className="text-xs font-medium">Run {run.id}</p>
-                  <p className="mt-1 text-[10px] text-muted-foreground">
+                  <p className="text-xs font-medium">
+                    Run {run.id.slice(0, 8)}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
                     Plan version {run.planVersion} · Updated{" "}
                     {formatDate(run.updatedAt)}
                   </p>
@@ -629,10 +665,10 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
                   {[...events].reverse().map((event) => (
                     <li className="timeline-item" key={event.id}>
                       <p className="text-xs font-medium">
-                        {eventLabels[event.payload.type]}
+                        {describeEvent(event, nameOf)}
                       </p>
-                      <p className="mt-1 text-[10px] text-muted-foreground">
-                        {formatDate(event.occurredAt)} · Event {event.sequence}
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {formatDate(event.occurredAt)}
                       </p>
                     </li>
                   ))}
@@ -645,7 +681,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
                 </p>
               )}
               {canRetry && (
-                <p className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+                <p className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
                   <RefreshCw size={13} aria-hidden="true" />
                   Retrying keeps work already completed by the prior run.
                 </p>
@@ -672,7 +708,7 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
               <h2 id="findings-heading" className="text-sm font-semibold">
                 Findings and evidence
               </h2>
-              <p className="mt-1 text-[11px] text-muted-foreground">
+              <p className="mt-1 text-xs text-muted-foreground">
                 Source links stay visible
               </p>
             </div>
@@ -687,13 +723,13 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
           )}
           <div className="mt-4 grid grid-cols-2 gap-2">
             <div className="rounded-md bg-background p-3">
-              <p className="text-[10px] text-muted-foreground">Input tokens</p>
+              <p className="text-xs text-muted-foreground">Input tokens</p>
               <p className="mono-number mt-1 text-sm">
                 {run?.usage.inputUnits ?? "—"}
               </p>
             </div>
             <div className="rounded-md bg-background p-3">
-              <p className="text-[10px] text-muted-foreground">Output tokens</p>
+              <p className="text-xs text-muted-foreground">Output tokens</p>
               <p className="mono-number mt-1 text-sm">
                 {run?.usage.outputUnits ?? "—"}
               </p>
@@ -712,6 +748,16 @@ function SessionCaseWorkspace({ caseId }: { caseId: string }) {
           onApprovalSaved={onApprovalSaved}
         />
       )}
+      <ConfirmDialog
+        open={cancelOpen}
+        onOpenChange={setCancelOpen}
+        title="Cancel this analysis?"
+        description="Work already completed will remain available."
+        confirmLabel="Cancel analysis"
+        cancelLabel="Keep running"
+        destructive
+        onConfirm={() => void confirmCancel()}
+      />
     </div>
   );
 }

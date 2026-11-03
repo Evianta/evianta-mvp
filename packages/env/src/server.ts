@@ -87,6 +87,7 @@ export function getMongoConfig(
 
 export interface AiEnvironment {
   provider: "muse" | "mock";
+  modelRequestTimeoutMs: number;
   modelApiKey?: string;
   museBaseUrl?: string;
   museSparkModel?: string;
@@ -173,7 +174,8 @@ export interface ApiEnvironment {
   jwtSigningKey: string;
   jwtIssuer: string;
   jwtAudience: string;
-  jwtTtlSeconds: 1800;
+  jwtTtlSeconds: number;
+  accessKeyPepper?: string;
   webOrigin: string;
   apiPort: number;
   authRateLimitPerMinute: number;
@@ -225,6 +227,18 @@ function getPositiveInteger(
   return value;
 }
 
+export function getAccessKeyPepper(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const value = env.ACCESS_KEY_PEPPER?.trim();
+  if (!value || Buffer.byteLength(value, "utf8") < 32) {
+    throw new Error(
+      "ACCESS_KEY_PEPPER must be set to at least 32 bytes to issue passphrase keys",
+    );
+  }
+  return value;
+}
+
 export function getApiEnvironment(
   env: NodeJS.ProcessEnv = process.env,
 ): ApiEnvironment {
@@ -254,8 +268,8 @@ export function getApiEnvironment(
   }
 
   const ttl = Number(env.JWT_TTL_SECONDS ?? "1800");
-  if (ttl !== 1800) {
-    throw new Error("JWT_TTL_SECONDS must be 1800");
+  if (!Number.isInteger(ttl) || ttl < 1800 || ttl > 28800) {
+    throw new Error("JWT_TTL_SECONDS must be between 1800 and 28800");
   }
 
   const apiPort = getPositiveInteger("API_PORT", env, 3001);
@@ -274,11 +288,20 @@ export function getApiEnvironment(
     throw new Error("TRUST_PROXY_HOPS must be a non-negative integer");
   }
 
+  const accessKeyPepper = env.ACCESS_KEY_PEPPER?.trim();
+  if (accessKeyPepper && Buffer.byteLength(accessKeyPepper, "utf8") < 32) {
+    throw new Error("ACCESS_KEY_PEPPER must be at least 32 bytes");
+  }
+  if (accessKeyPepper && accessKeyPepper === jwtSigningKey) {
+    throw new Error("ACCESS_KEY_PEPPER must differ from JWT_SIGNING_KEY");
+  }
+
   return {
     jwtSigningKey,
+    ...(accessKeyPepper ? { accessKeyPepper } : {}),
     jwtIssuer: getRequiredEnv("JWT_ISSUER", env),
     jwtAudience: getRequiredEnv("JWT_AUDIENCE", env),
-    jwtTtlSeconds: 1800,
+    jwtTtlSeconds: ttl,
     webOrigin,
     apiPort,
     authRateLimitPerMinute: getPositiveInteger(
@@ -300,14 +323,25 @@ export function getAiEnvironment(
   }
 
   const usage = getUsageEnvironment(env);
-  if (provider === "mock") return { provider, usage };
+  const modelRequestTimeoutMs = getPositiveInteger(
+    "MODEL_REQUEST_TIMEOUT_MS",
+    env,
+    180_000,
+  );
+  if (modelRequestTimeoutMs > 2_147_483_647) {
+    throw new Error("MODEL_REQUEST_TIMEOUT_MS must not exceed 2147483647");
+  }
+  if (provider === "mock") return { provider, usage, modelRequestTimeoutMs };
 
+  const sparkModel = getRequiredEnv("MUSE_SPARK_MODEL", env).trim();
+  const wonderModel = getRequiredEnv("MUSE_WONDER_MODEL", env).trim();
   return {
     provider,
+    modelRequestTimeoutMs,
     modelApiKey: getRequiredEnv("MODEL_API_KEY", env),
     museBaseUrl: env.MUSE_BASE_URL ?? "https://api.meta.ai/v1",
-    museSparkModel: getRequiredEnv("MUSE_SPARK_MODEL", env),
-    museWonderModel: getRequiredEnv("MUSE_WONDER_MODEL", env),
+    museSparkModel: sparkModel === "spark" ? "muse-spark-1.3" : sparkModel,
+    museWonderModel: wonderModel === "wonder" ? "muse-wonder-1.0" : wonderModel,
     usage,
   };
 }

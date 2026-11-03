@@ -12,7 +12,7 @@ import {
   type ReactNode,
 } from "react";
 import { FetchWebApiClient } from "../api/client";
-import type { WebApiClient } from "../api/client";
+import type { UserProfile, WebApiClient } from "../api/client";
 import {
   SESSION_STORAGE_KEY,
   SessionController,
@@ -31,6 +31,7 @@ interface SessionContextValue {
   };
   signIn: (accessKey: string) => Promise<void>;
   signOut: () => Promise<void>;
+  profile: UserProfile | null;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -45,11 +46,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
   const [signingOut, setSigningOut] = useState(false);
   const [signOutPending, setSignOutPending] = useState(false);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profileToken, setProfileToken] = useState<string | null>(null);
   const session = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
     () => null,
   );
+  const accessToken = session?.accessToken ?? null;
   const clearSession = useCallback(() => {
     try {
       controller.clear();
@@ -68,6 +72,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }),
     [controller, clearSession],
   );
+  useEffect(() => {
+    if (!accessToken) return;
+    let active = true;
+    void api
+      .getProfile()
+      .then((result) => {
+        if (!active) return;
+        setProfile(result);
+        setProfileToken(accessToken);
+      })
+      .catch(() => {
+        if (active) setProfileToken(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, accessToken]);
 
   useEffect(() => {
     function restore() {
@@ -113,6 +134,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const value = useMemo<SessionContextValue>(
     () => ({
       session,
+      profile: profileToken === session?.accessToken ? profile : null,
       restoring,
       restoreError,
       signingOut,
@@ -232,6 +254,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       api,
       controller,
       session,
+      profile,
+      profileToken,
       restoring,
       restoreError,
       signingOut,

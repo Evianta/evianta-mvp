@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Evianta">
+  <defs>
+    <linearGradient id="l-outer" x1="147" y1="107" x2="124" y2="465" gradientUnits="userSpaceOnUse">
+      <stop stop-color="hsl(178, 58%, 46%)"/>
+      <stop offset=".5" stop-color="hsl(182, 72%, 30%)"/>
+      <stop offset="1" stop-color="hsl(182, 72%, 26%)"/>
+    </linearGradient>
+    <linearGradient id="l-face" x1="157" y1="315" x2="455" y2="169" gradientUnits="userSpaceOnUse">
+      <stop stop-color="hsl(220, 26%, 14%)"/>
+      <stop offset=".48" stop-color="hsl(182, 72%, 26%)"/>
+      <stop offset="1" stop-color="hsl(182, 72%, 30%)"/>
+    </linearGradient>
+    <linearGradient id="l-fold" x1="125" y1="279" x2="198" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="hsl(220, 26%, 14%)"/>
+      <stop offset="1" stop-color="hsl(182, 72%, 26%)"/>
+    </linearGradient>
+    <linearGradient id="l-tail" x1="152" y1="535" x2="384" y2="389" gradientUnits="userSpaceOnUse">
+      <stop stop-color="hsl(182, 72%, 30%)"/>
+      <stop offset=".54" stop-color="hsl(178, 58%, 46%)"/>
+      <stop offset="1" stop-color="hsl(180, 42%, 78%)"/>
+    </linearGradient>
+    <linearGradient id="l-spark" x1="422" y1="318" x2="543" y2="378" gradientUnits="userSpaceOnUse">
+      <stop stop-color="hsl(9, 64%, 44%)"/>
+      <stop offset="1" stop-color="hsl(10, 86%, 70%)"/>
+    </linearGradient><clipPath id="c"><circle cx="48" cy="48" r="48"/></clipPath></defs>
+  <g clip-path="url(#c)">
+    <rect width="96" height="96" fill="#e3f4f1"/>
+    <circle cx="48" cy="48" r="48" fill="#0f766e" fill-opacity=".08"/>
+  </g>
+  <g transform="translate(16 16) scale(.1107) translate(-18 -39)">
+    <path fill="url(#l-outer)" d="M78 468C40 432 20 384 22 320C24 230 81 153 163 110C233 73 320 70 385 111C335 93 287 112 244 145C202 177 163 214 123 254C72 305 38 389 78 468Z"/>
+    <path fill="url(#l-fold)" d="M244 145C202 177 163 214 123 254C72 305 38 389 78 468C111 493 163 466 228 438C178 418 147 374 145 316C143 259 179 223 221 207Z"/>
+    <path fill="url(#l-face)" d="M123 254C167 211 203 176 244 145C287 112 335 93 385 111C433 130 469 171 469 213C472 257 439 292 394 318C359 338 321 349 276 349H185C221 327 260 306 296 283C327 263 349 244 341 228C331 208 293 196 260 199C208 200 160 222 123 254Z"/>
+    <path fill="url(#l-tail)" d="M78 468C114 497 172 457 228 438C275 415 318 391 358 390C407 388 444 415 461 461C424 451 397 479 353 503C292 539 233 550 181 534C138 522 103 500 78 468Z"/>
+    <path fill="url(#l-spark)" d="M485 277C495 316 515 337 556 348C515 359 495 380 485 419C474 380 454 359 413 348C454 337 474 316 485 277Z"/>
+  </g>
+  <circle cx="48" cy="48" r="46.5" fill="none" stroke="#0f766e" stroke-opacity=".28" stroke-width="3"/>
+</svg>

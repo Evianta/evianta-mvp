@@ -1,7 +1,10 @@
 import AxeBuilder from "@axe-core/playwright";
+import { readFile } from "node:fs/promises";
+import { readPdf } from "../test/support/pdf";
 import { syntheticWorkflowFixtures, type Finding } from "@evianta/core";
 import { expect, test, type Page } from "@playwright/test";
 import type { CaseWorkspace } from "../src/api/client";
+import { buildDeliverableExport } from "../src/deliverable-export";
 
 const record = {
   ...syntheticWorkflowFixtures.taxNotice.case,
@@ -153,6 +156,7 @@ async function openWorkspace(page: Page, workspace: CaseWorkspace) {
       });
       return;
     }
+
     if (route.request().headers().accept !== "application/json") {
       await route.continue();
       return;
@@ -169,6 +173,89 @@ async function openWorkspace(page: Page, workspace: CaseWorkspace) {
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
 }
+
+test("previews separate drafts, lists missing originals and downloads the selected saved document", async ({
+  page,
+}) => {
+  const workspace = workspaceOf();
+  const template = workspace.deliverables[0]!;
+  workspace.deliverables = ["Customer A", "Customer B"].map(
+    (customer, index) => ({
+      ...template,
+      id: `draft-${index}`,
+      title: `Payment notice - ${customer}`,
+      workProduct: {
+        key: `buyer-${index}`,
+        type: "payment-demand",
+        title: `Payment notice - ${customer}`,
+        claimant: "Supplier",
+        counterparty: customer,
+        body: `To: ${customer}\nSubject: Payment request\nPlease arrange payment against your invoice.\nFor Supplier: [unsigned]`,
+        sources: [
+          {
+            documentId: "notice-document",
+            reference: "User-supplied transaction record",
+          },
+        ],
+        missingOriginals: ["Original registration certificate"],
+        reviewBlockers: ["Verify recipient address."],
+        schedules: [],
+      },
+      sections: [
+        {
+          ...template.sections[0]!,
+          id: `body-${index}`,
+          content: `To: ${customer}\nSubject: Payment request\nSaved draft for ${customer}.\nFor Supplier: [unsigned]`,
+        },
+      ],
+    }),
+  );
+  await openWorkspace(page, workspace);
+  await page.route("**/deliverables/*/export?*", async (route) => {
+    const url = new URL(route.request().url());
+    const doc = workspace.deliverables.find((item) =>
+      url.pathname.includes(`/deliverables/${item.id}/`),
+    );
+    if (!doc) throw new Error("Requested document was not found.");
+    const file = await buildDeliverableExport(doc, "pdf");
+    await route.fulfill({
+      contentType: file.mimeType,
+      body: Buffer.from(file.content),
+    });
+  });
+  const review = page.getByRole("region", {
+    name: "Review and evidence workspace",
+  });
+  const selector = review.getByLabel("Document to review");
+  await selector.selectOption("draft-1");
+  const preview = review.getByRole("region", {
+    name: "Document preview: Payment notice - Customer B",
+  });
+  await expect(preview).toContainText("Saved draft for Customer B.");
+  await expect(preview).not.toContainText("Customer A");
+  await expect(preview).toContainText("Original registration certificate");
+  await expect(preview).toContainText("Upload your originals separately");
+  await expect(preview).toContainText(
+    "Filing requirements have not been validated",
+  );
+  await review.getByLabel(/Export .*for Payment notice - Customer B/).click();
+  await expect(
+    review.getByRole("button", { name: /Download Excel/ }),
+  ).toHaveCount(0);
+  const downloadPromise = page.waitForEvent("download");
+  await review
+    .getByRole("button", { name: "Download PDF (.pdf)", exact: true })
+    .click();
+  const download = await downloadPromise;
+  const path = await download.path();
+  if (!path) throw new Error("Generated download has no file.");
+  const pdf = await readPdf(new Uint8Array(await readFile(path)));
+  expect(pdf.text).toContain("Saved draft for Customer B");
+  expect(pdf.text).not.toContain("Customer A");
+  expect(pdf.text).not.toContain("notice-document");
+  await review.getByLabel("Reviewer draft").fill("Unsaved edit");
+  await expect(selector).toBeDisabled();
+});
 
 test("renders tax details and opens document and research evidence", async ({
   page,
@@ -247,4 +334,31 @@ test("shows empty and missing-evidence states without inventing results", async 
   await expect(
     page.getByText("Evidence unavailable: guidance-evidence"),
   ).toBeVisible();
+});
+
+test("exports the actual saved notice reply rather than the result summary", async ({
+  page,
+}) => {
+  const workspace = workspaceOf();
+  workspace.deliverables[0]!.sections[0]!.reviewerContent =
+    "To the assessing officer: please verify the enclosed credit schedule.";
+  await openWorkspace(page, workspace);
+  const review = page.getByRole("region", {
+    name: "Review and evidence workspace",
+  });
+  await review.getByLabel(/Export .*for Tax notice response pack/).click();
+  await expect(
+    review.getByRole("button", { name: /Download JSON/ }),
+  ).toHaveCount(0);
+  await expect(
+    review.getByRole("button", { name: /Download Excel/ }),
+  ).toHaveCount(0);
+  const download = page.waitForEvent("download");
+  await review.getByRole("button", { name: "Download PDF (.pdf)" }).click();
+  const draft = await download;
+  expect(draft.suggestedFilename()).toBe("tax-notice-response-pack-v1.pdf");
+  const pdf = await readPdf(await readFile((await draft.path())!));
+  expect(pdf.text).toContain(
+    "To the assessing officer: please verify the enclosed credit schedule.",
+  );
 });

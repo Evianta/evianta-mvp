@@ -89,7 +89,7 @@ The admin command requires the API build (`pnpm dev` prepares it, or run
 Enter it in the web sign-in dialog; do not put it in a URL, source file or log.
 The worker must be running for submitted analyses to complete.
 
-To check the data-analysis flow, open **Start** at `/`, sign in, and choose
+To check the data-analysis flow, open **New chat** at `/`, sign in, and choose
 the **Data analysis** suggestion or write your own prompt.
 Attach a `.csv` or `.xlsx` dataset and choose **Start task**. The prompt stays
 editable; the title is derived from its first nonempty line. There is no workflow
@@ -98,12 +98,44 @@ and up to 8 KB of CSV header text to detect one of the three supported task type
 Unclear or conflicting intent asks you to choose, without changing your message
 or files and without creating a case. No model or upload is used for detection.
 PDF/Excel contents are not read for classification; ambiguous filenames/messages
-need a choice. Sample-origin entry uses Start at `/?source=<sample-id>`.
+need a choice. Sample-origin entry uses the chat at `/?source=<sample-id>`.
+**New chat** in the sidebar or workspace search clears the conversation and
+composer, including attached files, without signing out or deleting saved cases.
 Enter submits, Shift+Enter adds a line, and IME composition does not submit.
 Starting authorizes private case creation, upload/extraction and execution under
 existing model limits. File limits and enabled workflows come from the authenticated
 `GET /intake/configuration` endpoint. MSME delayed-payment work and tax notices are
 available for live work.
+
+When a run pauses for clarification, the chat shows all pending questions in one
+form. Answer each field, optionally attach supporting files, then select
+**Submit answers and continue**. The message composer stays disabled until the
+answers are sent. Failed submissions keep the answers and offer a retry without
+starting a new run.
+
+MSME and tax results show the actual prepared documents, separately from internal
+findings and evidence. Multiple buyers receive separate drafts; multiple invoices
+for the same parties can share a notice and schedule. The inspector and case review
+workspace preview the saved letter and tables. Select a document to review and
+approve its saved version. Unsaved edits do not change downloads.
+
+**Export** downloads the saved draft body as PDF. Excel is offered only for actual
+derived schedules, with numeric amounts and typed currency/date columns. JSON is
+offered only when requested. Generated files are cached in private storage for
+that document version; saved edits invalidate the cached files and approval.
+**Download all generated files** packages drafts and schedules only, never originals.
+Invoices, certificates, bank records and other source evidence are referenced,
+not reconstructed. Upload your original evidence separately.
+
+Completed execution, professional review and filing readiness are distinct.
+Disputes and missing originals can produce useful cautious drafts; actual task
+failures still produce partial or failed runs with failure details and retries.
+The filing checklist blocks synthetic examples, missing originals, unresolved
+professional checks and absent approval. Current destination formats, size limits
+and attachment rules have not been verified, so no draft is labelled upload-ready.
+The system does not submit filings or log into government services.
+
+Data-analysis reports and their existing PDF/Excel exports remain available.
 
 All three workflows accept CSV, TSV, Excel (`.xlsx`/`.xls`), JSON, plain text,
 Markdown (`.md`/`.markdown`) and PDF. Image uploads are not enabled because OCR
@@ -319,6 +351,18 @@ Attempts with unknown provider usage keep their reservation as explicit
 exposure; they are not silently treated as free. Streaming calls remain
 reserved when the provider does not return usage details.
 
+Provider output schemas use strict JSON: every object property is required.
+Analysts return findings, not document fields. Only preparation agents receive
+the work-product contract; schedule formatting fields use explicit `null` when
+not applicable and are normalized before saving the domain document.
+
+Specialist and review model inputs share repeated evidence and extraction
+metadata through indexed catalogs. Budgeting uses the same compact payload that
+is sent to the provider; no finding, numeric claim or source location is removed.
+Long source excerpts can still be shortened with explicit truncation markers.
+If required content remains too large, execution fails visibly rather than
+discarding evidence or bypassing usage limits.
+
 Set `EVIANTA_USAGE_MODE=enforced` for live use and configure every
 `MODEL_MAX_*`, concurrency, spend, and period value in `.env`. The example uses
 `test` mode with the mock provider only. `test` and `replay` modes cannot be
@@ -328,6 +372,71 @@ USD per million tokens, with an optional per-request web-search rate.
 `UsageAdminService` exposes bounded, administrator-only attempt summaries.
 `runAdmission` provides fenced user/global concurrency admission and retains a
 case lock while a run waits for input.
+
+#### Configure live prices
+
+The API and worker provision missing Muse prices on startup from
+[`apps/api/src/muse-pricing.ts`](apps/api/src/muse-pricing.ts). These are Meta's
+[published Standard-mode prices](https://dev.meta.ai/docs/pricing-rate-limits),
+verified on 2026-11-02, in USD per million tokens:
+
+| Model family | Input | Output | Cached input |
+| ------------ | ----: | -----: | -----------: |
+| Muse Spark   |  1.25 |   4.25 |         0.15 |
+| Muse Wonder  |  4.00 |  20.00 |         0.20 |
+
+Set `MUSE_SPARK_MODEL=muse-spark-1.3` and
+`MUSE_WONDER_MODEL=muse-wonder-1.0` for live calls. The legacy shorthand values
+`spark` and `wonder` are normalized to these versioned IDs before pricing and
+dispatch; the provider does not accept those shorthand names directly. The
+explicit versioned IDs `muse-spark-1.1`, `muse-spark-1.2`, `muse-spark-1.3` and
+`muse-wonder-1.0` are also supported. Unknown IDs and Contributor-mode variants
+are not assigned Standard-mode prices; add verified configuration before using
+them. No request is switched to Contributor mode.
+
+For live Muse work, start with `MODEL_MAX_OUTPUT_TOKENS=16384`. Meta counts
+[reasoning tokens](https://dev.meta.ai/docs/reasoning) and visible output against
+the same ceiling: a 2,048-token limit can be exhausted by reasoning before the
+model finishes a JSON plan. This is a bounded allowance, not a guarantee that
+every response fits. Larger allowances reserve more budget before dispatch;
+user/global spending limits still apply. Truncated output is rejected and its
+reported usage is recorded. No automatic paid retry increases the ceiling.
+
+Model requests in the API and worker default to a 180-second time limit.
+Set `MODEL_REQUEST_TIMEOUT_MS` to allow longer document analyses, then restart
+the API and worker. This limit covers the request's correction/retry attempts,
+not the entire case run. Timed-out calls retain unknown usage exposure and are
+not automatically retried; the run reports the failed task and timeout reason.
+
+Startup uses the configured model IDs and `MODEL_MAX_OUTPUT_TOKENS` to create
+immutable price records with canonical settings hashes. Existing active prices,
+including operator overrides, are preserved. Repeated or concurrent API/worker
+starts do not duplicate records. Cache writes use the ordinary input rate;
+Meta lists a discount for cache reads, not a separate cache-write surcharge.
+Search remains disabled for admission: Meta charges $2.50 per 1,000 search
+queries, which is not a bounded per-request rate.
+
+For account-specific pricing, the operator can still import a JSON record using
+the fields in `UsagePriceSchema`, omitting `settingsKey`:
+
+```powershell
+pnpm --filter @evianta/api build
+pnpm --filter @evianta/api admin import-price "C:\path\to\price.json"
+```
+
+The command validates the file before connecting, computes `settingsKey`, and
+inserts through the price repository. Do not supply a hash yourself. Rates are
+USD per million tokens; `searchUsdPerRequest` is nullable and does not enable
+unsupported search admission. Set `effectiveAt` no later than the calls it
+should cover. Duplicate IDs or provider/model/settings/version combinations are
+rejected, not overwritten; use a new ID and version for a pricing change.
+
+`settings.maxOutputTokens` must match the dispatched allowance. Custom requests
+with another output allowance need a matching record too. The missing-price
+error includes the requested settings. After prices are provisioned, use
+**Try again** on the failed run. Planning failures with no tasks start planning
+again; task retries retain finished work.
+No API or worker restart is needed to pick up newly active prices.
 
 Document ingestion renews its extraction claim during parsing and OCR. Processing
 and failure transitions are fenced by the live claim and the document snapshot;

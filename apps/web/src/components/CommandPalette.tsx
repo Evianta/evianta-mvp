@@ -5,21 +5,41 @@ import { useRouter } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Command } from "cmdk";
 import { ArrowRight, Command as CommandIcon, Search } from "lucide-react";
+import { useSession } from "../session/SessionProvider";
+import { newChatHref } from "../chat/flow-utils";
 
 const commands = [
-  { label: "Start a task", href: "/", keywords: "prompt composer" },
+  {
+    label: "New chat",
+    href: "/",
+    keywords: "start task prompt composer chat evianta",
+  },
   {
     label: "Open synthetic samples",
-    href: "/#samples",
+    href: "/samples",
     keywords: "sample replay",
   },
   { label: "View your cases", href: "/cases", keywords: "private workspace" },
-  { label: "Admin usage", href: "/admin/usage", keywords: "cost tokens" },
+  {
+    label: "Meet the AI professionals",
+    href: "/agents",
+    keywords: "agents team directory evianta specialists",
+  },
+  {
+    label: "Admin usage",
+    href: "/admin/usage",
+    keywords: "cost tokens",
+    adminOnly: true,
+  },
 ];
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const router = useRouter();
+  const { profile } = useSession();
+  const visibleCommands = commands.filter(
+    (item) => !item.adminOnly || profile?.role === "admin",
+  );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -34,7 +54,7 @@ export function CommandPalette() {
 
   function navigate(href: string) {
     setOpen(false);
-    router.push(href);
+    router.push(href === "/" ? newChatHref() : href);
   }
 
   return (
@@ -78,7 +98,7 @@ export function CommandPalette() {
                   No matching actions.
                 </Command.Empty>
                 <Command.Group heading="Navigate">
-                  {commands.map((item) => (
+                  {visibleCommands.map((item) => (
                     <Command.Item
                       key={item.href}
                       value={`${item.label} ${item.keywords}`}

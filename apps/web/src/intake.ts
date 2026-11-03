@@ -14,27 +14,35 @@ export interface IntakeAttachmentHint {
   header?: string;
 }
 
-export function inferIntakeWorkflow(
+const workflowSignals: Record<UseCase, RegExp> = {
+  "data-analysis":
+    /\b(sales|revenue|dashboard|data\s+analysis|analy[sz]e.{0,30}(?:data|spreadsheet)|dataset|trends|anomalies)\b/i,
+  "tax-notice":
+    /\b(tax|tds|itr|ais|form\s*26as|intimation|assessment|143\s*\(\s*1\s*\)|income.tax)\b/i,
+  "msme-payment":
+    /\b(msme|invoice|invoices|overdue|delayed.payment|payment|payments|receivable|receivables)\b/i,
+};
+
+export function matchingWorkflows(
   prompt: string,
   attachments: IntakeAttachmentHint[],
-): UseCase | null {
-  const signals: Record<UseCase, RegExp> = {
-    "data-analysis":
-      /\b(sales|revenue|dashboard|data\s+analysis|analy[sz]e.{0,30}(?:data|spreadsheet)|dataset|trends|anomalies)\b/i,
-    "tax-notice":
-      /\b(tax|tds|itr|ais|form\s*26as|intimation|assessment|143\s*\(\s*1\s*\)|income.tax)\b/i,
-    "msme-payment":
-      /\b(msme|invoice|invoices|overdue|delayed.payment|payment|payments|receivable|receivables)\b/i,
-  };
+): UseCase[] {
   const text = [
     prompt,
     ...attachments.map(({ name, header }) =>
       `${name} ${header ?? ""}`.replaceAll(/[_-]/g, " "),
     ),
   ].join("\n");
-  const matches = (Object.keys(signals) as UseCase[]).filter((workflow) =>
-    signals[workflow].test(text),
+  return (Object.keys(workflowSignals) as UseCase[]).filter((workflow) =>
+    workflowSignals[workflow].test(text),
   );
+}
+
+export function inferIntakeWorkflow(
+  prompt: string,
+  attachments: IntakeAttachmentHint[],
+): UseCase | null {
+  const matches = matchingWorkflows(prompt, attachments);
   return matches.length === 1 ? matches[0] : null;
 }
 

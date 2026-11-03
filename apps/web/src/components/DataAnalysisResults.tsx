@@ -48,7 +48,7 @@ function ChartView({
 }) {
   const [dataPage, setDataPage] = useState(0);
   const [showData, setShowData] = useState(false);
-  const axisClass = "fill-muted-foreground text-[10px]";
+  const axisClass = "fill-muted-foreground text-xs";
   const labelKey = chart.type === "pie" ? chart.nameKey : chart.categoryKey;
   const pageSize = 100;
   const pageCount = Math.ceil(chart.data.length / pageSize);
@@ -195,7 +195,7 @@ function ChartView({
           </div>
         )}
       </details>
-      <p className="mt-2 text-[10px] text-muted-foreground">
+      <p className="mt-2 text-xs text-muted-foreground">
         Source: {chart.source.documentId}
         {chart.source.sheet ? ` · ${chart.source.sheet}` : ""}
         {chart.source.cellRange ? ` · ${chart.source.cellRange}` : ""}
@@ -292,7 +292,7 @@ export function DataAnalysisResults({
             ],
           ].map(([label, value]) => (
             <div className="rounded-md bg-muted/10 p-3" key={label}>
-              <dt className="text-[10px] text-muted-foreground">{label}</dt>
+              <dt className="text-xs text-muted-foreground">{label}</dt>
               <dd className="mono-number mt-1 text-sm font-semibold">
                 {value}
               </dd>
@@ -330,7 +330,7 @@ export function DataAnalysisResults({
                 key={`${issue.code}-${index}`}
               >
                 <p className="font-medium">{issue.message}</p>
-                <p className="mt-1 text-[10px] text-muted-foreground">
+                <p className="mt-1 text-xs text-muted-foreground">
                   {issue.columns.join(", ")} · {issue.count} affected row(s)
                   {issue.rows.length
                     ? ` · source row(s) ${issue.rows.map((range) => (range.start === range.end ? range.start : `${range.start}–${range.end}`)).join(", ")}`
@@ -353,7 +353,7 @@ export function DataAnalysisResults({
               >
                 <div className="flex items-start justify-between gap-3">
                   <h4 className="text-xs font-semibold">{finding.title}</h4>
-                  <span className="text-[10px] capitalize text-muted-foreground">
+                  <span className="text-xs capitalize text-muted-foreground">
                     {finding.severity}
                   </span>
                 </div>
@@ -371,7 +371,7 @@ export function DataAnalysisResults({
                         <li key={id}>
                           <button
                             type="button"
-                            className="text-left text-[10px] text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                            className="text-left text-xs text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                             onClick={() => onOpenEvidence(source.id)}
                           >
                             Evidence: {document?.name ?? source.documentId}

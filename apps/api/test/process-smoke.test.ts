@@ -1,6 +1,6 @@
 import { MongoMemoryReplSet, MongoMemoryServer } from "mongodb-memory-server";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -82,9 +82,12 @@ describe("production process entrypoints", () => {
   it("explains admin arguments before connecting to MongoDB", async () => {
     for (const args of [
       ["issue-key"],
+      ["issue-key", "user-id", "--code", "a-custom-code"],
       ["create-user"],
       ["disable-user"],
       ["revoke-key"],
+      ["import-price"],
+      ["import-price", "one.json", "two.json"],
       ["unknown-command"],
     ]) {
       await expect(
@@ -153,6 +156,43 @@ describe("production process entrypoints", () => {
     let api: ChildProcess | undefined;
     let worker: ChildProcess | undefined;
     try {
+      const pricePath = join(storageDir, "price.json");
+      await writeFile(
+        pricePath,
+        JSON.stringify({
+          id: "smoke-price",
+          provider: "mock",
+          model: "mock-spark",
+          settings: { maxOutputTokens: 2048 },
+          currency: "USD",
+          inputUsdPerMillion: 1,
+          outputUsdPerMillion: 2,
+          cacheReadUsdPerMillion: 1,
+          cacheWriteUsdPerMillion: 1,
+          searchUsdPerRequest: null,
+          version: 1,
+          source: "synthetic smoke test",
+          effectiveAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      const importPrice = () =>
+        promisify(execFile)(
+          process.execPath,
+          [
+            fileURLToPath(new URL("../dist/admin.js", import.meta.url)),
+            "import-price",
+            pricePath,
+          ],
+          { cwd: appDirectory, env: environment, timeout: 30_000 },
+        );
+      expect((await importPrice()).stdout).toContain(
+        "Imported price smoke-price for mock:mock-spark",
+      );
+      await expect(importPrice()).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringContaining("already exists"),
+      });
+
       api = spawn(
         process.execPath,
         [fileURLToPath(new URL("../dist/server.js", import.meta.url))],

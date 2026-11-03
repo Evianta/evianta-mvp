@@ -27,3 +27,18 @@
 4. Score it using `evaluation-rubric.json`.
 
 The key test is not whether the agent sounds confident. It is whether the recommendation follows the evidence, distinguishes a correct adjustment from a false positive, and avoids inventing facts or tax consequences.
+
+## Document and export checks
+
+Preview and PDF must contain the actual drafted response to the received notice,
+not internal findings, task counts or case IDs. Preserve legitimate notice
+references and supported adjustments: INR 30,000, INR 240,000, disagreement with
+the duplicate INR 220,000 salary addition, INR 210,000, INR 90,000 subject to
+professional verification, and INR 30,000 for the six cases respectively.
+
+Keep evidence and review questions beside the draft. Excel is for genuine derived
+schedules only. Form 16, returns, certificates and other originals must come from
+the user: reference supplied copies and list missing originals separately.
+Generated-file downloads must never recreate those documents or include original
+evidence. These synthetic examples can complete as review drafts, never as
+real-filing-ready material.

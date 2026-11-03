@@ -24,7 +24,10 @@ export function respondToMockRequest(
   request: StructuredGenerationRequest,
 ): string | undefined {
   const properties = propertiesOf(request);
-  const input = request.input as { referencePlan?: unknown } | null;
+  const input = request.input as {
+    referencePlan?: unknown;
+    task?: { key?: string };
+  } | null;
   if (properties.has("tasks") && Array.isArray(input?.referencePlan)) {
     return JSON.stringify({
       tasks: (
@@ -52,6 +55,33 @@ export function respondToMockRequest(
     return JSON.stringify({
       summary: "No search sources are available in offline mode.",
       sources: [],
+    });
+  }
+  if (
+    request.system.includes("Return workProducts containing") ||
+    ["case-preparation", "response-preparation"].includes(
+      input?.task?.key ?? "",
+    )
+  ) {
+    return JSON.stringify({
+      ...defaultAnalysis,
+      workProducts: [
+        {
+          key: "offline-draft",
+          type:
+            input?.task?.key === "response-preparation"
+              ? "tax-response"
+              : "evidence-request",
+          title: "Offline demonstration draft",
+          claimant: "Not established in offline mode",
+          counterparty: "Not established in offline mode",
+          body: "This is an offline workflow demonstration, not an analysis of your documents. A professional draft requires an evidence-led model run.",
+          sources: [],
+          missingOriginals: [],
+          reviewBlockers: ["Offline mode does not analyze supplied evidence."],
+          schedules: [],
+        },
+      ],
     });
   }
   return JSON.stringify(defaultAnalysis);

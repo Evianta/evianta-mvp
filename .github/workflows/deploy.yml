@@ -50,6 +50,12 @@ jobs:
           test -n "$SSH_PRIVATE_KEY" || { echo "Set DEPLOY_SSH_KEY secret"; exit 1; }
           test -n "$SSH_KNOWN_HOSTS" || { echo "Set DEPLOY_KNOWN_HOSTS secret"; exit 1; }
           umask 077
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
+          if ! ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/known_hosts" \
+            | awk '$2 == "ssh-rsa" { found = 1 } END { exit !found }'; then
+            echo "DEPLOY_KNOWN_HOSTS must contain a trusted RSA host key for DEPLOY_HOST (hostname ssh-rsa base64-key)." >&2
+            exit 1
+          fi
           node --input-type=module <<'NODE'
           import { writeFileSync } from 'node:fs';
           const vars = JSON.parse(process.env.REPO_VARS);
@@ -128,15 +134,14 @@ jobs:
         shell: bash
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           umask 077
           trap 'rm -f "$RUNNER_TEMP/deploy-key" "$RUNNER_TEMP/known_hosts" "$RUNNER_TEMP/app.env"' EXIT
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/deploy-key"
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
           ssh_options=(-i "$RUNNER_TEMP/deploy-key" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -o HostKeyAlgorithms=rsa-sha2-512,rsa-sha2-256 \
             -o ConnectTimeout=15)
           target="$DEPLOY_USER@$DEPLOY_HOST"
           root="$DEPLOY_PATH/app"

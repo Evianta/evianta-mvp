@@ -6,6 +6,7 @@ import { AppShell } from "../src/components/AppShell";
 import { ThemeProvider } from "../src/components/ThemeProvider";
 import { SessionProvider } from "../src/session/SessionProvider";
 import "./globals.css";
+import "./workspace.css";
 
 const geist = Geist({
   subsets: ["latin"],
@@ -20,7 +21,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Evianta — Evidence Atlas",
+  title: "Evianta",
   description:
     "A calm, source-first workspace for turning business records into clear, reviewable findings.",
 };

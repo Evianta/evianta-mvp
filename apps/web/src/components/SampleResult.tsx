@@ -104,7 +104,7 @@ export function SampleResult({
               </span>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{document.name}</p>
-                <p className="mt-1 text-[11px] text-muted-foreground">
+                <p className="mt-1 text-xs text-muted-foreground">
                   {document.mimeType} · Synthetic source{" "}
                   {String(index + 1).padStart(2, "0")}
                 </p>

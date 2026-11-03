@@ -182,7 +182,7 @@ export function createAdmittedUsageAccounting(
       );
       if (!price) {
         throw new AdmissionRejectedError(
-          `No active price is configured for ${attempt.provider}:${attempt.model}`,
+          `No active price is configured for ${attempt.provider}:${attempt.model} with settings ${JSON.stringify(attempt.settings)}. Ask an administrator to import a matching price record.`,
         );
       }
       const amountUsd = estimateUsageAllowance(

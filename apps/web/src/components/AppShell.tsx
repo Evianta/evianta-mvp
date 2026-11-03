@@ -2,13 +2,15 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   ChartNoAxesCombined,
   Files,
-  Layers3,
+  FlaskConical,
   LogOut,
+  MessageSquareText,
   ShieldCheck,
+  UsersRound,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useAccessKeyDialog } from "./AccessKeyDialogProvider";
@@ -16,23 +18,33 @@ import { Button } from "./Button";
 import { CommandPalette } from "./CommandPalette";
 import { ThemeToggle } from "./ThemeToggle";
 import { useSession } from "../session/SessionProvider";
+import { newChatHref } from "../chat/flow-utils";
 
 const navigation = [
-  { href: "/", label: "Start", icon: Layers3, match: "home" },
+  { href: "/", label: "New chat", icon: MessageSquareText, match: "home" },
   { href: "/cases", label: "Cases", icon: Files, match: "/cases" },
-  { href: "/#samples", label: "Samples", icon: Layers3, match: "/samples" },
+  {
+    href: "/agents",
+    label: "AI professionals",
+    icon: UsersRound,
+    match: "/agents",
+  },
+  { href: "/samples", label: "Samples", icon: FlaskConical, match: "/samples" },
   {
     href: "/admin/usage",
     label: "Usage overview",
     icon: ChartNoAxesCombined,
     match: "/admin/usage",
+    adminOnly: true,
   },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const {
     session,
+    profile,
     signOut,
     restoring,
     restoreError,
@@ -61,33 +73,42 @@ export function AppShell({ children }: { children: ReactNode }) {
         <Link className="brand-lockup" href="/">
           <Image src="/logo.svg" alt="" width={36} height={36} priority />
           <span>
-            <span className="brand-name block">evianta</span>
-            <span className="brand-subtitle block">Evidence Atlas</span>
+            <span className="brand-name block">Evianta</span>
           </span>
         </Link>
         <p className="nav-caption">Workspace</p>
         <nav className="sidebar-nav">
-          {navigation.map((item) => {
-            const active =
-              item.match === "home"
-                ? pathname === "/"
-                : item.match === "/cases"
-                  ? pathname === "/cases" || /^\/cases\/[^/]+$/.test(pathname)
-                  : pathname === item.match ||
-                    pathname.startsWith(`${item.match}/`);
-            const Icon = item.icon;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className="nav-link"
-                aria-current={active ? "page" : undefined}
-              >
-                <Icon size={17} strokeWidth={1.8} aria-hidden="true" />
-                {item.label}
-              </Link>
-            );
-          })}
+          {navigation
+            .filter((item) => !item.adminOnly || profile?.role === "admin")
+            .map((item) => {
+              const active =
+                item.match === "home"
+                  ? pathname === "/"
+                  : item.match === "/cases"
+                    ? pathname === "/cases" || /^\/cases\/[^/]+$/.test(pathname)
+                    : pathname === item.match ||
+                      pathname.startsWith(`${item.match}/`);
+              const Icon = item.icon;
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  onNavigate={
+                    item.match === "home"
+                      ? (event) => {
+                          event.preventDefault();
+                          router.push(newChatHref());
+                        }
+                      : undefined
+                  }
+                  className="nav-link"
+                  aria-current={active ? "page" : undefined}
+                >
+                  <Icon size={17} strokeWidth={1.8} aria-hidden="true" />
+                  {item.label}
+                </Link>
+              );
+            })}
         </nav>
         <div className="sidebar-bottom">
           <p className="privacy-note">

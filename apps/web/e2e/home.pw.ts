@@ -6,17 +6,17 @@ test("public task starter is accessible in both themes and on mobile", async ({
 }) => {
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "What would you like to work on?" }),
+    page.getByRole("heading", { name: "Hi, I am Evianta." }),
   ).toBeVisible();
   await expect(
     page.getByText(
       "Read-only synthetic previews. No model calls or live records.",
     ),
   ).toBeVisible();
-  await expect(page.getByLabel("Task prompt", { exact: true })).toBeDisabled();
+  await expect(page.getByLabel("Message to Evianta")).toBeEnabled();
   await expect(
     page.getByLabel("Attach records", { exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
 
   const lightViolations = await new AxeBuilder({ page }).analyze();
   expect(lightViolations.violations).toEqual([]);
@@ -74,7 +74,22 @@ test("copying asks for a session and admin access is checked by the server", asy
       }),
     });
   });
-  await page.route("**/admin/usage", async (route) => {
+  await page.route("**/auth/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        user: {
+          id: "user-1",
+          email: "admin@example.test",
+          displayName: "Admin",
+          role: "admin",
+        },
+        session: { expiresAt: new Date(Date.now() + 1800_000).toISOString() },
+      }),
+    });
+  });
+  await page.route("**/admin/usage/cases*", async (route) => {
     if (route.request().resourceType() !== "fetch") {
       await route.continue();
       return;
@@ -92,7 +107,7 @@ test("copying asks for a session and admin access is checked by the server", asy
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page).toHaveURL(/\/\?source=sample-msme-overdue/);
   await expect(
-    page.getByRole("heading", { name: "What would you like to work on?" }),
+    page.getByRole("heading", { name: "Hi, I am Evianta." }),
   ).toBeVisible();
   expect(submittedKey).toBe("fixture-test-key");
   expect(

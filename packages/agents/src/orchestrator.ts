@@ -38,6 +38,8 @@ import {
   DataAnalysisReportSchema,
   EvidenceSchema,
   FindingSchema,
+  WorkProductSchema,
+  savedWorkProduct,
 } from "@evianta/core";
 import { z } from "zod";
 import {
@@ -173,6 +175,7 @@ const SectionContentSchema = z.object({
   ),
   report: DataAnalysisReportSchema.optional(),
   dashboard: DataAnalysisDashboardSchema.optional(),
+  workProducts: z.array(WorkProductSchema).optional(),
 });
 
 const ACTIVE_RUN_STATUSES: readonly RunStatus[] = [
@@ -414,7 +417,9 @@ export class Orchestrator {
     }
     const scope = { ownerId: input.ownerId, caseId: caseRecord.id };
     const priorTasks = await this.repos.tasks.listForRun(prior.id, scope);
+    const retryPlanning = prior.status === "failed" && priorTasks.length === 0;
     if (
+      !retryPlanning &&
       !priorTasks.some(
         (task) => task.status === "failed" || task.status === "skipped",
       )
@@ -460,10 +465,15 @@ export class Orchestrator {
       },
       records,
     );
-    await this.repos.approvals.invalidateForDeliverable(
-      deliverableIdFor(prior.id),
+    for (const deliverable of await this.repos.deliverables.listForRun(
+      prior.id,
       scope,
-    );
+    )) {
+      await this.repos.approvals.invalidateForDeliverable(
+        deliverable.id,
+        scope,
+      );
+    }
     return run;
   }
 
@@ -1096,6 +1106,21 @@ export class Orchestrator {
       task.status = closing;
     }
     const proposedStatus = override.status ?? this.statusFor(tasks);
+    const failedTask = tasks.find(
+      (task) => task.status === "failed" && task.lastError,
+    );
+    const terminalError =
+      override.error ??
+      (proposedStatus === "failed" && failedTask?.lastError
+        ? {
+            code: failedTask.lastError.code,
+            message:
+              `The ${failedTask.role} task failed: ${failedTask.lastError.message}`.slice(
+                0,
+                500,
+              ),
+          }
+        : undefined);
     const runUsage = summarizeUsage(
       await this.repos.usageLedger.listForRun(
         scope.ownerId,
@@ -1110,7 +1135,14 @@ export class Orchestrator {
     );
     if (deliverable) {
       const completed = tasks.filter((task) => task.status === "completed");
-      const summary = `${completed.length} of ${tasks.length} tasks completed; sections await professional review.`;
+      const products = (
+        await this.repos.deliverables.listForRun(run.id, scope)
+      ).filter((item) => item.workProduct);
+      const summary = products.length
+        ? `Prepared ${products.length} document${products.length === 1 ? "" : "s"} for professional review.`
+        : proposedStatus === "completed"
+          ? "Analysis finished. Review the findings and evidence."
+          : `${completed.length} of ${tasks.length} processing steps finished. Open execution details for the unfinished steps.`;
       if (deliverable.summary !== summary && tasks[0]) {
         if (
           !(await this.repos.tasks.commitResult(
@@ -1142,7 +1174,7 @@ export class Orchestrator {
         status: proposedStatus,
         usage: runUsage,
         reason: override.reason,
-        error: override.error,
+        error: terminalError,
       },
     });
     const settled = await this.repos.runs.findOwnedById(run.id, scope.ownerId);
@@ -1155,8 +1187,8 @@ export class Orchestrator {
       return;
     const scope = { ownerId: run.ownerId, caseId: run.caseId };
     const status = run.status;
-    const deliverable = await this.repos.deliverables.findOwnedById(
-      deliverableIdFor(run.id),
+    const deliverables = await this.repos.deliverables.listForRun(
+      run.id,
       scope,
     );
     const events = new EventSink(
@@ -1170,7 +1202,10 @@ export class Orchestrator {
     if (status === "completed" || status === "partially-completed") {
       await events.emit(terminalId, {
         type: "run-completed",
-        deliverableIds: deliverable ? [deliverable.id] : [],
+        deliverableIds: (deliverables.some((item) => item.workProduct)
+          ? deliverables.filter((item) => item.workProduct)
+          : deliverables
+        ).map((item) => item.id),
       });
     } else if (status === "cancelled") {
       await events.emit(terminalId, {
@@ -1311,6 +1346,7 @@ export class Orchestrator {
             task,
           );
         }
+        await this.persistWorkProductsAsync(execution, task, section, runId);
         const content = SectionContentSchema.parse(section.content);
         return {
           taskId: task.id,
@@ -1332,6 +1368,62 @@ export class Orchestrator {
       runId = run?.priorRunId ?? null;
     }
     return null;
+  }
+
+  private async persistWorkProductsAsync(
+    execution: Execution,
+    task: Task,
+    section: DeliverableSection,
+    sourceRunId: string,
+  ): Promise<void> {
+    const content = SectionContentSchema.parse(section.content);
+    for (const product of content.workProducts ?? []) {
+      const suffix = `:document:${taskKeyOf(task)}:${product.key}`;
+      const id = `${execution.run.id}${suffix}`;
+      if (await this.repos.deliverables.findOwnedById(id, execution.scope))
+        continue;
+      const prior =
+        sourceRunId === execution.run.id
+          ? null
+          : await this.repos.deliverables.findOwnedById(
+              `${sourceRunId}${suffix}`,
+              execution.scope,
+            );
+      const at = this.timestamp();
+      const saved = await this.repos.tasks.commitResult(
+        task,
+        {
+          evidence: [],
+          findings: [],
+          deliverable: {
+            id,
+            caseId: execution.scope.caseId,
+            runId: execution.run.id,
+            version: prior?.version ?? 1,
+            format:
+              product.type === "reconciliation" ? "spreadsheet" : "document",
+            title: product.title,
+            summary: "Draft prepared for professional review.",
+            workProduct: prior?.workProduct ?? product,
+            generatedFiles: [],
+            sections: [
+              {
+                ...(prior?.sections[0] ?? section),
+                id: `${id}:body`,
+                title: product.title,
+                kind: "text",
+                content: prior?.sections[0]?.content ?? product.body,
+              },
+            ],
+            createdAt: at,
+            updatedAt: at,
+          },
+        },
+        execution.scope,
+        { fencingToken: execution.lease.fencingToken },
+      );
+      if (!saved) throw new WorkerAbortedError();
+    }
   }
 
   private async upsertSectionAsync(
@@ -1488,7 +1580,10 @@ export class Orchestrator {
     const fits = (findings: PriorFinding[]) =>
       inputTokenAllowance({
         system: reviewer.systemPrompt,
-        input: { ...input, findings },
+        input: reviewer.prepareModelInput?.({ ...input, findings }) ?? {
+          ...input,
+          findings,
+        },
         schema,
       }) <= limit;
     return {
@@ -1592,7 +1687,10 @@ export class Orchestrator {
     const allowance = (documents: typeof slices) =>
       inputTokenAllowance({
         system: agent.systemPrompt,
-        input: { ...input, documents },
+        input: agent.prepareModelInput?.({ ...input, documents }) ?? {
+          ...input,
+          documents,
+        },
         schema,
       });
     const available = candidates.filter((slice) => slice !== null);
@@ -1690,8 +1788,10 @@ export class Orchestrator {
         taskKeyOf(task),
       );
       if (section) {
+        const outcome = await this.materializeAsync(execution, task);
+        if (!outcome) throw new WorkerAbortedError();
         await this.completeTaskAsync(execution, task, section.findingIds);
-        return result((await this.materializeAsync(execution, task))!);
+        return result(outcome);
       }
       const charges = await this.taskUsageAsync(execution, task.id);
       if (charges.length > (task.usageEntryCount ?? task.attemptCount - 1)) {
@@ -1938,18 +2038,33 @@ export class Orchestrator {
           this.budgetReviewInput({
             case: this.caseInput(execution),
             instructions: this.instructionsFor(execution, task, state),
-            drafts: ancestors.flatMap((source) => {
-              const outcome = state.results[source.id];
-              return outcome?.status === "completed"
-                ? [
-                    {
-                      taskId: source.id,
-                      role: outcome.role,
-                      text: outcome.summary,
-                    },
-                  ]
-                : [];
-            }),
+            drafts: ancestors
+              .flatMap((source) => {
+                const outcome = state.results[source.id];
+                return outcome?.status === "completed"
+                  ? [
+                      {
+                        taskId: source.id,
+                        role: outcome.role,
+                        text: outcome.summary,
+                      },
+                    ]
+                  : [];
+              })
+              .concat(
+                (
+                  await this.repos.deliverables.listForRun(
+                    execution.run.id,
+                    execution.scope,
+                  )
+                )
+                  .filter((item) => item.workProduct)
+                  .map((item) => ({
+                    taskId: item.sections[0]!.id,
+                    role: item.sections[0]!.producingRole,
+                    text: JSON.stringify(savedWorkProduct(item)),
+                  })),
+              ),
             findings,
             deterministicFlags: flags,
           }),
@@ -1957,7 +2072,8 @@ export class Orchestrator {
         );
       } else {
         const sources =
-          execution.caseRecord.useCase === "tax-notice"
+          execution.caseRecord.useCase === "tax-notice" ||
+          execution.caseRecord.useCase === "msme-payment"
             ? this.ancestorsOf(task, tasks)
             : tasks.filter((item) => task.dependencyIds.includes(item.id));
         const input: SpecialistInput = {
@@ -1981,7 +2097,10 @@ export class Orchestrator {
             (priorFindings) =>
               inputTokenAllowance({
                 system: specialist!.systemPrompt,
-                input: { ...input, priorFindings },
+                input: specialist!.prepareModelInput?.({
+                  ...input,
+                  priorFindings,
+                }) ?? { ...input, priorFindings },
                 schema,
               }) <= limit,
             "Specialist",
@@ -2003,6 +2122,28 @@ export class Orchestrator {
           ),
         ]);
         agentResult = await specialist!.run({ ...input, documents }, context);
+        const products =
+          (agentResult.output as SpecialistOutput).workProducts ?? [];
+        const keys = new Set<string>();
+        for (const product of products) {
+          if (keys.has(product.key)) {
+            throw new OrchestrationError(
+              "Duplicate work-product key",
+              "invalid-work-product",
+            );
+          }
+          keys.add(product.key);
+          if (
+            product.sources.some(
+              (source) => !documentIds.has(source.documentId),
+            )
+          ) {
+            throw new OrchestrationError(
+              "Work product references an unavailable source document",
+              "invalid-work-product",
+            );
+          }
+        }
       }
     } catch (error) {
       return this.handleTaskErrorAsync(execution, task, error);
@@ -2045,6 +2186,9 @@ export class Orchestrator {
           ...(!isReview && (output as SpecialistOutput).dashboard
             ? { dashboard: (output as SpecialistOutput).dashboard }
             : {}),
+          ...(!isReview && (output as SpecialistOutput).workProducts
+            ? { workProducts: (output as SpecialistOutput).workProducts }
+            : {}),
         },
         reviewerContent: null,
         reviewerId: null,
@@ -2060,6 +2204,18 @@ export class Orchestrator {
       },
       task,
       committed,
+    );
+    const persistedSection = await this.findSectionAsync(
+      execution,
+      execution.run.id,
+      key,
+    );
+    if (!persistedSection) throw new WorkerAbortedError();
+    await this.persistWorkProductsAsync(
+      execution,
+      task,
+      persistedSection,
+      execution.run.id,
     );
     await this.hooks.afterResultCommit?.(task);
     await this.completeTaskAsync(

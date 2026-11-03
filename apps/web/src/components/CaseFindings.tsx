@@ -15,7 +15,11 @@ export function CaseFindings({
       right.version - left.version,
   )[0];
   const findingIds = new Set(
-    deliverable?.sections.flatMap((section) => section.findingIds) ?? [],
+    (workspace?.deliverables ?? [])
+      .filter((item) => item.runId === deliverable?.runId)
+      .flatMap((item) =>
+        item.sections.flatMap((section) => section.findingIds),
+      ),
   );
   const findings = (workspace?.findings ?? []).filter((finding) =>
     findingIds.has(finding.id),
@@ -44,11 +48,11 @@ export function CaseFindings({
         >
           <div className="flex items-start justify-between gap-3">
             <h3 className="text-xs font-semibold">{finding.title}</h3>
-            <span className="text-[10px] capitalize text-muted-foreground">
+            <span className="text-xs capitalize text-muted-foreground">
               {finding.severity} severity
             </span>
           </div>
-          <p className="mt-1 text-[10px] text-muted-foreground">
+          <p className="mt-1 text-xs text-muted-foreground">
             {Math.round(finding.confidence * 100)}% confidence
           </p>
           <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed">
@@ -56,7 +60,7 @@ export function CaseFindings({
           </p>
           {finding.assumptions.length > 0 && (
             <div className="mt-3">
-              <h4 className="text-[11px] font-semibold">Assumptions</h4>
+              <h4 className="text-xs font-semibold">Assumptions</h4>
               <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-muted-foreground">
                 {finding.assumptions.map((assumption, index) => (
                   <li key={index}>{assumption}</li>
@@ -66,12 +70,12 @@ export function CaseFindings({
           )}
           {finding.openQuestions.length > 0 && (
             <div className="mt-3">
-              <h4 className="text-[11px] font-semibold">Questions</h4>
+              <h4 className="text-xs font-semibold">Questions</h4>
               <ul className="mt-1 space-y-2 text-xs">
                 {finding.openQuestions.map((question) => (
                   <li key={question.id}>
                     <p>{question.text}</p>
-                    <p className="mt-1 text-[10px] capitalize text-muted-foreground">
+                    <p className="mt-1 text-xs capitalize text-muted-foreground">
                       {question.severity} severity / {question.status}
                     </p>
                     {question.resolutionNote && (
@@ -119,13 +123,13 @@ export function CaseFindings({
                   <li key={id}>
                     <button
                       type="button"
-                      className="text-left text-[11px] text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                      className="text-left text-xs text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                       onClick={() => onOpenEvidence(id)}
                     >
                       Evidence: {name}
                       {location ? ` (${location})` : ""}
                     </button>
-                    <p className="mt-1 text-[10px] text-muted-foreground">
+                    <p className="mt-1 text-xs text-muted-foreground">
                       {evidence.confidence} source confidence
                     </p>
                   </li>

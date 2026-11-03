@@ -1,16 +1,30 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { UserRecord } from "@evianta/core";
+import { getAccessKeyPepper } from "@evianta/env/server";
 import { connectMongoStore } from "@evianta/store";
 import { createUserAccessKey } from "./auth.js";
+import { createPassphraseAccessKey } from "./passphrase.js";
+import { parseUsagePrice } from "./usage-price.js";
 
 function usage(): never {
   throw new Error(
-    "Usage: admin create-user <email> <display-name> [user|admin] | disable-user <user-id> | issue-key <user-id> [expiry-ISO] | revoke-key <key-id>",
+    "Usage: admin create-user <email> <display-name> [user|admin] | disable-user <user-id> | issue-key <user-id> [expiry-ISO] | issue-key <user-id> <expiry-ISO> --code <your-own-code> | revoke-key <key-id> | import-price <json-file>",
   );
+}
+
+function takeFlag(values: string[], name: string): string | undefined {
+  const index = values.indexOf(name);
+  if (index === -1) return undefined;
+  const value = values[index + 1];
+  if (!value || value.startsWith("--")) usage();
+  values.splice(index, 2);
+  return value;
 }
 
 async function main(args: string[]): Promise<void> {
   const [command, ...values] = args;
+  const code = command === "issue-key" ? takeFlag(values, "--code") : undefined;
   switch (command) {
     case "create-user":
       if (
@@ -25,19 +39,34 @@ async function main(args: string[]): Promise<void> {
       break;
     case "issue-key":
       if (!values[0]?.trim() || values.length > 2) usage();
+      if (code !== undefined && !values[1]?.trim()) usage();
       break;
     case "disable-user":
     case "revoke-key":
+    case "import-price":
       if (!values[0]?.trim() || values.length !== 1) usage();
       break;
     default:
       usage();
   }
+  const pricePath = values[0];
+  const price =
+    command === "import-price" && pricePath
+      ? parseUsagePrice(JSON.parse(await readFile(pricePath, "utf8")))
+      : undefined;
   const store = await connectMongoStore();
   try {
     const { users, accessKeys } = store.repositories;
     const now = new Date().toISOString();
     switch (command) {
+      case "import-price": {
+        if (!price) usage();
+        await store.repositories.usagePrices.insert(price);
+        console.info(
+          `Imported price ${price.id} for ${price.provider}:${price.model} (settings ${price.settingsKey}, version ${price.version}, effective ${price.effectiveAt})`,
+        );
+        break;
+      }
       case "create-user": {
         const [email, displayName] = values;
         const roleInput = values[2];
@@ -80,6 +109,18 @@ async function main(args: string[]): Promise<void> {
           throw new Error("An enabled user is required");
         }
         const expiresAt = expiry ? new Date(expiry).toISOString() : null;
+        if (code !== undefined) {
+          if (expiresAt === null) usage();
+          const issued = createPassphraseAccessKey({
+            userId: user.id,
+            pepper: getAccessKeyPepper(),
+            expiresAt,
+            passphrase: code,
+          });
+          await accessKeys.insert(issued.record);
+          process.stdout.write(`${issued.plaintext}\n`);
+          break;
+        }
         const { record, plaintext } = createUserAccessKey(user.id, expiresAt);
         await accessKeys.insert(record);
         process.stdout.write(`${plaintext}\n`);

@@ -1,4 +1,4 @@
-export const MAX_SESSION_AGE_MS = 30 * 60 * 1000;
+export const MAX_SESSION_AGE_MS = 8 * 60 * 60 * 1000;
 export const SESSION_STORAGE_KEY = "evianta.session";
 
 type SessionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;

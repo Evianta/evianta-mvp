@@ -17,6 +17,7 @@ import {
   type SpecialistAgent,
 } from "./roles.js";
 import type { ReferencePlan } from "./planning.js";
+import { workProductInstructions } from "./work-products.js";
 
 export const TAX_NOTICE_ANALYST_ROLE = "tax-notice-analyst";
 export const TAX_RECONCILIATION_ROLE = "tax-notice-reconciliation";
@@ -49,6 +50,8 @@ const profile = (
   ],
   modelTier,
   enabled: true,
+  kind: "specialist",
+  workflows: ["tax-notice"],
 });
 
 export const taxNoticeAnalystProfile = profile(
@@ -536,6 +539,7 @@ export function createTaxNoticeSpecialists(): SpecialistAgent[] {
         "Cite the document ID and page or cell for each material finding.",
         "Report uncertain extraction as an open question; do not invent deadlines or legal conclusions.",
         "Document extraction reliability and warnings are supplied with each slice. Flag low-confidence or handwritten extraction for professional verification; never override those warnings with your own confidence label.",
+        "Do not ask the user to confirm figures, response deadlines, required response type, tax treatment, or other issues to resolve while preparing the notice response. Record discrepancies, missing evidence, and points requiring professional verification as findings and open questions. Set inputRequired only for a specific missing source document that blocks analysis or task instructions too ambiguous to understand.",
       ].join("\n"),
     ),
     createTaxReconciliationAgent(),
@@ -547,6 +551,7 @@ export function createTaxNoticeSpecialists(): SpecialistAgent[] {
         "Use only supplied findings and source evidence; cite each material assertion.",
         "Clearly label assumptions, unresolved questions, and legal points requiring current-law verification.",
         "Do not make a legal determination, approve the response, or submit a filing.",
+        workProductInstructions,
       ].join("\n"),
     ),
   ];

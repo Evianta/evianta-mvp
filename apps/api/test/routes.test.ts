@@ -1,4 +1,4 @@
-import { syntheticWorkflowFixtures } from "@evianta/core";
+import { syntheticWorkflowFixtures, type Deliverable } from "@evianta/core";
 import { InMemoryDocumentStore, createInMemoryStore } from "@evianta/store";
 import {
   BUSINESS_DATA_ANALYST_ROLE,
@@ -168,6 +168,128 @@ describe("case API routes", () => {
     });
   });
 
+  it("persists versioned generated files, excludes originals and rejects stale downloads", async () => {
+    services.uploads.uploadMaxBytes = 10 * 1024 * 1024;
+    const created = await createCase();
+    const started = await fetch(`${baseUrl}/runs`, {
+      method: "POST",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      body: JSON.stringify({ caseId: created.case.id, input: {} }),
+    });
+    const { run } = (await started.json()) as { run: { id: string } };
+    await worker.runOnceAsync();
+    const scope = { ownerId: user.id, caseId: created.case.id };
+    const [original] = await repositories.deliverables.listForRun(
+      run.id,
+      scope,
+    );
+    if (!original)
+      throw new Error("Test run did not produce an internal result.");
+    const doc: Deliverable = {
+      ...original,
+      workProduct: {
+        key: "notice",
+        type: "payment-demand",
+        title: "Payment demand",
+        claimant: "Supplier",
+        counterparty: "Buyer",
+        body: "To: Buyer\nSubject: Payment of INR 236,000 against INV-1\nPlease arrange payment.\nFor Supplier: [unsigned]",
+        sources: [
+          {
+            documentId: "source-private-id",
+            reference: "Invoice INV-1 (upload original separately)",
+          },
+        ],
+        missingOriginals: ["Original registration certificate"],
+        reviewBlockers: ["Verify eligibility"],
+        schedules: [
+          {
+            title: "Reconciliation",
+            columns: ["Amount INR"],
+            rows: [[236000]],
+          },
+        ],
+      },
+      sections: [
+        {
+          ...original.sections[0]!,
+          content: "Original demand for INR 236,000.",
+          reviewerContent: null,
+        },
+      ],
+    };
+    await repositories.deliverables.replaceOwned(doc, scope);
+    const url = `${baseUrl}/cases/${created.case.id}/deliverables/${doc.id}/export?format=pdf&version=${doc.version}`;
+    expect((await fetch(url)).status).toBe(401);
+    const [response, excel] = await Promise.all([
+      fetch(url, { headers: authHeaders() }),
+      fetch(url.replace("format=pdf", "format=xlsx"), {
+        headers: authHeaders(),
+      }),
+    ]);
+    expect(response.status).toBe(200);
+    expect(excel.status).toBe(200);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect(new TextDecoder().decode(bytes.slice(0, 5))).toBe("%PDF-");
+    const saved = await repositories.deliverables.findOwnedById(doc.id, scope);
+    expect(saved?.generatedFiles).toHaveLength(2);
+    const file = saved!.generatedFiles!.find((item) => item.format === "pdf")!;
+    expect(
+      await services.storage.readBufferAsync(file.objectKey, 10 * 1024 * 1024),
+    ).toEqual(Buffer.from(bytes));
+    expect(await repositories.documents.listOwned(scope)).toHaveLength(0);
+    const cached = await fetch(url, { headers: authHeaders() });
+    expect(new Uint8Array(await cached.arrayBuffer())).toEqual(bytes);
+    const blank = await fetch(
+      `${baseUrl}/cases/${created.case.id}/deliverables/${doc.id}/sections/${doc.sections[0]!.id}`,
+      {
+        method: "PATCH",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: doc.version,
+          reviewerContent: " ",
+        }),
+      },
+    );
+    expect(blank.status).toBe(400);
+    expect(
+      (
+        await fetch(url.replace("format=pdf", "format=json"), {
+          headers: authHeaders(),
+        })
+      ).status,
+    ).toBe(400);
+    const edited = await fetch(
+      `${baseUrl}/cases/${created.case.id}/deliverables/${doc.id}/sections/${doc.sections[0]!.id}`,
+      {
+        method: "PATCH",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: doc.version,
+          reviewerContent: "Reviewed demand for INR 174,800.",
+        }),
+      },
+    );
+    expect(edited.status).toBe(200);
+    expect(
+      await services.storage.readBufferAsync(file.objectKey, 10 * 1024 * 1024),
+    ).toBeNull();
+    expect((await fetch(url, { headers: authHeaders() })).status).toBe(409);
+    expect(
+      (
+        await fetch(url.replace("format=pdf", "format=xlsx"), {
+          headers: authHeaders(),
+        })
+      ).status,
+    ).toBe(409);
+    const fresh = await fetch(
+      url.replace(`version=${doc.version}`, `version=${doc.version + 1}`),
+      { headers: authHeaders() },
+    );
+    expect(fresh.status).toBe(200);
+    expect(new Uint8Array(await fresh.arrayBuffer())).not.toEqual(bytes);
+  }, 20_000);
+
   it("allows MSME-payment cases to be created", async () => {
     const response = await fetch(`${baseUrl}/cases`, {
       method: "POST",
@@ -266,6 +388,21 @@ describe("case API routes", () => {
     expect(
       ((await agents.json()) as { agents: unknown[] }).agents,
     ).toHaveLength(4);
+
+    const directory = await fetch(`${baseUrl}/directory/agents`);
+    expect(directory.status).toBe(200);
+    const directoryAgents = (
+      (await directory.json()) as {
+        agents: Array<{ role: string; displayName: string; kind?: string }>;
+      }
+    ).agents;
+    expect(directoryAgents).toContainEqual(
+      expect.objectContaining({
+        role: "coordinator",
+        displayName: "Evianta",
+        kind: "lead",
+      }),
+    );
 
     const created = await createCase();
     const listed = await fetch(`${baseUrl}/cases`, {

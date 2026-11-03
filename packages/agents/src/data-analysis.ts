@@ -48,6 +48,8 @@ export const businessDataAnalystProfile = {
   ],
   modelTier: "mid" as const,
   enabled: true,
+  kind: "specialist" as const,
+  workflows: ["data-analysis" as const],
 };
 
 interface SourceTable {

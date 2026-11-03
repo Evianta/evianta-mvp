@@ -6,9 +6,11 @@ import {
   type AgentResult,
 } from "./agent.js";
 import { businessDataAnalystProfile } from "./data-analysis.js";
+import { compactModelInput, compactInputInstructions } from "./model-input.js";
 import {
   PlanningInputSchema,
   PlanningOutputSchema,
+  PreparationModelOutputSchema,
   ReviewInputSchema,
   ReviewOutputSchema,
   SpecialistInputSchema,
@@ -38,10 +40,10 @@ export const GENERIC_ANALYST_ROLE = "generic-analyst";
 export const coordinatorProfile: AgentProfile = {
   id: "agent-coordinator",
   role: COORDINATOR_ROLE,
-  displayName: "Engagement Coordinator",
-  specialty: "Work planning",
+  displayName: "Evianta",
+  specialty: "Lead agent and work planning",
   summary:
-    "Plans a case into a validated task graph adapted to the uploaded documents.",
+    "Your lead agent. Understands the task, asks for what is missing, plans the work across specialists and brings back a review-ready result.",
   capabilities: [
     "Adapt the reference plan to uploaded documents",
     "Assign specialist roles and dependencies",
@@ -55,6 +57,8 @@ export const coordinatorProfile: AgentProfile = {
   limitations: ["Does not perform specialist analysis itself"],
   modelTier: "mid",
   enabled: true,
+  kind: "lead",
+  workflows: ["data-analysis", "tax-notice", "msme-payment"],
 };
 
 export const reviewerProfile: AgentProfile = {
@@ -78,6 +82,8 @@ export const reviewerProfile: AgentProfile = {
   limitations: ["Does not approve deliverables"],
   modelTier: "high",
   enabled: true,
+  kind: "reviewer",
+  workflows: ["data-analysis", "tax-notice", "msme-payment"],
 };
 
 export const genericAnalystProfile: AgentProfile = {
@@ -94,6 +100,8 @@ export const genericAnalystProfile: AgentProfile = {
   limitations: ["No workflow-specific expertise"],
   modelTier: "cheap",
   enabled: true,
+  kind: "specialist",
+  workflows: [],
 };
 
 export function createSpecialistAgent(
@@ -102,13 +110,18 @@ export function createSpecialistAgent(
 ): SpecialistAgent {
   systemPrompt = [
     systemPrompt,
+    compactInputInstructions,
     "Source excerpts marked excerptsTruncated are partial. Preserve their evidence IDs and source locations, and flag material assertions that cannot be supported by the supplied excerpts.",
+    "Set inputRequired only when a specific missing source document blocks the work or the task instructions are too ambiguous to understand. Ask only for the missing document or task clarification. Do not ask the user to confirm figures, dates, conclusions, assumptions, or other unresolved findings; record those as findings and open questions for the case work.",
   ].join("\n");
   const structured = defineStructuredAgent({
     profile,
     systemPrompt,
     inputSchema: SpecialistInputSchema,
-    outputSchema: SpecialistModelOutputSchema,
+    prepareModelInput: compactModelInput,
+    outputSchema: systemPrompt.includes("Return workProducts containing")
+      ? PreparationModelOutputSchema
+      : SpecialistModelOutputSchema,
   });
   return {
     ...structured,
@@ -116,7 +129,23 @@ export function createSpecialistAgent(
       const result = await structured.run(input, context);
       return {
         ...result,
-        output: SpecialistOutputSchema.parse(result.output),
+        output: SpecialistOutputSchema.parse({
+          ...result.output,
+          ...(systemPrompt.includes("Return workProducts containing")
+            ? {
+                workProducts: PreparationModelOutputSchema.parse(
+                  result.output,
+                ).workProducts.map((product) => ({
+                  ...product,
+                  schedules: product.schedules.map((schedule) => ({
+                    ...schedule,
+                    columnFormats: schedule.columnFormats ?? undefined,
+                    currencyCode: schedule.currencyCode ?? undefined,
+                  })),
+                })),
+              }
+            : {}),
+        }),
       };
     },
   };
@@ -139,6 +168,7 @@ export function createReviewAgent(): ReviewAgent {
     profile: reviewerProfile,
     systemPrompt: [
       "You independently review specialist findings.",
+      compactInputInstructions,
       "Deterministic checks already recomputed totals, evidence presence and consistency; do not repeat them.",
       "Assess narrative soundness, missing requirements and unsupported claims.",
       "Review every assertion in the supplied drafts, even when it has no corresponding finding. Compare draft text with source-backed findings and flag unsupported figures, deadlines, and legal conclusions.",
@@ -147,6 +177,7 @@ export function createReviewAgent(): ReviewAgent {
     ].join("\n"),
     inputSchema: ReviewInputSchema,
     outputSchema: ReviewOutputSchema,
+    prepareModelInput: compactModelInput,
   });
 }
 

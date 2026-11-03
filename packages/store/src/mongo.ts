@@ -1766,7 +1766,11 @@ export class MongoStore {
   async deliverableReplaceOwned(
     deliverable: Deliverable,
     scope: OwnerScope,
-    options?: { expectedVersion?: number; requireSettledRun?: boolean },
+    options?: {
+      expectedVersion?: number;
+      expectedUpdatedAt?: string;
+      requireSettledRun?: boolean;
+    },
   ): Promise<boolean> {
     const parsed = DeliverableSchema.parse(deliverable);
     if (parsed.caseId !== scope.caseId || !(await this.ownsCase(scope))) {
@@ -1817,6 +1821,9 @@ export class MongoStore {
           ...(options?.expectedVersion === undefined
             ? {}
             : { version: options.expectedVersion }),
+          ...(options?.expectedUpdatedAt === undefined
+            ? {}
+            : { updatedAt: options.expectedUpdatedAt }),
         },
         { ...documentFor(parsed), ownerId: scope.ownerId },
         { session },

@@ -3,9 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { SESSION_STORAGE_KEY } from "../src/session/session-controller";
 
 async function enterKey(page: Page) {
-  await page
-    .getByRole("button", { name: "Enter access key", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
     .getByLabel("Access key", { exact: true })
     .fill("test-key-not-saved");
@@ -83,13 +81,13 @@ test("reload restores localStorage login without re-entering the key, cookies or
   );
   expect(await context.cookies()).toHaveLength(0);
   await page
-    .getByLabel("Task prompt", { exact: true })
+    .getByLabel("Message to Evianta")
     .fill("Private draft clears on reload");
   await page.reload();
   await expect(
     page.getByRole("button", { name: "Sign out and revoke this session" }),
   ).toBeVisible();
-  await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
   expect(await savedSession(page)).toBe(saved);
   await page.getByRole("link", { name: "Cases", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Your cases" })).toBeVisible();
@@ -125,7 +123,7 @@ test("expired and malformed saved sessions cannot unlock drafts", async ({
     SESSION_STORAGE_KEY,
   );
   await page.reload();
-  await expect(page.getByLabel("Task prompt", { exact: true })).toBeDisabled();
+  await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
   expect(await savedSession(page)).toBeNull();
   await page.evaluate(
     (key) => localStorage.setItem(key, "{invalid"),
@@ -147,12 +145,10 @@ test("active session expiry removes saved login and private drafts without a rel
   await mockAuth(page);
   await page.goto("/");
   await enterKey(page);
-  await page
-    .getByLabel("Task prompt", { exact: true })
-    .fill("Private sales draft");
-  await page.clock.fastForward(31 * 60 * 1000);
-  await expect(page.getByLabel("Task prompt", { exact: true })).toBeDisabled();
-  await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue("");
+  await page.getByLabel("Message to Evianta").fill("Private sales draft");
+  await page.clock.fastForward(8 * 60 * 60 * 1000 + 1);
+  await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
+  await expect(page.getByLabel("Message to Evianta")).toBeEnabled();
   expect(await savedSession(page)).toBeNull();
 });
 
@@ -172,9 +168,7 @@ test("an authentication rejection clears the persisted token and private draft",
   });
   await page.goto("/");
   await enterKey(page);
-  await page
-    .getByLabel("Task prompt", { exact: true })
-    .fill("Private sales draft");
+  await page.getByLabel("Message to Evianta").fill("Private sales draft");
   await page.getByRole("link", { name: "Cases", exact: true }).click();
   await expect.poll(() => reject).toBe(true);
   await expect.poll(() => savedSession(page)).toBeNull();
@@ -203,9 +197,7 @@ test("failed server revocation still removes local login, clears drafts and offe
   });
   await page.goto("/");
   await enterKey(page);
-  await page
-    .getByLabel("Task prompt", { exact: true })
-    .fill("Private sales draft");
+  await page.getByLabel("Message to Evianta").fill("Private sales draft");
   await page
     .getByRole("button", { name: "Sign out and revoke this session" })
     .click();
@@ -213,7 +205,7 @@ test("failed server revocation still removes local login, clears drafts and offe
     page.getByRole("status").filter({ hasText: "Sign-out could not finish" }),
   ).toContainText("Retry sign-out");
   expect(await savedSession(page)).toBeNull();
-  await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
   await page
     .getByRole("button", { name: "Sign out and revoke this session" })
     .click();
@@ -331,9 +323,7 @@ test("logout in another tab clears the active session and private draft", async 
   await mockAuth(page);
   await page.goto("/");
   await enterKey(page);
-  await page
-    .getByLabel("Task prompt", { exact: true })
-    .fill("Private sales draft");
+  await page.getByLabel("Message to Evianta").fill("Private sales draft");
   const second = await context.newPage();
   await mockAuth(second);
   await second.goto("/");
@@ -343,8 +333,8 @@ test("logout in another tab clears the active session and private draft", async 
   await second
     .getByRole("button", { name: "Sign out and revoke this session" })
     .click();
-  await expect(page.getByLabel("Task prompt", { exact: true })).toBeDisabled();
-  await expect(page.getByLabel("Task prompt", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
+  await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
   expect(await savedSession(page)).toBeNull();
   await second.close();
 });
@@ -359,9 +349,7 @@ test("blocked storage is reported rather than pretending login is persisted", as
   });
   await mockAuth(page);
   await page.goto("/");
-  await page
-    .getByRole("button", { name: "Enter access key", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
     .getByLabel("Access key", { exact: true })
     .fill("test-key-not-saved");
@@ -369,6 +357,6 @@ test("blocked storage is reported rather than pretending login is persisted", as
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
     "Sign-in could not be saved",
   );
-  await expect(page.getByLabel("Task prompt", { exact: true })).toBeDisabled();
+  await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
   expect(await savedSession(page)).toBeNull();
 });
