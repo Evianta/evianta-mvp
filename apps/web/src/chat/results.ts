@@ -116,11 +116,16 @@ export interface PendingQuestion {
 
 export function pendingInputQuestions(
   workspace: CaseWorkspace,
+  questionIds: readonly string[],
 ): PendingQuestion[] {
+  const currentQuestionIds = new Set(questionIds);
   return workspace.findings
     .filter(isInputFinding)
     .flatMap((finding) => finding.openQuestions)
-    .filter((question) => question.status === "open")
+    .filter(
+      (question) =>
+        question.status === "open" && currentQuestionIds.has(question.id),
+    )
     .map((question) => ({
       id: question.id,
       text: question.text,

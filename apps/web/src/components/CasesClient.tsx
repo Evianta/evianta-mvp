@@ -35,6 +35,10 @@ export function CasesClient() {
   const [query, setQuery] = useState("");
 
   useEffect(() => {
+    setQuery("");
+  }, [session?.accessToken]);
+
+  useEffect(() => {
     let active = true;
     setCases([]);
     setError(null);

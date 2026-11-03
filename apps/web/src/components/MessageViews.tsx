@@ -518,10 +518,7 @@ function ResultCard({
         deliverables={result.deliverables}
         context={result.exportContext}
       />
-      <details
-        className="mt-3"
-        open={!result.deliverables.some((item) => item.workProduct)}
-      >
+      <details className="mt-3" open={result.deliverables.length === 0}>
         <summary className="cursor-pointer text-xs text-muted-foreground">
           Findings and evidence: {result.totalFindings} findings /{" "}
           {result.openQuestions} open questions

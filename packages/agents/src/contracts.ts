@@ -96,12 +96,12 @@ const ModelScheduleSchema = WorkProductSchema.shape.schedules.element.extend({
     .nullable(),
 });
 
+const ModelWorkProductSchema = WorkProductSchema.extend({
+  schedules: z.array(ModelScheduleSchema),
+});
+
 export const PreparationModelOutputSchema = SpecialistModelOutputSchema.extend({
-  workProducts: z.array(
-    WorkProductSchema.extend({
-      schedules: z.array(ModelScheduleSchema),
-    }),
-  ),
+  workProducts: z.array(ModelWorkProductSchema),
 }).superRefine((output, context) => {
   if (!output.workProducts.length && !output.inputRequired?.questions.length)
     context.addIssue({
@@ -110,6 +110,27 @@ export const PreparationModelOutputSchema = SpecialistModelOutputSchema.extend({
         "Draft preparation must return a work product or a blocking source request.",
       path: ["workProducts"],
     });
+  output.workProducts.forEach((product, index) => {
+    const normalized = {
+      ...product,
+      schedules: product.schedules.map(
+        ({ columnFormats, currencyCode, ...schedule }) => ({
+          ...schedule,
+          ...(columnFormats === null ? {} : { columnFormats }),
+          ...(currencyCode === null ? {} : { currencyCode }),
+        }),
+      ),
+    };
+    const parsed = WorkProductSchema.safeParse(normalized);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) {
+        context.addIssue({
+          ...issue,
+          path: ["workProducts", index, ...issue.path],
+        });
+      }
+    }
+  });
 });
 
 export const PriorFindingSchema = z.object({

@@ -146,9 +146,9 @@ test("active session expiry removes saved login and private drafts without a rel
   await page.goto("/");
   await enterKey(page);
   await page.getByLabel("Message to Evianta").fill("Private sales draft");
-  await page.clock.fastForward(31 * 60 * 1000);
+  await page.clock.fastForward(8 * 60 * 60 * 1000 + 1);
   await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
-  await expect(page.getByLabel("Message to Evianta")).toHaveValue("");
+  await expect(page.getByLabel("Message to Evianta")).toBeEnabled();
   expect(await savedSession(page)).toBeNull();
 });
 

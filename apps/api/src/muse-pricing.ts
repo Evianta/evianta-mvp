@@ -1,4 +1,8 @@
-import { modelForTier, type ModelSettings } from "@evianta/ai";
+import {
+  modelForTier,
+  pricingSettingsKey,
+  type ModelSettings,
+} from "@evianta/ai";
 import type { UsagePrice, UsagePriceRepository } from "@evianta/core";
 import { StoreError } from "@evianta/store";
 import { parseUsagePrice } from "./usage-price.js";
@@ -27,8 +31,13 @@ export async function seedMusePrices(
 ): Promise<void> {
   if (models.provider !== "muse") return;
   const at = new Date().toISOString();
-  const records = (["cheap", "high"] as const).map((tier): UsagePrice => {
+  const records: UsagePrice[] = [];
+  for (const tier of ["cheap", "high"] as const) {
     const model = modelForTier(tier, models);
+    const settingsKey = pricingSettingsKey(model.pricingSettings);
+    if (await prices.findActive("muse", model.model, settingsKey, at)) {
+      continue;
+    }
     const rates = [musePricing.spark, musePricing.wonder].find((family) =>
       family.models.some((id) => id === model.model),
     );
@@ -53,8 +62,8 @@ export async function seedMusePrices(
       source: `${musePricing.source} (Standard mode; verified 2026-11-02)`,
       effectiveAt: musePricing.verifiedAt,
     });
-    return { ...price, id: `${price.id}:${price.settingsKey}` };
-  });
+    records.push({ ...price, id: `${price.id}:${price.settingsKey}` });
+  }
   for (const price of records) {
     if (
       await prices.findActive(

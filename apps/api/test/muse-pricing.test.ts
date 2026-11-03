@@ -90,6 +90,29 @@ describe("published Muse pricing", () => {
     );
   });
 
+  it("preserves active operator prices for models without published fallback rates", async () => {
+    const prices = createInMemoryStore().repositories.usagePrices;
+    await seedMusePrices(prices, models);
+    const existing = await prices.findActive("muse", "wonder", settingsKey, at);
+    if (!existing) throw new Error("Missing Wonder price");
+    const custom: UsagePrice = {
+      ...existing,
+      id: "operator-custom-model",
+      model: "operator-muse-model",
+      source: "operator-confirmed model price",
+    };
+    await prices.insert(custom);
+
+    await seedMusePrices(prices, {
+      ...models,
+      wonderModel: "operator-muse-model",
+    });
+
+    expect(
+      await prices.findActive("muse", "operator-muse-model", settingsKey, at),
+    ).toEqual(custom);
+  });
+
   it("handles concurrent startup and changed output limits", async () => {
     const prices = createInMemoryStore().repositories.usagePrices;
     await Promise.all([

@@ -495,6 +495,7 @@ function ChatSession({
       prompt,
       files,
       workflow: sample?.case.useCase ?? null,
+      sourceCaseId: sample?.case.id ?? null,
       answers: {},
       skippedSlots: [],
     };
@@ -673,7 +674,7 @@ function ChatSession({
         );
       }
       if (
-        workspace.documents.length &&
+        workspace.documents.length > 0 &&
         workspace.documents.every((item) => item.state === "ready")
       ) {
         return "ready";
@@ -761,7 +762,7 @@ function ChatSession({
           const created = await api.createCase({
             ...details.data,
             useCase: workflow,
-            sourceCaseId: sampleRef.current?.case.id ?? null,
+            sourceCaseId: draft.sourceCaseId,
           });
           setup.caseId = created.id;
         } catch (reason) {
@@ -858,7 +859,8 @@ function ChatSession({
 
       current = "ready";
       step("ready", { status: "active" });
-      const readiness = await waitUntilReady(caseId);
+      const readiness =
+        draft.files.length === 0 ? "ready" : await waitUntilReady(caseId);
       if (readiness === "preparing") {
         step("ready", {
           status: "failed",
@@ -1008,7 +1010,10 @@ function ChatSession({
     setBusy(false);
 
     if (status === "waiting-for-input") {
-      const questions = pendingInputQuestions(workspace);
+      const questions = pendingInputQuestions(
+        workspace,
+        progressRef.current[runId]?.waitingQuestionIds ?? [],
+      );
       if (!questions.length) {
         notice(
           "warning",
@@ -1205,7 +1210,7 @@ function ChatSession({
       );
       return;
     }
-    rq.answers = Object.fromEntries(
+    const answersToSend = Object.fromEntries(
       rq.questions.map((question) => [
         question.id,
         {
@@ -1221,12 +1226,29 @@ function ChatSession({
         },
       ]),
     );
+    const idempotencyKey = rq.key ?? makeId("resume");
+    const requestBody = JSON.stringify({
+      idempotencyKey,
+      input: answersToSend,
+    });
+    if (new TextEncoder().encode(requestBody).byteLength > 8 * 1024) {
+      setBusy(false);
+      showError(
+        "Your answers are too long to send. Shorten them and try again.",
+      );
+      return;
+    }
+    rq.key = idempotencyKey;
+    rq.answers = answersToSend;
     dispatch({
       type: "patch",
       id: messageId,
       patch: {
         answers: Object.fromEntries(
-          Object.entries(rq.answers).map(([id, value]) => [id, value.answer]),
+          Object.entries(answersToSend).map(([id, value]) => [
+            id,
+            value.answer,
+          ]),
         ),
       },
     });

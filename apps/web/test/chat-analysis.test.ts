@@ -24,6 +24,7 @@ function draft(overrides: Partial<Draft> = {}): Draft {
     prompt: "",
     files: [],
     workflow: null,
+    sourceCaseId: null,
     answers: {},
     skippedSlots: [],
     ...overrides,
@@ -204,5 +205,17 @@ describe("task description", () => {
     );
     expect(value.length).toBeLessThanOrEqual(5000);
     expect(value).toContain("Assessment year");
+  });
+
+  it("truncates oversized chat details to the description limit", () => {
+    const value = buildTaskDescription(
+      draft({
+        workflow: "tax-notice",
+        answers: { "assessment-year": "x".repeat(6000) },
+      }),
+      5000,
+    );
+    expect(value).toHaveLength(5000);
+    expect(value).toContain("Assessment year:");
   });
 });

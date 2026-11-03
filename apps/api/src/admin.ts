@@ -9,7 +9,7 @@ import { parseUsagePrice } from "./usage-price.js";
 
 function usage(): never {
   throw new Error(
-    "Usage: admin create-user <email> <display-name> [user|admin] | disable-user <user-id> | issue-key <user-id> [expiry-ISO] [--code <your-own-code>] | revoke-key <key-id> | import-price <json-file>",
+    "Usage: admin create-user <email> <display-name> [user|admin] | disable-user <user-id> | issue-key <user-id> [expiry-ISO] | issue-key <user-id> <expiry-ISO> --code <your-own-code> | revoke-key <key-id> | import-price <json-file>",
   );
 }
 

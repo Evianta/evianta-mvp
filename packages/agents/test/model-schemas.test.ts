@@ -67,6 +67,37 @@ describe("strict provider model schemas", () => {
     );
   });
 
+  it("rejects malformed schedules during structured-output validation", () => {
+    const output = {
+      summary: "Prepared",
+      findings: [],
+      inputRequired: null,
+      workProducts: [
+        {
+          key: "reconciliation",
+          type: "reconciliation",
+          title: "Reconciliation",
+          claimant: "Buyer",
+          counterparty: "Seller",
+          body: "Review the reconciliation.",
+          sources: [],
+          missingOriginals: [],
+          reviewBlockers: [],
+          schedules: [
+            {
+              title: "Amounts",
+              columns: ["Amount"],
+              columnFormats: ["currency"],
+              currencyCode: null,
+              rows: [["not a number"]],
+            },
+          ],
+        },
+      ],
+    };
+    expect(PreparationModelOutputSchema.safeParse(output).success).toBe(false);
+  });
+
   it.each([
     ["analysis", SpecialistModelOutputSchema],
     ["preparation", PreparationModelOutputSchema],

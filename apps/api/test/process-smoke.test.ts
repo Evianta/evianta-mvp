@@ -82,6 +82,7 @@ describe("production process entrypoints", () => {
   it("explains admin arguments before connecting to MongoDB", async () => {
     for (const args of [
       ["issue-key"],
+      ["issue-key", "user-id", "--code", "a-custom-code"],
       ["create-user"],
       ["disable-user"],
       ["revoke-key"],

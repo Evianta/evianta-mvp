@@ -182,9 +182,10 @@ for (const width of [1280, 390]) {
     const result = page.getByRole("region", { name: "Result", exact: true });
     await expect(result).toBeVisible();
     await expect(result).toContainText("3 findings");
-    await expect(
-      result.getByRole("list", { name: "Key findings" }).getByRole("listitem"),
-    ).toHaveCount(2);
+    await expect(result.locator(".result-finding")).toHaveCount(2);
+    expect(
+      await result.locator("details.mt-3").getAttribute("open"),
+    ).toBeNull();
     const box = await result.boundingBox();
     expect(box).not.toBeNull();
     expect(box!.height).toBeLessThan(width === 390 ? 300 : 240);
@@ -472,6 +473,25 @@ test("a clarification form submits answers and resumes the run", async ({
   ).toBeVisible();
 });
 
+test("sample origin is retained and a draft with no documents starts", async ({
+  page,
+}) => {
+  const state = await mockApi(page);
+  await page.goto("/?source=sample-msme-overdue");
+  await send(page, "Help me follow up on these overdue invoices");
+  await signInFromCard(page);
+  for (let slot = 0; slot < 2; slot += 1) {
+    await page.getByRole("button", { name: "I do not have it" }).click();
+  }
+  await send(page, "30 days");
+  await expect(page.getByText("Work finished")).toBeVisible();
+  expect(state.created).toHaveLength(1);
+  expect(state.created[0]).toMatchObject({
+    sourceCaseId: "sample-msme-overdue",
+  });
+  expect(state.runs).toBe(1);
+});
+
 test("all clarification answers are submitted together with supporting files", async ({
   page,
 }) => {
@@ -533,6 +553,69 @@ test("all clarification answers are submitted together with supporting files", a
     "Answers sent. The team can continue.",
   );
   await expect(message(page)).toBeEnabled();
+});
+
+test("oversized clarification answers stay editable instead of being frozen", async ({
+  page,
+}) => {
+  const state = await mockApi(page, { segments: waitingSegments });
+  await page.goto("/#access=jury-amber-falcon-47");
+  await page.getByLabel("Attach records").setInputFiles(csv);
+  await send(page, "Analyze my sales spreadsheet");
+  const form = page.getByRole("form", { name: "Details needed to continue" });
+  const answer = form.getByRole("textbox").first();
+  await answer.fill("x".repeat(9000));
+  await form
+    .getByRole("button", { name: "Submit answers and continue" })
+    .click();
+  await expect(form.getByRole("alert")).toHaveText(
+    "Your answers are too long to send. Shorten them and try again.",
+  );
+  await expect(answer).toBeEditable();
+  expect(state.resumes).toHaveLength(0);
+
+  await answer.fill("Short answer");
+  await form
+    .getByRole("button", { name: "Submit answers and continue" })
+    .click();
+  await expect(page.getByText("Work finished")).toBeVisible();
+  expect(state.resumes).toHaveLength(1);
+});
+
+test("only questions from the current interruption are requested", async ({
+  page,
+}) => {
+  const currentQuestion = {
+    id: "t1:input:1:q0",
+    text: "What is the current response deadline?",
+  };
+  const previousQuestion = {
+    id: "t0:input:1:q0",
+    text: "Which tax regime applies?",
+  };
+  const state = await mockApi(page, {
+    segments: waitingSegments,
+    questions: [currentQuestion],
+    historicalQuestions: [previousQuestion],
+  });
+  await page.goto("/#access=jury-amber-falcon-47");
+  await page.getByLabel("Attach records").setInputFiles(csv);
+  await send(page, "Analyze my sales spreadsheet");
+  const form = page.getByRole("form", { name: "Details needed to continue" });
+  await expect(form.getByRole("textbox")).toHaveCount(1);
+  await form.getByLabel(currentQuestion.text).fill("15 November 2026");
+  await form
+    .getByRole("button", { name: "Submit answers and continue" })
+    .click();
+  await expect(page.getByText("Work finished")).toBeVisible();
+  expect(state.resumes[0]).toMatchObject({
+    input: {
+      [currentQuestion.id]: {
+        question: currentQuestion.text,
+      },
+    },
+  });
+  expect(state.resumes[0]?.input).not.toHaveProperty(previousQuestion.id);
 });
 
 test("clarification form retries keep answers and the resume idempotency key", async ({

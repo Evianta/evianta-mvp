@@ -27,6 +27,7 @@ export interface MockOptions {
   seedCase?: boolean;
   seedStatus?: RunDto["status"];
   questions?: { id: string; text: string }[];
+  historicalQuestions?: { id: string; text: string }[];
   failResumeOnce?: boolean;
   deliverableContent?: unknown;
 }
@@ -138,7 +139,17 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
     status: null,
     authTokens: [],
   };
-  const segments = options.segments ?? defaultSegments;
+  const segments = (options.segments ?? defaultSegments).map((segment) => ({
+    ...segment,
+    events: segment.events.map((event) =>
+      event.type === "input-required" && options.questions
+        ? {
+            ...event,
+            questionIds: options.questions.map((question) => question.id),
+          }
+        : event,
+    ),
+  }));
   const findings = options.findings ?? [
     { id: "finding-1", title: "Revenue grew 12 percent", severity: "medium" },
   ];
@@ -227,11 +238,37 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
             },
           ]
         : [];
+    const historicalInputFindings = (options.historicalQuestions ?? []).map(
+      (question, index) => ({
+        ...finding({
+          id: `historical-${index}:input:1`,
+          title: "Previous input required",
+          severity: "low" as const,
+        }),
+        severity: "info" as const,
+        openQuestions: [
+          {
+            ...question,
+            severity: "medium" as const,
+            status: "open" as const,
+            resolutionNote: null,
+            actorId: null,
+            updatedAt: null,
+          },
+        ],
+      }),
+    );
     return {
       case: record,
       documents,
       findings:
-        done || state.status ? [...findings.map(finding), ...inputFinding] : [],
+        done || state.status
+          ? [
+              ...findings.map(finding),
+              ...inputFinding,
+              ...historicalInputFindings,
+            ]
+          : [],
       evidence: [],
       deliverables: done
         ? [

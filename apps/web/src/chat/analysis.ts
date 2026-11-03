@@ -30,6 +30,7 @@ export interface Draft {
   prompt: string;
   files: AttachedFile[];
   workflow: UseCase | null;
+  sourceCaseId: string | null;
   answers: Record<string, string>;
   skippedSlots: string[];
 }
@@ -220,6 +221,7 @@ export function planNextStep(draft: Draft): NextStep {
 }
 
 export function buildTaskDescription(draft: Draft, limit = 5000): string {
+  const maxLength = Math.max(0, limit);
   const workflow = resolveWorkflow(draft);
   const notes: string[] = [];
   if (workflow) {
@@ -233,7 +235,8 @@ export function buildTaskDescription(draft: Draft, limit = 5000): string {
     }
   }
   const base = draft.prompt.trim();
-  if (!notes.length) return base.slice(0, limit);
+  if (!notes.length) return base.slice(0, maxLength);
   const extra = `\n\nDetails provided in chat:\n${notes.map((note) => `- ${note}`).join("\n")}`;
-  return `${base.slice(0, Math.max(0, limit - extra.length))}${extra}`;
+  if (extra.length >= maxLength) return extra.slice(0, maxLength);
+  return `${base.slice(0, maxLength - extra.length)}${extra}`;
 }

@@ -248,9 +248,10 @@ describe("result summary", () => {
 
   it("finds mid-run questions that need an answer", () => {
     expect(isInputFinding({ id: "t1:input:1" })).toBe(true);
-    expect(pendingInputQuestions(workspace)).toEqual([
+    expect(pendingInputQuestions(workspace, ["t1:input:1:q0"])).toEqual([
       { id: "t1:input:1:q0", text: "Upload payments", severity: "medium" },
     ]);
+    expect(pendingInputQuestions(workspace, ["t0:input:1:q0"])).toEqual([]);
   });
 
   it("shows only two key findings but retains totals and full output for export", () => {
