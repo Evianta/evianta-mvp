@@ -6,12 +6,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Command } from "cmdk";
 import { ArrowRight, Command as CommandIcon, Search } from "lucide-react";
 import { useSession } from "../session/SessionProvider";
+import { newChatHref } from "../chat/flow-utils";
 
 const commands = [
   {
-    label: "Start a task",
+    label: "New chat",
     href: "/",
-    keywords: "prompt composer chat evianta",
+    keywords: "start task prompt composer chat evianta",
   },
   {
     label: "Open synthetic samples",
@@ -53,7 +54,7 @@ export function CommandPalette() {
 
   function navigate(href: string) {
     setOpen(false);
-    router.push(href);
+    router.push(href === "/" ? newChatHref() : href);
   }
 
   return (

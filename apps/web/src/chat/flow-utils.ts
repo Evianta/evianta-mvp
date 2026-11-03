@@ -17,6 +17,10 @@ export function makeId(prefix = "id"): string {
   return `${prefix}-${Date.now().toString(36)}-${counter}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export function newChatHref(): string {
+  return `/?chat=${makeId("chat")}`;
+}
+
 export function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }

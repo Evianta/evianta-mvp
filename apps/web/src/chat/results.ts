@@ -1,5 +1,6 @@
 import type { Deliverable, Finding, RunDto } from "@evianta/core";
 import type { CaseWorkspace } from "../api/client";
+import type { ExportContext } from "../deliverable-export";
 
 export interface ResultFinding {
   id: string;
@@ -14,7 +15,8 @@ export interface ResultSummary {
   findings: ResultFinding[];
   totalFindings: number;
   openQuestions: number;
-  deliverables: { id: string; title: string; format: Deliverable["format"] }[];
+  deliverables: Deliverable[];
+  exportContext: ExportContext;
   sourceCount: number;
   evidenceCount: number;
   usage: RunDto["usage"] | null;
@@ -44,7 +46,7 @@ export function latestDeliverable(
 export function buildResult(
   workspace: CaseWorkspace,
   run: RunDto | null,
-  limit = 4,
+  limit = 2,
 ): ResultSummary {
   const deliverable = latestDeliverable(workspace);
   const referenced = new Set(
@@ -79,15 +81,8 @@ export function buildResult(
           .length,
       0,
     ),
-    deliverables: deliverable
-      ? [
-          {
-            id: deliverable.id,
-            title: deliverable.title,
-            format: deliverable.format,
-          },
-        ]
-      : [],
+    deliverables: deliverable ? [deliverable] : [],
+    exportContext: workspace.case,
     sourceCount: workspace.documents.length,
     evidenceCount: workspace.evidence.length,
     usage: run?.usage ?? null,

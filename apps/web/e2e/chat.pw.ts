@@ -1,4 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
+import { readFile } from "node:fs/promises";
+import { read, utils } from "xlsx";
+import { readPdf } from "../test/support/pdf";
 import { expect, test, type Page } from "@playwright/test";
 import {
   csv,
@@ -8,6 +11,112 @@ import {
 } from "./support/mock-api";
 
 const message = (page: Page) => page.getByLabel("Message to Evianta");
+
+test("New chat clears a saved conversation and resets again on the home page", async ({
+  page,
+}) => {
+  const state = await mockApi(page, { seedCase: true });
+  await page.goto("/?case=case-1#access=jury-amber-falcon-47");
+  await expect(page.getByText("Work finished")).toBeVisible();
+  const newChat = page
+    .getByRole("navigation")
+    .getByRole("link", { name: "New chat", exact: true });
+  await newChat.click();
+  await expect(page).toHaveURL(/\/\?chat=chat-/);
+  const firstUrl = page.url();
+  await expect(page.getByText("Work finished")).toHaveCount(0);
+  await expect(page.getByText("Welcome back.", { exact: false })).toHaveCount(
+    0,
+  );
+  await expect(message(page)).toHaveValue("");
+  await expect(message(page)).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Sign out and revoke this session" }),
+  ).toBeVisible();
+  await send(page, "Help me with something");
+  await expect(
+    page.getByText("Help me with something", { exact: true }),
+  ).toBeVisible();
+  await message(page).fill("Unsent draft");
+  await page.getByLabel("Attach records").setInputFiles(csv);
+  await expect(
+    page.getByRole("button", { name: "Remove sales.csv" }),
+  ).toBeVisible();
+  await newChat.click();
+  await expect(page).not.toHaveURL(firstUrl);
+  await expect(page).toHaveURL(/\/\?chat=chat-/);
+  await expect(
+    page.getByText("Help me with something", { exact: true }),
+  ).toHaveCount(0);
+  await expect(message(page)).toHaveValue("");
+  await expect(
+    page.getByRole("button", { name: "Remove sales.csv" }),
+  ).toHaveCount(0);
+  expect(state.created).toHaveLength(0);
+  expect(state.runs).toBe(0);
+  await page.goto("/?case=case-1");
+  await expect(page.getByText("Work finished")).toBeVisible();
+});
+
+test("New chat from workspace search clears a sample draft and repeats", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("/?source=sample-msme-overdue");
+  await expect(message(page)).not.toHaveValue("");
+  for (let index = 0; index < 2; index += 1) {
+    await page
+      .getByRole("button", { name: "Search workspace K shortcut" })
+      .click();
+    await page.getByRole("option", { name: /New chat/ }).click();
+    await expect(page).toHaveURL(/\/\?chat=chat-/);
+    await expect(message(page)).toHaveValue("");
+    await expect(
+      page.getByText("Starting from the workflow", { exact: false }),
+    ).toHaveCount(0);
+    await message(page).fill("Unsent draft");
+  }
+});
+
+test("a model timeout shows the task error rather than a generic run failure", async ({
+  page,
+}) => {
+  const errorMessage =
+    "The tax-notice-analyst task failed: The model request exceeded its 180-second time limit. Increase MODEL_REQUEST_TIMEOUT_MS for longer analyses, then retry. Provider usage may still be charged.";
+  await mockApi(page, {
+    findings: [],
+    segments: [
+      {
+        final: "failed",
+        events: [
+          { type: "run-started", planVersion: 1 },
+          { type: "task-started", taskId: "t1", role: "tax-notice-analyst" },
+          {
+            type: "task-failed",
+            taskId: "t1",
+            role: "tax-notice-analyst",
+            error: { code: "model-timeout", message: errorMessage },
+          },
+          {
+            type: "run-failed",
+            error: { code: "model-timeout", message: errorMessage },
+          },
+        ],
+      },
+    ],
+  });
+  await page.goto("/#access=jury-amber-falcon-47");
+  await page.getByLabel("Attach records").setInputFiles(csv);
+  await send(page, "Analyze my sales spreadsheet");
+  await expect(
+    page.getByText(`The run stopped: ${errorMessage}`),
+  ).toBeVisible();
+  await expect(page.getByText("No task completed successfully")).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: "Result", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+});
 
 test("a planning failure is not presented as finished work", async ({
   page,
@@ -52,6 +161,117 @@ async function signInFromCard(page: Page, key = "jury-amber-falcon-47") {
   await page.getByLabel("Access key", { exact: true }).fill(key);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
 }
+
+for (const width of [1280, 390]) {
+  test(`compact results export full output at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await mockApi(page, {
+      deliverableContent: {
+        summary: "Full analyst report.",
+        rows: [{ month: "January", revenue: 12500 }],
+      },
+      findings: [
+        { id: "f1", title: "Check missing credits", severity: "high" },
+        { id: "f2", title: "Confirm the reporting period", severity: "medium" },
+        { id: "f3", title: "Review duplicate rows", severity: "low" },
+      ],
+    });
+    await page.goto("/#access=jury-amber-falcon-47");
+    await page.getByLabel("Attach records").setInputFiles(csv);
+    await send(page, "Analyze my sales spreadsheet");
+    const result = page.getByRole("region", { name: "Result", exact: true });
+    await expect(result).toBeVisible();
+    await expect(result).toContainText("3 findings");
+    await expect(
+      result.getByRole("list", { name: "Key findings" }).getByRole("listitem"),
+    ).toHaveCount(2);
+    const box = await result.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.height).toBeLessThan(width === 390 ? 300 : 240);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+
+    const exportMenu = result.getByLabel(/Export .*for Quarterly sales report/);
+    await exportMenu.click();
+    const menuBox = await result.locator("details > div").boundingBox();
+    expect(menuBox).not.toBeNull();
+    expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+    expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(width);
+    await expect(
+      result.getByRole("button", { name: /Download JSON/ }),
+    ).toHaveCount(0);
+    const draftDownload = page.waitForEvent("download");
+    await result.getByRole("button", { name: "Download PDF (.pdf)" }).click();
+    const draft = await draftDownload;
+    expect(draft.suggestedFilename()).toBe("quarterly-sales-report-v1.pdf");
+    const pdf = await readPdf(await readFile((await draft.path())!));
+    expect(pdf.text).toContain("Full analyst report.");
+    expect(pdf.text).toContain("12500");
+
+    await exportMenu.click();
+    const excelDownload = page.waitForEvent("download");
+    await result
+      .getByRole("button", { name: "Download Excel (.xlsx)" })
+      .click();
+    const excel = await excelDownload;
+    expect(excel.suggestedFilename()).toBe("quarterly-sales-report-v1.xlsx");
+    const workbook = read(await readFile((await excel.path())!), {
+      type: "buffer",
+    });
+    expect(utils.sheet_to_json(workbook.Sheets.Rows!)).toEqual([
+      { Month: "January", Revenue: 12500 },
+    ]);
+    await exportMenu.click();
+    expect(
+      (await new AxeBuilder({ page }).include(".result-card").analyze())
+        .violations,
+    ).toEqual([]);
+  });
+}
+
+test("export failures are visible and can be retried", async ({ page }) => {
+  await mockApi(page, { seedCase: true, seedStatus: "completed" });
+  await page.goto("/?case=case-1#access=jury-amber-falcon-47");
+  const result = page.getByRole("region", { name: "Result", exact: true });
+  await expect(result).toBeVisible();
+  await page.evaluate(() => {
+    const createObjectURL = URL.createObjectURL;
+    URL.createObjectURL = () => {
+      URL.createObjectURL = createObjectURL;
+      throw new Error("Download unavailable");
+    };
+  });
+  await result.getByLabel(/Export .*for Quarterly sales report/).click();
+  await result.getByRole("button", { name: "Download PDF (.pdf)" }).click();
+  await expect(result.getByRole("alert")).toHaveText(
+    "Export failed: Download unavailable",
+  );
+  const retry = page.waitForEvent("download");
+  await result.getByRole("button", { name: "Download PDF (.pdf)" }).click();
+  expect((await retry).suggestedFilename()).toBe(
+    "quarterly-sales-report-v1.pdf",
+  );
+  await expect(result.getByRole("alert")).toHaveCount(0);
+});
+
+test("JSON is available when the task requests a structured deliverable", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("/#access=jury-amber-falcon-47");
+  await page.getByLabel("Attach records").setInputFiles(csv);
+  await send(
+    page,
+    "Analyze my sales spreadsheet and export JSON for integration",
+  );
+  const result = page.getByRole("region", { name: "Result", exact: true });
+  await result.getByLabel(/Export .*for Quarterly sales report/).click();
+  const download = page.waitForEvent("download");
+  await result.getByRole("button", { name: "Download JSON (.json)" }).click();
+  const file = await download;
+  const output = JSON.parse(await readFile((await file.path())!, "utf8"));
+  expect(output.sections[0].content).toBe("Summary");
+  expect(output.exportNotice).toContain("Not validated");
+});
 
 test("the chat is usable before sign-in and keeps the message through sign-in", async ({
   page,

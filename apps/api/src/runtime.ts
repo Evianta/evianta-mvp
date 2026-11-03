@@ -125,6 +125,7 @@ export async function createApiRuntime(): Promise<ApiRuntime> {
       provider,
       accounting,
       models,
+      timeoutMs: aiEnvironment.modelRequestTimeoutMs,
     });
     const dataAnalysisPlan = createTrivialReferencePlan("data-analysis");
     dataAnalysisPlan.title = "Sales data analysis";

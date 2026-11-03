@@ -89,7 +89,7 @@ The admin command requires the API build (`pnpm dev` prepares it, or run
 Enter it in the web sign-in dialog; do not put it in a URL, source file or log.
 The worker must be running for submitted analyses to complete.
 
-To check the data-analysis flow, open **Start** at `/`, sign in, and choose
+To check the data-analysis flow, open **New chat** at `/`, sign in, and choose
 the **Data analysis** suggestion or write your own prompt.
 Attach a `.csv` or `.xlsx` dataset and choose **Start task**. The prompt stays
 editable; the title is derived from its first nonempty line. There is no workflow
@@ -98,7 +98,9 @@ and up to 8 KB of CSV header text to detect one of the three supported task type
 Unclear or conflicting intent asks you to choose, without changing your message
 or files and without creating a case. No model or upload is used for detection.
 PDF/Excel contents are not read for classification; ambiguous filenames/messages
-need a choice. Sample-origin entry uses Start at `/?source=<sample-id>`.
+need a choice. Sample-origin entry uses the chat at `/?source=<sample-id>`.
+**New chat** in the sidebar or workspace search clears the conversation and
+composer, including attached files, without signing out or deleting saved cases.
 Enter submits, Shift+Enter adds a line, and IME composition does not submit.
 Starting authorizes private case creation, upload/extraction and execution under
 existing model limits. File limits and enabled workflows come from the authenticated
@@ -110,6 +112,16 @@ form. Answer each field, optionally attach supporting files, then select
 **Submit answers and continue**. The message composer stays disabled until the
 answers are sent. Failed submissions keep the answers and offer a retry without
 starting a new run.
+
+Completed chat results show a short summary and two key findings. Open a finding
+for details, or use **Export** to download the full deliverable, including saved
+reviewer edits. The system selects formats from the task and output: notice
+replies and reports use PDF; spreadsheet/dashboard work and tabular schedules
+also offer Excel. JSON is offered only for tasks requesting a JSON output, not
+as a default for every case. A task may offer multiple formats. Exports are also
+available in the deliverable inspector and review workspace. These are drafts
+for professional review, not validated government portal payloads or submitted
+filings.
 
 All three workflows accept CSV, TSV, Excel (`.xlsx`/`.xls`), JSON, plain text,
 Markdown (`.md`/`.markdown`) and PDF. Image uploads are not enabled because OCR
@@ -363,6 +375,12 @@ model finishes a JSON plan. This is a bounded allowance, not a guarantee that
 every response fits. Larger allowances reserve more budget before dispatch;
 user/global spending limits still apply. Truncated output is rejected and its
 reported usage is recorded. No automatic paid retry increases the ceiling.
+
+Model requests in the API and worker default to a 180-second time limit.
+Set `MODEL_REQUEST_TIMEOUT_MS` to allow longer document analyses, then restart
+the API and worker. This limit covers the request's correction/retry attempts,
+not the entire case run. Timed-out calls retain unknown usage exposure and are
+not automatically retried; the run reports the failed task and timeout reason.
 
 Startup uses the configured model IDs and `MODEL_MAX_OUTPUT_TOKENS` to create
 immutable price records with canonical settings hashes. Existing active prices,

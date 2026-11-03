@@ -177,6 +177,15 @@ export class ProviderRequestError extends AiError {
   }
 }
 
+export class ModelTimeoutError extends AiError {
+  constructor(timeoutMs: number) {
+    super(
+      `The model request exceeded its ${timeoutMs / 1000}-second time limit. Increase MODEL_REQUEST_TIMEOUT_MS for longer analyses, then retry. Provider usage may still be charged.`,
+      "model-timeout",
+    );
+  }
+}
+
 export class ProviderRefusalError extends AiError {
   constructor(readonly units?: UsageUnits) {
     super("The model refused the request", "provider-refusal");
@@ -296,7 +305,7 @@ function combineSignals(
 ): { signal: AbortSignal; clear: () => void } {
   const controller = new AbortController();
   const timer = setTimeout(
-    () => controller.abort(new Error("Model request timed out")),
+    () => controller.abort(new ModelTimeoutError(timeoutMs)),
     timeoutMs,
   );
   const abort = () => controller.abort(callerSignal?.reason);
@@ -594,7 +603,10 @@ export function createAi(options: AiClientOptions): AiClient {
               images: request.images,
               webSearch: request.webSearch,
             });
-          } catch (error) {
+          } catch (caught) {
+            const error = providerSignals.signal.aborted
+              ? (providerSignals.signal.reason ?? caught)
+              : caught;
             const retryable = isRetryable(error);
             await options.accounting.record({
               ...usageAttempt,
@@ -753,7 +765,11 @@ export function createAi(options: AiClientOptions): AiClient {
     // A consumer that stops pulling never resumes the generator, so settle
     // the dispatched attempt (and stop its lease heartbeat) on abort directly.
     const onAbort = (): void => {
-      void recordUnknown("provider-cancelled").catch(() => undefined);
+      void recordUnknown(
+        providerSignals.signal.reason instanceof ModelTimeoutError
+          ? providerSignals.signal.reason.code
+          : "provider-cancelled",
+      ).catch(() => undefined);
     };
     providerSignals.signal.addEventListener("abort", onAbort, { once: true });
 
@@ -767,7 +783,10 @@ export function createAi(options: AiClientOptions): AiClient {
       })) {
         yield chunk;
       }
-    } catch (error) {
+    } catch (caught) {
+      const error = providerSignals.signal.aborted
+        ? (providerSignals.signal.reason ?? caught)
+        : caught;
       await recordUnknown(
         error instanceof AiError ? error.code : "provider-unknown",
       );

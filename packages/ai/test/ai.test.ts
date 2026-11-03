@@ -7,6 +7,7 @@ import {
   createMockProvider,
   MockProvider,
   MuseProvider,
+  ModelTimeoutError,
   modelForTier,
   ProviderRequestError,
   type StructuredGenerationRequest,
@@ -29,6 +30,158 @@ function createAccounting(): UsageAccounting {
 }
 
 describe("@evianta/ai", () => {
+  it("allows an analysis to finish after the old 60-second timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const accounting = createAccounting();
+      const provider = createMockProvider({ responses: ['"tax-notice"'] });
+      const generate = provider.generateStructured.bind(provider);
+      vi.spyOn(provider, "generateStructured").mockImplementation(
+        async (request) => {
+          await new Promise((resolve) => setTimeout(resolve, 90_000));
+          request.signal.throwIfAborted();
+          return generate(request);
+        },
+      );
+      const client = createAi({
+        provider,
+        accounting,
+        models,
+        timeoutMs: 180_000,
+      });
+      const result = client.runStructured({
+        tier: "cheap",
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+        system: "Analyze records",
+        input: "tax-notice",
+        usageContext: { userId: "user-1", caseId: "case-1" },
+      });
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect((await result).output).toBe("tax-notice");
+      expect(accounting.record).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: "success" }),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records actionable timeout errors without retrying an unknown charge", async () => {
+    vi.useFakeTimers();
+    try {
+      const accounting = createAccounting();
+      const provider = createMockProvider();
+      const dispatch = vi
+        .spyOn(provider, "generateStructured")
+        .mockImplementation(
+          (request) =>
+            new Promise((_, reject) => {
+              request.signal.addEventListener(
+                "abort",
+                () => reject(new DOMException("Aborted", "AbortError")),
+                { once: true },
+              );
+            }),
+        );
+      const client = createAi({
+        provider,
+        accounting,
+        models,
+        timeoutMs: 180_000,
+      });
+      const result = client.runStructured({
+        tier: "cheap",
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+        system: "Analyze records",
+        input: "tax-notice",
+        usageContext: { userId: "user-1" },
+        timeoutMs: 120_000,
+      });
+      const assertion = expect(result).rejects.toMatchObject({
+        code: "model-timeout",
+        message: expect.stringContaining("120-second time limit"),
+      });
+      await vi.advanceTimersByTimeAsync(120_000);
+      await assertion;
+      expect(accounting.record).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          outcome: "unknown",
+          errorCode: "model-timeout",
+        }),
+      );
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves caller cancellation instead of reporting a model timeout", async () => {
+    const accounting = createAccounting();
+    const provider = createMockProvider();
+    const controller = new AbortController();
+    const cancelled = new Error("Caller stopped the run");
+    vi.spyOn(provider, "generateStructured").mockImplementation(async () => {
+      controller.abort(cancelled);
+      throw new DOMException("Aborted", "AbortError");
+    });
+    const client = createAi({ provider, accounting, models });
+    await expect(
+      client.runStructured({
+        tier: "cheap",
+        inputSchema: UseCaseSchema,
+        outputSchema: UseCaseSchema,
+        system: "Analyze",
+        input: "tax-notice",
+        usageContext: { userId: "user-1" },
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(cancelled);
+  });
+
+  it("settles a timed-out paused stream once with its timeout code", async () => {
+    vi.useFakeTimers();
+    try {
+      const accounting = createAccounting();
+      const provider = createMockProvider();
+      vi.spyOn(provider, "streamText").mockImplementation(
+        async function* (request) {
+          yield "first";
+          request.signal.throwIfAborted();
+        },
+      );
+      const client = createAi({
+        provider,
+        accounting,
+        models,
+        timeoutMs: 180_000,
+      });
+      const stream = client.streamText({
+        tier: "cheap",
+        system: "Analyze",
+        input: "prompt",
+        usageContext: { userId: "user-1" },
+      });
+      const iterator = stream[Symbol.asyncIterator]();
+      await expect(iterator.next()).resolves.toMatchObject({ value: "first" });
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(accounting.record).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          outcome: "unknown",
+          errorCode: "model-timeout",
+        }),
+      );
+      await expect(iterator.next()).rejects.toBeInstanceOf(ModelTimeoutError);
+      expect(accounting.record).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports actionable 404 errors without exposing provider response bodies", async () => {
     const fetchImplementation: typeof fetch = vi.fn(
       async () =>

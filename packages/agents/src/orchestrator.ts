@@ -1098,6 +1098,21 @@ export class Orchestrator {
       task.status = closing;
     }
     const proposedStatus = override.status ?? this.statusFor(tasks);
+    const failedTask = tasks.find(
+      (task) => task.status === "failed" && task.lastError,
+    );
+    const terminalError =
+      override.error ??
+      (proposedStatus === "failed" && failedTask?.lastError
+        ? {
+            code: failedTask.lastError.code,
+            message:
+              `The ${failedTask.role} task failed: ${failedTask.lastError.message}`.slice(
+                0,
+                500,
+              ),
+          }
+        : undefined);
     const runUsage = summarizeUsage(
       await this.repos.usageLedger.listForRun(
         scope.ownerId,
@@ -1144,7 +1159,7 @@ export class Orchestrator {
         status: proposedStatus,
         usage: runUsage,
         reason: override.reason,
-        error: override.error,
+        error: terminalError,
       },
     });
     const settled = await this.repos.runs.findOwnedById(run.id, scope.ownerId);

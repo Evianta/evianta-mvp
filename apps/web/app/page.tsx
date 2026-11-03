@@ -6,9 +6,9 @@ import { ChatWorkspace } from "../src/components/ChatWorkspace";
 export default async function HomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ source?: string; case?: string }>;
+  searchParams: Promise<{ source?: string; case?: string; chat?: string }>;
 }) {
-  const { source, case: caseId } = await searchParams;
+  const { source, case: caseId, chat } = await searchParams;
   const sourceSample = source ? findPublicSample(source) : undefined;
   if (source && !sourceSample) notFound();
   const featured = publicSamples.find(
@@ -17,7 +17,7 @@ export default async function HomePage({
   const samples = publicSamples.filter((fixture) => fixture !== featured);
 
   return (
-    <ChatWorkspace sourceSample={sourceSample} caseId={caseId}>
+    <ChatWorkspace key={chat} sourceSample={sourceSample} caseId={caseId}>
       <section id="samples" aria-labelledby="sample-heading" className="mt-14">
         <div className="section-heading">
           <div>

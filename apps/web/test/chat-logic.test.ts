@@ -211,6 +211,40 @@ describe("result summary", () => {
       { id: "t1:input:1:q0", text: "Upload payments", severity: "medium" },
     ]);
   });
+
+  it("shows only two key findings but retains totals and full output for export", () => {
+    const result = buildResult(
+      {
+        ...workspace,
+        findings: [
+          ...workspace.findings,
+          finding("medium-1", "medium", 0.8),
+          finding("medium-2", "medium", 0.7),
+        ],
+        deliverables: [
+          {
+            ...workspace.deliverables[0]!,
+            sections: [
+              {
+                ...workspace.deliverables[0]!.sections[0]!,
+                content: "Full draft reply, not the summary.",
+                findingIds: ["low-1", "high-1", "medium-1", "medium-2"],
+              },
+            ],
+          },
+        ],
+      },
+      run,
+    );
+    expect(result.totalFindings).toBe(4);
+    expect(result.findings.map((item) => item.id)).toEqual([
+      "high-1",
+      "medium-1",
+    ]);
+    expect(result.deliverables[0]?.sections[0]?.content).toBe(
+      "Full draft reply, not the summary.",
+    );
+  });
 });
 
 describe("chat reducer", () => {

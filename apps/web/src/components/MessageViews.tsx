@@ -34,6 +34,7 @@ import { Button } from "./Button";
 import { Chip, type ChipTone } from "./Chip";
 import { StreamedText } from "./StreamedText";
 import { RunQuestionForm } from "./RunQuestionForm";
+import { DeliverableExport } from "./DeliverableExport";
 
 export interface MessageContext {
   progressFor: (runId: string) => ProgressState | null;
@@ -475,61 +476,38 @@ function ResultCard({
   if (!result || !progress) return null;
   const usage = result.usage;
   return (
-    <div className="card-inline result-card">
-      <p className="text-xs font-semibold uppercase tracking-wide text-primary">
-        Result
+    <section className="card-inline result-card" aria-label="Result">
+      <p className="line-clamp-2 text-sm font-medium leading-5">
+        {result.headline}
       </p>
-      <StreamedText
-        text={result.headline}
-        animate
-        className="mt-2 text-base font-medium leading-relaxed"
-      />
-      <dl className="result-metrics">
-        <div>
-          <dt>Findings</dt>
-          <dd className="mono-number">{result.totalFindings}</dd>
-        </div>
-        <div>
-          <dt>Open questions</dt>
-          <dd className="mono-number">{result.openQuestions}</dd>
-        </div>
-        <div>
-          <dt>Sources</dt>
-          <dd className="mono-number">{result.sourceCount}</dd>
-        </div>
-        <div>
-          <dt>Usage</dt>
-          <dd className="mono-number">
-            {usage
-              ? formatCost(usage.costUsd, usage.costStatus === "unknown")
-              : "-"}
-          </dd>
-        </div>
-      </dl>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {result.totalFindings} findings | {result.openQuestions} open questions
+        {" | "}
+        {result.sourceCount} sources |{" "}
+        {usage
+          ? formatCost(usage.costUsd, usage.costStatus === "unknown")
+          : "Cost pending"}
+      </p>
       {result.findings.length > 0 && (
-        <div className="mt-4">
-          <p className="text-xs font-medium text-muted-foreground">
-            Top findings
-          </p>
-          <ul className="mt-2 flex flex-col gap-2">
+        <div className="mt-2">
+          <ul className="flex flex-col gap-1" aria-label="Key findings">
             {result.findings.map((finding) => (
               <li key={finding.id}>
                 <button
                   type="button"
-                  className="finding-row"
+                  className="finding-row result-finding"
                   onClick={() =>
-                    context.onInspect({ kind: "finding", id: finding.id })
+                    context.onInspect(
+                      { kind: "finding", id: finding.id },
+                      progress.caseId,
+                    )
                   }
                 >
                   <Chip tone={severityTone[finding.severity] ?? "neutral"}>
                     {finding.severity}
                   </Chip>
-                  <span className="min-w-0 flex-1 text-left text-sm">
+                  <span className="min-w-0 flex-1 truncate text-left text-xs">
                     {finding.title}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {finding.evidenceCount}{" "}
-                    {finding.evidenceCount === 1 ? "source" : "sources"}
                   </span>
                 </button>
               </li>
@@ -537,43 +515,37 @@ function ResultCard({
           </ul>
         </div>
       )}
-      {result.deliverables.length > 0 && (
-        <div className="mt-4">
-          <p className="text-xs font-medium text-muted-foreground">
-            Deliverables
-          </p>
-          <ul className="mt-2 flex flex-wrap gap-2">
-            {result.deliverables.map((deliverable) => (
-              <li key={deliverable.id}>
-                <Chip
-                  tone="success"
-                  icon={<FileText size={13} aria-hidden="true" />}
-                  onClick={() =>
-                    context.onInspect({
-                      kind: "deliverable",
-                      id: deliverable.id,
-                    })
-                  }
-                >
-                  {deliverable.title}
-                </Chip>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
-        <p className="max-w-md text-xs text-muted-foreground">
-          This is prepared work for professional review, not a final
-          determination.
-        </p>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {result.deliverables.map((deliverable) => (
+          <div key={deliverable.id} className="flex min-w-0 flex-wrap gap-2">
+            <Chip
+              tone="success"
+              icon={<FileText size={13} aria-hidden="true" />}
+              onClick={() =>
+                context.onInspect(
+                  { kind: "deliverable", id: deliverable.id },
+                  progress.caseId,
+                )
+              }
+            >
+              {deliverable.title}
+            </Chip>
+            <DeliverableExport
+              deliverable={deliverable}
+              context={result.exportContext}
+            />
+          </div>
+        ))}
         <Link
           href={`/cases/${encodeURIComponent(progress.caseId)}`}
-          className="button-link bg-primary text-primary-foreground shadow-soft"
+          className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
         >
           Open full details <ArrowRight size={14} aria-hidden="true" />
         </Link>
       </div>
-    </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Draft for professional review.
+      </p>
+    </section>
   );
 }

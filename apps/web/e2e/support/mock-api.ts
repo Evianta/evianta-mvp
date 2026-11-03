@@ -28,6 +28,7 @@ export interface MockOptions {
   seedStatus?: RunDto["status"];
   questions?: { id: string; text: string }[];
   failResumeOnce?: boolean;
+  deliverableContent?: unknown;
 }
 
 export interface MockState {
@@ -248,7 +249,7 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
                   id: "section-1",
                   title: "Summary",
                   kind: "text",
-                  content: "Summary",
+                  content: options.deliverableContent ?? "Summary",
                   reviewerContent: null,
                   reviewerId: null,
                   reviewedAt: null,

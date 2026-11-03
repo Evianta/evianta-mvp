@@ -21,6 +21,7 @@ import type { CaseWorkspace, WebApiClient } from "../api/client";
 import { sourcePreviewMimeType } from "../source-preview";
 import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { DeliverableExport } from "./DeliverableExport";
 
 function evidenceLocation(evidence: Evidence): string {
   if (evidence.kind !== "document") return evidence.sourceRef;
@@ -310,6 +311,15 @@ export function ReviewEvidenceWorkspace({
               <p className="mt-1 text-xs text-muted-foreground">
                 Version {deliverable.version} · {deliverable.format}
               </p>
+              <div className="mt-2">
+                <DeliverableExport
+                  deliverable={deliverable}
+                  context={workspace.case}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Exports include saved edits only.
+                </p>
+              </div>
             </div>
             {deliverable.sections.map((section) => (
               <article

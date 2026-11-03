@@ -465,30 +465,6 @@ button.chip:focus-visible,
   border-color: hsl(var(--danger) / 0.55);
 }
 
-.result-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  margin: 16px 0 0;
-}
-
-.result-metrics > div {
-  border-radius: 10px;
-  background: hsl(var(--background));
-  padding: 10px 12px;
-}
-
-.result-metrics dt {
-  color: hsl(var(--muted));
-  font-size: 12px;
-}
-
-.result-metrics dd {
-  margin: 4px 0 0;
-  font-size: 15px;
-  font-weight: 600;
-}
-
 .finding-row {
   display: flex;
   width: 100%;
@@ -503,6 +479,17 @@ button.chip:focus-visible,
 
 .finding-row:hover {
   border-color: hsl(var(--primary) / 0.5);
+}
+
+.result-finding {
+  gap: 8px;
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+}
+
+.result-finding:hover {
+  background: hsl(var(--background));
 }
 
 .chat-dock {
@@ -856,10 +843,6 @@ button.chip:focus-visible,
 }
 
 @media (max-width: 720px) {
-  .result-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .source-grid {
     grid-template-columns: minmax(0, 1fr);
   }

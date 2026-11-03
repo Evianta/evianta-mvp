@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   ChartNoAxesCombined,
   Files,
@@ -18,9 +18,10 @@ import { Button } from "./Button";
 import { CommandPalette } from "./CommandPalette";
 import { ThemeToggle } from "./ThemeToggle";
 import { useSession } from "../session/SessionProvider";
+import { newChatHref } from "../chat/flow-utils";
 
 const navigation = [
-  { href: "/", label: "Start", icon: MessageSquareText, match: "home" },
+  { href: "/", label: "New chat", icon: MessageSquareText, match: "home" },
   { href: "/cases", label: "Cases", icon: Files, match: "/cases" },
   {
     href: "/agents",
@@ -40,6 +41,7 @@ const navigation = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const {
     session,
     profile,
@@ -91,6 +93,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <Link
                   key={item.href}
                   href={item.href}
+                  onNavigate={
+                    item.match === "home"
+                      ? (event) => {
+                          event.preventDefault();
+                          router.push(newChatHref());
+                        }
+                      : undefined
+                  }
                   className="nav-link"
                   aria-current={active ? "page" : undefined}
                 >

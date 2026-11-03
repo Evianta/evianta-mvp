@@ -259,6 +259,37 @@ describe("Muse model configuration", () => {
     SPEND_PERIOD_SECONDS: "86400",
   };
 
+  it("defaults model requests to three minutes for document analyses", () => {
+    expect(getAiEnvironment(configuration).modelRequestTimeoutMs).toBe(180_000);
+    expect(
+      getAiEnvironment({
+        EVIANTA_AI_PROVIDER: "mock",
+        EVIANTA_USAGE_MODE: "test",
+      }).modelRequestTimeoutMs,
+    ).toBe(180_000);
+  });
+
+  it("accepts an explicit model request timeout", () => {
+    expect(
+      getAiEnvironment({
+        ...configuration,
+        MODEL_REQUEST_TIMEOUT_MS: "300000",
+      }).modelRequestTimeoutMs,
+    ).toBe(300_000);
+  });
+
+  it.each(["0", "-1", "1.5", "", "abc", "2147483648"])(
+    "rejects invalid model timeout %j",
+    (value) => {
+      expect(() =>
+        getAiEnvironment({
+          ...configuration,
+          MODEL_REQUEST_TIMEOUT_MS: value,
+        }),
+      ).toThrow("MODEL_REQUEST_TIMEOUT_MS");
+    },
+  );
+
   it("resolves legacy shorthand to published Standard-mode API IDs", () => {
     expect(getAiEnvironment(configuration)).toMatchObject({
       museBaseUrl: "https://api.meta.ai/v1",

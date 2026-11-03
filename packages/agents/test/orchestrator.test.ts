@@ -1,5 +1,5 @@
 import { StoreError } from "@evianta/store";
-import { inputTokenAllowance } from "@evianta/ai";
+import { AiError, inputTokenAllowance, ModelTimeoutError } from "@evianta/ai";
 import { MemorySaver } from "@langchain/langgraph";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -1450,6 +1450,61 @@ describe("orchestrator", () => {
       new Set([run.id, retry.id]),
     );
     expect(await caseUsage()).toEqual(summarizeUsage(entries));
+  });
+
+  it("retains the failed task's timeout in durable terminal state and events", async () => {
+    const timeout = new ModelTimeoutError(180_000);
+    const provider = new ScriptedProvider({
+      a: () => {
+        throw timeout;
+      },
+    });
+    const h = harness({
+      provider,
+      reviewer: false,
+      plan: planOf([{ key: "a" }, { key: "b", dependsOn: ["a"] }]),
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("failed");
+    const error = {
+      code: "model-timeout",
+      message: `The analyst task failed: ${timeout.message}`,
+    };
+    expect(result?.run?.terminalEvent?.error).toEqual(error);
+    expect((await eventsOf(run.id)).at(-1)?.payload).toEqual({
+      type: "run-failed",
+      error,
+    });
+    const tasks = await tasksOf(run.id);
+    expect(tasks.a.lastError).toEqual({
+      code: "model-timeout",
+      message: timeout.message,
+    });
+    expect(tasks.b.lastError?.code).toBe("blocked-by-dependency");
+    expect(provider.calls).toEqual(["a"]);
+    expect(result?.run?.usage.costStatus).toBe("unknown");
+  });
+
+  it("keeps terminal task errors within the public error message limit", async () => {
+    const h = harness({
+      provider: new ScriptedProvider({
+        a: () => {
+          throw new AiError("x".repeat(500), "provider-request-failed");
+        },
+      }),
+      reviewer: false,
+      plan: planOf([{ key: "a" }]),
+    });
+    const { run, result } = await startRunAsync(h);
+    expect(result?.run?.status).toBe("failed");
+    const terminal = (await eventsOf(run.id)).at(-1)?.payload;
+    expect(terminal).toMatchObject({
+      type: "run-failed",
+      error: {
+        code: "provider-request-failed",
+        message: `The analyst task failed: ${"x".repeat(500)}`.slice(0, 500),
+      },
+    });
   });
 
   it("refuses to retry runs without failed work or with an active run", async () => {

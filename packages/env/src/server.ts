@@ -87,6 +87,7 @@ export function getMongoConfig(
 
 export interface AiEnvironment {
   provider: "muse" | "mock";
+  modelRequestTimeoutMs: number;
   modelApiKey?: string;
   museBaseUrl?: string;
   museSparkModel?: string;
@@ -322,12 +323,21 @@ export function getAiEnvironment(
   }
 
   const usage = getUsageEnvironment(env);
-  if (provider === "mock") return { provider, usage };
+  const modelRequestTimeoutMs = getPositiveInteger(
+    "MODEL_REQUEST_TIMEOUT_MS",
+    env,
+    180_000,
+  );
+  if (modelRequestTimeoutMs > 2_147_483_647) {
+    throw new Error("MODEL_REQUEST_TIMEOUT_MS must not exceed 2147483647");
+  }
+  if (provider === "mock") return { provider, usage, modelRequestTimeoutMs };
 
   const sparkModel = getRequiredEnv("MUSE_SPARK_MODEL", env).trim();
   const wonderModel = getRequiredEnv("MUSE_WONDER_MODEL", env).trim();
   return {
     provider,
+    modelRequestTimeoutMs,
     modelApiKey: getRequiredEnv("MODEL_API_KEY", env),
     museBaseUrl: env.MUSE_BASE_URL ?? "https://api.meta.ai/v1",
     museSparkModel: sparkModel === "spark" ? "muse-spark-1.3" : sparkModel,

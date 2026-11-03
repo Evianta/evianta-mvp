@@ -15,6 +15,7 @@ import { AgentInspector } from "./AgentsClient";
 import { StatusBadge } from "./Badges";
 import { Chip } from "./Chip";
 import { InspectorPanel } from "./InspectorPanel";
+import { DeliverableExport } from "./DeliverableExport";
 
 const documentStateLabels: Record<string, string> = {
   uploaded: "Uploaded",
@@ -213,6 +214,10 @@ export function ChatInspector({
         (deliverable ? (
           <div className="space-y-5 text-sm">
             <p className="leading-relaxed">{deliverable.summary}</p>
+            <DeliverableExport
+              deliverable={deliverable}
+              context={workspace?.case}
+            />
             <section>
               <h3 className="inspector-heading">Sections</h3>
               <ul className="mt-2 space-y-2">

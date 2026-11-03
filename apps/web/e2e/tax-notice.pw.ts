@@ -1,4 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
+import { readFile } from "node:fs/promises";
+import { readPdf } from "../test/support/pdf";
 import { syntheticWorkflowFixtures, type Finding } from "@evianta/core";
 import { expect, test, type Page } from "@playwright/test";
 import type { CaseWorkspace } from "../src/api/client";
@@ -247,4 +249,31 @@ test("shows empty and missing-evidence states without inventing results", async 
   await expect(
     page.getByText("Evidence unavailable: guidance-evidence"),
   ).toBeVisible();
+});
+
+test("exports the actual saved notice reply rather than the result summary", async ({
+  page,
+}) => {
+  const workspace = workspaceOf();
+  workspace.deliverables[0]!.sections[0]!.reviewerContent =
+    "To the assessing officer: please verify the enclosed credit schedule.";
+  await openWorkspace(page, workspace);
+  const review = page.getByRole("region", {
+    name: "Review and evidence workspace",
+  });
+  await review.getByLabel(/Export .*for Tax notice response pack/).click();
+  await expect(
+    review.getByRole("button", { name: /Download JSON/ }),
+  ).toHaveCount(0);
+  await expect(
+    review.getByRole("button", { name: /Download Excel/ }),
+  ).toHaveCount(0);
+  const download = page.waitForEvent("download");
+  await review.getByRole("button", { name: "Download PDF (.pdf)" }).click();
+  const draft = await download;
+  expect(draft.suggestedFilename()).toBe("tax-notice-response-pack-v1.pdf");
+  const pdf = await readPdf(await readFile((await draft.path())!));
+  expect(pdf.text).toContain(
+    "To the assessing officer: please verify the enclosed credit schedule.",
+  );
 });
