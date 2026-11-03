@@ -1,0 +1,233 @@
+name: Deploy demo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      EVIANTA_DOMAIN: ${{ secrets.EVIANTA_DOMAIN }}
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Validate deployment settings
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          REPO_VARS: ${{ toJSON(vars) }}
+          JWT_SIGNING_KEY: ${{ secrets.JWT_SIGNING_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION }}
+          S3_BUCKET: ${{ vars.S3_BUCKET || secrets.S3_BUCKET }}
+          MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { echo "Set DEPLOY_HOST secret"; exit 1; }
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "Set DEPLOY_USER variable"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/opt/[a-zA-Z0-9_-]+$ ]] || { echo "DEPLOY_PATH must be /opt/<directory>"; exit 1; }
+          [[ "$EVIANTA_DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && "$EVIANTA_DOMAIN" == *.* ]] || { echo "Set EVIANTA_DOMAIN secret to a lowercase hostname"; exit 1; }
+          test -n "$SSH_PRIVATE_KEY" || { echo "Set DEPLOY_SSH_KEY secret"; exit 1; }
+          test -n "$SSH_KNOWN_HOSTS" || { echo "Set DEPLOY_KNOWN_HOSTS secret"; exit 1; }
+          umask 077
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          const vars = JSON.parse(process.env.REPO_VARS);
+          const names = [
+            'NODE_ENV', 'MONGODB_URI', 'MONGODB_DB', 'JWT_ISSUER', 'JWT_AUDIENCE',
+            'JWT_TTL_SECONDS', 'API_PORT', 'TRUST_PROXY_HOPS', 'DOCUMENT_STORE',
+            'AUTH_RATE_LIMIT_PER_MINUTE', 'API_RATE_LIMIT_PER_MINUTE', 'SESSION_RECHECK_SECONDS',
+            'S3_DOWNLOAD_TTL_SECONDS', 'UPLOAD_MAX_BYTES', 'UPLOAD_MAX_FILES', 'DOCUMENT_MAX_PAGES',
+            'EVIANTA_AI_PROVIDER', 'EVIANTA_USAGE_MODE',
+          ];
+          if (!['mock', 'muse'].includes(vars.EVIANTA_AI_PROVIDER)) {
+            throw new Error('EVIANTA_AI_PROVIDER must be mock or muse');
+          }
+          if (vars.EVIANTA_AI_PROVIDER === 'muse') {
+            names.push('MODEL_MAX_INPUT_TOKENS', 'MODEL_MAX_OUTPUT_TOKENS',
+              'USER_MAX_CONCURRENT_RUNS', 'GLOBAL_MAX_CONCURRENT_RUNS',
+              'USER_SPEND_LIMIT_USD', 'GLOBAL_SPEND_LIMIT_USD', 'SPEND_PERIOD_SECONDS');
+          }
+          const env = Object.fromEntries(names.map(name => {
+            if (!vars[name]?.trim()) throw new Error(`Set ${name} variable`);
+            return [name, vars[name]];
+          }));
+          for (const [name, value] of Object.entries({
+            NODE_ENV: 'production', API_PORT: '3001', TRUST_PROXY_HOPS: '1', DOCUMENT_STORE: 's3',
+          })) {
+            if (env[name] !== value) throw new Error(`${name} must be ${value} for this deployment`);
+          }
+          const mode = env.EVIANTA_AI_PROVIDER === 'mock' ? 'test' : 'enforced';
+          if (env.EVIANTA_USAGE_MODE !== mode) {
+            throw new Error(`EVIANTA_USAGE_MODE must be ${mode} for the selected provider`);
+          }
+          for (const name of ['JWT_SIGNING_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'S3_BUCKET']) {
+            if (!process.env[name]?.trim()) throw new Error(`Set ${name} ${['AWS_REGION', 'S3_BUCKET'].includes(name) ? 'variable (or existing secret)' : 'secret'}`);
+            env[name] = process.env[name];
+          }
+          if (env.EVIANTA_AI_PROVIDER === 'muse') {
+            if (!process.env.MODEL_API_KEY?.trim()) throw new Error('Set MODEL_API_KEY secret');
+            env.MODEL_API_KEY = process.env.MODEL_API_KEY;
+            for (const name of ['MUSE_BASE_URL', 'MUSE_SPARK_MODEL', 'MUSE_WONDER_MODEL']) {
+              if (!vars[name]?.trim()) throw new Error(`Set ${name} variable`);
+              env[name] = vars[name];
+            }
+          }
+          env.WEB_ORIGIN = `https://${process.env.EVIANTA_DOMAIN}`;
+          env.NEXT_PUBLIC_API_BASE_URL = `${env.WEB_ORIGIN}/api`;
+          env.NEXT_TELEMETRY_DISABLED = '1';
+          const lines = Object.entries(env).map(([name, value]) => {
+            if (/['\r\n\0]/.test(value)) throw new Error(`${name} cannot contain single quotes, newlines, or null bytes`);
+            return `${name}='${value}'`;
+          });
+          writeFileSync(`${process.env.RUNNER_TEMP}/app.env`, `${lines.join('\n')}\n`, { mode: 0o600 });
+          NODE
+      - run: pnpm install --frozen-lockfile
+      - name: Build production apps
+        shell: bash
+        env:
+          NODE_ENV: production
+          NEXT_PUBLIC_API_BASE_URL: https://${{ secrets.EVIANTA_DOMAIN }}/api
+        run: pnpm build
+      - name: Validate application configuration before sync
+        shell: bash
+        run: |
+          node --env-file="$RUNNER_TEMP/app.env" --input-type=module <<'NODE'
+          import {
+            getAiEnvironment, getApiEnvironment, getDocumentStoreConfig,
+            getMongoConfig, getUploadEnvironment, getUsageEnvironment,
+          } from './packages/env/dist/server.js';
+          getAiEnvironment();
+          getApiEnvironment();
+          getDocumentStoreConfig();
+          getMongoConfig();
+          getUploadEnvironment();
+          getUsageEnvironment();
+          NODE
+      - name: Sync build and start PM2
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          trap 'rm -f "$RUNNER_TEMP/deploy-key" "$RUNNER_TEMP/known_hosts" "$RUNNER_TEMP/app.env"' EXIT
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/deploy-key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
+          ssh_options=(-i "$RUNNER_TEMP/deploy-key" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -o ConnectTimeout=15)
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          root="$DEPLOY_PATH/app"
+          command -v rsync
+          ssh "${ssh_options[@]}" "$target" "bash -s -- '$root'" <<'REMOTE'
+          set -euo pipefail
+          root="$1"
+          test ! -L "$root"
+          command -v rsync
+          command -v pm2
+          command -v pnpm
+          command -v curl
+          test "$(node --version)" = "v24.3.0"
+          test "$(pnpm --version)" = "10.18.3"
+          umask 077
+          mkdir -p "$root"
+          for name in evianta-api evianta-worker evianta-web; do
+            if pm2 describe "$name" > /dev/null; then pm2 delete "$name"; fi
+          done
+          pm2 save --force
+          REMOTE
+          rsync -az --delete \
+            --exclude='.git' --exclude='node_modules' --exclude='.env*' \
+            --exclude='.next/cache' --exclude='.next-e2e' --exclude='.data' \
+            --exclude='*.log' --exclude='coverage' --exclude='test-results' \
+            --exclude='playwright-report' \
+            -e "ssh ${ssh_options[*]}" ./ "$target:$root/"
+          scp "${ssh_options[@]}" "$RUNNER_TEMP/app.env" "$target:$root/.env"
+          ssh "${ssh_options[@]}" "$target" \
+            "bash -s -- '$root'" <<'REMOTE'
+          set -euo pipefail
+          umask 077
+          root="$1"
+          chmod 600 "$root/.env"
+          cd "$root"
+          test "$(node --version)" = "v$(cat .node-version)"
+          test "$(pnpm --version)" = "10.18.3"
+          CI=true pnpm install --prod --frozen-lockfile
+          node --env-file=.env --input-type=module <<'NODE'
+          import {
+            getAiEnvironment, getApiEnvironment, getDocumentStoreConfig,
+            getMongoConfig, getUploadEnvironment, getUsageEnvironment,
+          } from './packages/env/dist/server.js';
+          getAiEnvironment();
+          getApiEnvironment();
+          getDocumentStoreConfig();
+          getMongoConfig();
+          getUploadEnvironment();
+          getUsageEnvironment();
+          NODE
+          options=(--interpreter node --node-args "--env-file=$root/.env"
+            --kill-timeout 30000 --restart-delay 3000 --max-restarts 5 --time)
+          NODE_ENV=production pm2 start "$root/apps/api/dist/server.js" \
+            --name evianta-api --cwd "$root/apps/api" "${options[@]}"
+          : > "$root/worker-out.log"
+          NODE_ENV=production pm2 start "$root/apps/api/dist/worker.js" \
+            --name evianta-worker --cwd "$root/apps/api" "${options[@]}" \
+            --output "$root/worker-out.log" --error "$root/worker-error.log"
+          NODE_ENV=production pm2 start "$root/apps/web/node_modules/next/dist/bin/next" \
+            --name evianta-web --cwd "$root/apps/web" "${options[@]}" \
+            -- start --hostname 127.0.0.1 --port 3000
+          ready=false
+          for attempt in {1..30}; do
+            if curl --fail --silent --max-time 5 http://127.0.0.1:3001/healthz > /dev/null \
+              && curl --fail --silent --max-time 5 http://127.0.0.1:3000/ > /dev/null \
+              && grep -q 'Evianta worker started' "$root/worker-out.log"; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$ready" != true ]]; then
+            echo "Web, API, or worker did not become ready." >&2
+            pm2 logs --lines 30 --nostream
+            exit 1
+          fi
+          sleep 10
+          pm2 jlist | node --input-type=module -e '
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            const processes = JSON.parse(input);
+            for (const name of ["evianta-api", "evianta-worker", "evianta-web"]) {
+              if (!processes.some(p => p.name === name && p.pm2_env.status === "online")) {
+                throw new Error(`${name} is not online`);
+              }
+            }
+          '
+          pm2 save
+          echo "Deployment complete"
+          REMOTE
+      - name: Remove temporary credentials
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/deploy-key" "$RUNNER_TEMP/known_hosts" "$RUNNER_TEMP/app.env"
