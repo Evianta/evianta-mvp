@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -217,8 +218,11 @@ function ChatSession({
   const attachRequestRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const filePickerRef = useRef<HTMLInputElement | null>(null);
-  const endRef = useRef<HTMLDivElement | null>(null);
+  const threadRef = useRef<HTMLDivElement | null>(null);
+  const dockRef = useRef<HTMLDivElement | null>(null);
   const stickRef = useRef(true);
+  const scrollTopRef = useRef(0);
+  const lastMessageRef = useRef<string | null>(null);
   const activeRunRef = useRef<{ caseId: string; runId: string } | null>(null);
 
   apiRef.current = guardedApi;
@@ -319,29 +323,61 @@ function ChatSession({
     };
   }, []);
 
-  // Keep the newest message in view unless the reader scrolled away.
-  useEffect(() => {
-    const onScroll = () => {
-      const nearBottom =
-        window.innerHeight + window.scrollY >=
-        document.documentElement.scrollHeight - 220;
-      stickRef.current = nearBottom;
-      setAway(!nearBottom);
-    };
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+  const followLatest = useCallback(() => {
+    window.scrollTo({
+      top: document.documentElement.scrollHeight,
+      behavior: "instant",
+    });
+    scrollTopRef.current = window.scrollY;
   }, []);
 
-  useEffect(() => {
-    if (!messages.length) return;
+  useLayoutEffect(() => {
     const last = messages.at(-1);
-    if (stickRef.current || last?.from === "user") {
-      endRef.current?.scrollIntoView({
-        block: "end",
-        behavior: reducedMotion ? "auto" : "smooth",
-      });
+    if (!last) return;
+    if (last.from === "user" && last.id !== lastMessageRef.current) {
+      stickRef.current = true;
+      setAway(false);
     }
-  }, [messages, progressMap, resultMap, reducedMotion]);
+    lastMessageRef.current = last.id;
+    if (stickRef.current) followLatest();
+  }, [messages, progressMap, resultMap, followLatest]);
+
+  const hasMessages = messages.length > 0;
+  useEffect(() => {
+    const thread = threadRef.current;
+    const dock = dockRef.current;
+    if (!thread || !dock) return;
+    // Text reveals and composer resizing can change layout without a new message.
+    const observer = new ResizeObserver(() => {
+      if (stickRef.current) followLatest();
+    });
+    observer.observe(thread);
+    observer.observe(dock);
+    const onResize = () => {
+      if (stickRef.current) followLatest();
+    };
+    const onScroll = () => {
+      const nearBottom =
+        document.documentElement.scrollHeight -
+          window.innerHeight -
+          window.scrollY <
+        48;
+      if (nearBottom) {
+        stickRef.current = true;
+      } else if (window.scrollY < scrollTopRef.current) {
+        stickRef.current = false;
+      }
+      scrollTopRef.current = window.scrollY;
+      setAway(!stickRef.current);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onResize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [hasMessages, followLatest]);
 
   // ---------------------------------------------------------------- flow
 
@@ -1458,6 +1494,7 @@ function ChatSession({
       ) : (
         <div
           className="chat-thread"
+          ref={threadRef}
           role="log"
           aria-label="Conversation with Evianta"
           aria-live="polite"
@@ -1466,21 +1503,22 @@ function ChatSession({
           {messages.map((message: ChatMessage) => (
             <MessageView key={message.id} message={message} context={context} />
           ))}
-          <div ref={endRef} className="chat-end" />
         </div>
       )}
 
-      <div className="chat-dock">
+      <div className="chat-dock" ref={dockRef}>
         {away && !empty && (
           <button
             type="button"
             className="jump-latest"
-            onClick={() =>
-              endRef.current?.scrollIntoView({
-                block: "end",
-                behavior: reducedMotion ? "auto" : "smooth",
-              })
-            }
+            onClick={() => {
+              stickRef.current = true;
+              setAway(false);
+              window.scrollTo({
+                top: document.documentElement.scrollHeight,
+                behavior: reducedMotion ? "instant" : "smooth",
+              });
+            }}
           >
             <ArrowDown size={14} aria-hidden="true" /> Jump to latest
           </button>
@@ -1533,7 +1571,7 @@ function ChatSession({
         )}
         <p className="chat-footnote">
           Evianta prepares work for professional review. It does not file,
-          decide or give legal advice. Models may be used under your limits.
+          decide or give legal advice.
         </p>
       </div>
 

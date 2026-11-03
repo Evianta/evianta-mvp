@@ -281,8 +281,27 @@ button.chip:focus-visible,
   font-size: 13px;
 }
 
-.chat-end {
-  scroll-margin-bottom: 190px;
+.app-frame:has(.chat-thread) .app-main {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-frame:has(.chat-thread) .topbar,
+.app-frame:has(.chat-thread) .sidebar {
+  flex-shrink: 0;
+}
+
+.page-content:has(.chat-thread) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  padding-bottom: 0;
+}
+
+.chat:has(.chat-thread) {
+  flex: 1;
+  min-height: 0;
+  overflow-anchor: none;
 }
 
 .chat-thread {
@@ -293,6 +312,17 @@ button.chip:focus-visible,
   padding: 4px 0 28px;
 }
 
+@media (max-width: 720px) {
+  .app-frame:has(.chat-thread) {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .app-frame:has(.chat-thread) .app-main {
+    flex: 1;
+  }
+}
+
 .msg {
   display: flex;
   gap: 12px;
@@ -300,6 +330,7 @@ button.chip:focus-visible,
 
 .msg-evianta {
   align-items: flex-start;
+  padding-inline-end: clamp(16px, 6%, 48px);
   animation: msg-in 220ms ease-out;
 }
 
@@ -503,6 +534,11 @@ button.chip:focus-visible,
     hsl(var(--background)) 78%,
     hsl(var(--background) / 0)
   );
+}
+
+.chat-thread + .chat-dock {
+  flex-shrink: 0;
+  margin-top: 0;
 }
 
 .jump-latest {
