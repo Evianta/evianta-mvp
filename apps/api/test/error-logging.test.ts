@@ -151,6 +151,39 @@ describe("startup error logging", () => {
     expect(JSON.stringify(details)).not.toContain("test-aws-secret-key");
   });
 
+  it("preserves full details for repeated aggregate members and shared causes", () => {
+    vi.stubEnv("MODEL_API_KEY", "local-model-secret");
+    const shared = Object.assign(
+      new Error("Shared local-model-secret", {
+        cause: new Error("Underlying local-model-secret"),
+      }),
+      { code: "EACCES" },
+    );
+    const error = new AggregateError(
+      [shared, shared, new Error("Wrapper", { cause: shared })],
+      "Multiple failures",
+      { cause: shared },
+    );
+
+    const details = getErrorLogDetails(error);
+    const expected = getErrorLogDetails(shared);
+
+    expect(expected).toMatchObject({
+      code: "EACCES",
+      message: "Shared [REDACTED]",
+      stack: expect.any(String),
+      cause: { message: "Underlying [REDACTED]" },
+    });
+    expect(details.cause).toEqual(expected);
+    expect(details.errors).toEqual([
+      expected,
+      expected,
+      expect.objectContaining({ cause: expected }),
+    ]);
+    expect(JSON.stringify(details)).not.toContain("local-model-secret");
+    expect(JSON.stringify(details)).not.toContain("[Circular cause]");
+  });
+
   it("redacts names in circular causes and aggregate members", () => {
     vi.stubEnv("MODEL_API_KEY", "local-model-secret");
     const error = new AggregateError([], "Circular failure");

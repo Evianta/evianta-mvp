@@ -26,7 +26,7 @@ function redact(value: string): string {
 }
 
 export function getErrorLogDetails(error: unknown): ErrorLogDetails {
-  const seen = new Set<object>();
+  const ancestors = new Set<object>();
   function describe(
     value: unknown,
     depth: number,
@@ -34,9 +34,9 @@ export function getErrorLogDetails(error: unknown): ErrorLogDetails {
     if (!(value instanceof Error)) {
       return { message: redact(String(value)) };
     }
-    if (seen.has(value))
+    if (ancestors.has(value))
       return { name: redact(value.name), message: "[Circular cause]" };
-    seen.add(value);
+    ancestors.add(value);
 
     const details: ErrorLogDetails = {
       name: redact(value.name),
@@ -58,6 +58,7 @@ export function getErrorLogDetails(error: unknown): ErrorLogDetails {
         describe(error, depth + 1),
       );
     }
+    ancestors.delete(value);
     return details;
   }
 
