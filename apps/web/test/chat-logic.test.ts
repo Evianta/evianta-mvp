@@ -45,6 +45,46 @@ function event(payload: RunEvent["payload"]): RunEvent {
 const nameOf = (role: string) => `Agent ${role}`;
 
 describe("run narration", () => {
+  it("keeps actionable failure reasons after later progress lines", () => {
+    let state = createProgress("case-1", run);
+    state = applyRunEvent(
+      state,
+      event({
+        type: "task-failed",
+        taskId: "prepare",
+        role: "drafter",
+        error: { code: "model-timeout", message: "Drafting timed out." },
+      }),
+      nameOf,
+    );
+    for (let i = 0; i < 10; i += 1)
+      state = applyRunEvent(
+        state,
+        event({
+          type: "task-completed",
+          taskId: `other-${i}`,
+          role: "analyst",
+          usage,
+        }),
+        nameOf,
+      );
+    expect(state.failures).toEqual([
+      { taskId: "prepare", message: "Agent drafter: Drafting timed out." },
+    ]);
+    expect(state.lines).toHaveLength(8);
+    state = applyRunEvent(
+      state,
+      event({
+        type: "task-completed",
+        taskId: "prepare",
+        role: "drafter",
+        usage,
+      }),
+      nameOf,
+    );
+    expect(state.failures).toHaveLength(0);
+  });
+
   it.each([
     ["completed", "Work finished"],
     ["partially-completed", "Work partly finished"],
@@ -185,6 +225,7 @@ describe("result summary", () => {
     deliverables: [
       {
         id: "dl1",
+        runId: run.id,
         title: "Response pack",
         format: "document",
         summary: "Pack ready, 1 item needs attention.",

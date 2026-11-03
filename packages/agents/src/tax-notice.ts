@@ -17,6 +17,7 @@ import {
   type SpecialistAgent,
 } from "./roles.js";
 import type { ReferencePlan } from "./planning.js";
+import { workProductInstructions } from "./work-products.js";
 
 export const TAX_NOTICE_ANALYST_ROLE = "tax-notice-analyst";
 export const TAX_RECONCILIATION_ROLE = "tax-notice-reconciliation";
@@ -550,6 +551,7 @@ export function createTaxNoticeSpecialists(): SpecialistAgent[] {
         "Use only supplied findings and source evidence; cite each material assertion.",
         "Clearly label assumptions, unresolved questions, and legal points requiring current-law verification.",
         "Do not make a legal determination, approve the response, or submit a filing.",
+        workProductInstructions,
       ].join("\n"),
     ),
   ];

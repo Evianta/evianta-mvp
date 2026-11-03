@@ -7,10 +7,20 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./deliverable-export": {
+      "types": "./dist/deliverable-export.d.ts",
+      "import": "./dist/deliverable-export.js"
     }
   },
   "dependencies": {
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "pdfmake": "0.3.13",
+    "fflate": "0.8.3",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "@types/pdfmake": "0.3.3"
   },
   "scripts": {
     "watch": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",

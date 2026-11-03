@@ -124,6 +124,10 @@ export interface WebApiClient {
   getCase(caseId: string): Promise<Case>;
   getCaseWorkspace(caseId: string): Promise<CaseWorkspace>;
   downloadDocument(caseId: string, documentId: string): Promise<Blob>;
+  downloadDeliverable?(
+    deliverable: Deliverable,
+    format: "pdf" | "xlsx" | "json",
+  ): Promise<Blob>;
   updateDeliverableSection(
     caseId: string,
     deliverableId: string,
@@ -239,6 +243,37 @@ export class FetchWebApiClient implements WebApiClient {
     }
     if (!response.ok) throw await this.errorFromResponse(response);
     return response.blob();
+  }
+
+  async downloadDeliverable(
+    deliverable: Deliverable,
+    format: "pdf" | "xlsx" | "json",
+  ): Promise<Blob> {
+    const token = this.options.getToken();
+    if (!token) throw new ApiError(401, "Sign in to continue.");
+    const params = new URLSearchParams({
+      format,
+      version: String(deliverable.version),
+    });
+    const response = await this.fetcher(
+      `${this.baseUrl}/cases/${encodeURIComponent(deliverable.caseId)}/deliverables/${encodeURIComponent(deliverable.id)}/export?${params}`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+        credentials: "omit",
+      },
+    );
+    if (this.options.getToken() !== token)
+      throw new ApiError(401, "The signed-in identity changed.");
+    if (response.status === 401) {
+      this.clearPrivateState();
+      this.options.onUnauthorized();
+    }
+    if (!response.ok) throw await this.errorFromResponse(response);
+    const blob = await response.blob();
+    if (this.options.getToken() !== token)
+      throw new ApiError(401, "The signed-in identity changed.");
+    return blob;
   }
 
   async updateDeliverableSection(

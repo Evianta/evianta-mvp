@@ -5,6 +5,7 @@ import {
   ExtractedDocumentSchema,
   FindingSchema,
   UseCaseSchema,
+  WorkProductSchema,
 } from "@evianta/core";
 import { z } from "zod";
 
@@ -63,6 +64,7 @@ export const SpecialistOutputSchema = z.object({
   findings: z.array(FindingDraftSchema),
   report: DataAnalysisReportSchema.optional(),
   dashboard: DataAnalysisDashboardSchema.optional(),
+  workProducts: z.array(WorkProductSchema).optional(),
   inputRequired: z
     .object({
       questions: z.array(
@@ -84,6 +86,31 @@ export const SpecialistModelOutputSchema = z.object({
   inputRequired: SpecialistOutputSchema.shape.inputRequired,
 });
 export type SpecialistModelOutput = z.infer<typeof SpecialistModelOutputSchema>;
+
+const ModelScheduleSchema = WorkProductSchema.shape.schedules.element.extend({
+  columnFormats: WorkProductSchema.shape.schedules.element.shape.columnFormats
+    .unwrap()
+    .nullable(),
+  currencyCode: WorkProductSchema.shape.schedules.element.shape.currencyCode
+    .unwrap()
+    .nullable(),
+});
+
+export const PreparationModelOutputSchema = SpecialistModelOutputSchema.extend({
+  workProducts: z.array(
+    WorkProductSchema.extend({
+      schedules: z.array(ModelScheduleSchema),
+    }),
+  ),
+}).superRefine((output, context) => {
+  if (!output.workProducts.length && !output.inputRequired?.questions.length)
+    context.addIssue({
+      code: "custom",
+      message:
+        "Draft preparation must return a work product or a blocking source request.",
+      path: ["workProducts"],
+    });
+});
 
 export const PriorFindingSchema = z.object({
   taskId: z.string(),

@@ -22,6 +22,8 @@ import { sourcePreviewMimeType } from "../source-preview";
 import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { DeliverableExport } from "./DeliverableExport";
+import { WorkProductPreview } from "./WorkProductPreview";
+import { GeneratedFilesDownload } from "./GeneratedFilesDownload";
 
 function evidenceLocation(evidence: Evidence): string {
   if (evidence.kind !== "document") return evidence.sourceRef;
@@ -102,11 +104,24 @@ export function ReviewEvidenceWorkspace({
   const [sourceText, setSourceText] = useState<string | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
   const [sourceError, setSourceError] = useState<string | null>(null);
-  const deliverable = [...workspace.deliverables].sort(
-    (left, right) =>
-      right.createdAt.localeCompare(left.createdAt) ||
-      right.version - left.version,
+  const [selectedDeliverableId, setSelectedDeliverableId] = useState<
+    string | null
+  >(null);
+  const latest = [...workspace.deliverables].sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt),
   )[0];
+  const runDeliverables = workspace.deliverables.filter(
+    (item) => item.runId === latest?.runId,
+  );
+  const products = runDeliverables.filter((item) => item.workProduct);
+  const availableDeliverables = products.length ? products : runDeliverables;
+  const deliverable =
+    availableDeliverables.find((item) => item.id === selectedDeliverableId) ??
+    [...availableDeliverables].sort(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) ||
+        right.version - left.version,
+    )[0];
   const selectedEvidence = workspace.evidence.find(
     (item) => item.id === selectedEvidenceId,
   );
@@ -306,6 +321,43 @@ export function ReviewEvidenceWorkspace({
         </div>
         {deliverable ? (
           <div className="mt-5 space-y-4">
+            {availableDeliverables.length > 1 && (
+              <label className="block text-xs">
+                Document to review
+                <select
+                  className="mt-1 w-full rounded border border-border bg-surface p-2"
+                  value={deliverable.id}
+                  disabled={hasUnsavedChanges || pending}
+                  onChange={(event) =>
+                    setSelectedDeliverableId(event.target.value)
+                  }
+                >
+                  {availableDeliverables.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <WorkProductPreview
+              deliverable={deliverable}
+              workspace={workspace}
+              onSelectDocument={(id) => {
+                const evidence = workspace.evidence.find(
+                  (item) => item.kind === "document" && item.documentId === id,
+                );
+                if (evidence) onSelectEvidence(evidence.id);
+                else
+                  setError(
+                    "This source has no available evidence preview. Open it from the case documents.",
+                  );
+              }}
+            />
+            <GeneratedFilesDownload
+              deliverables={products}
+              context={workspace.case}
+            />
             <div className="rounded-lg border border-border bg-background p-3">
               <p className="text-xs font-semibold">{deliverable.title}</p>
               <p className="mt-1 text-xs text-muted-foreground">

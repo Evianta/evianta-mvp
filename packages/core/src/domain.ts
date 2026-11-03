@@ -804,6 +804,111 @@ export const FindingSchema = z.object({
 });
 export type Finding = z.infer<typeof FindingSchema>;
 
+export const WorkProductSchema = z.object({
+  key: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
+  type: z.enum([
+    "payment-demand",
+    "dispute-resolution",
+    "evidence-request",
+    "tax-response",
+    "claim-statement",
+    "application-particulars",
+    "evidence-index",
+    "reconciliation",
+  ]),
+  title: z.string().min(1),
+  claimant: z.string().min(1),
+  counterparty: z.string().min(1),
+  body: z
+    .string()
+    .min(1)
+    .max(50_000)
+    .refine((body) => !!body.trim(), "The drafted body cannot be blank"),
+  sources: z.array(
+    z.object({
+      documentId: IdSchema,
+      reference: z.string().min(1),
+    }),
+  ),
+  missingOriginals: z.array(z.string().min(1)),
+  reviewBlockers: z.array(z.string().min(1)),
+  schedules: z
+    .array(
+      z.object({
+        title: z.string().min(1),
+        columns: z.array(z.string().min(1)).min(1),
+        columnFormats: z
+          .array(z.enum(["text", "number", "currency", "date"]))
+          .optional(),
+        currencyCode: z
+          .string()
+          .regex(/^[A-Z]{3}$/)
+          .optional(),
+        rows: z.array(
+          z.array(z.union([z.string(), z.number().finite(), z.null()])),
+        ),
+      }),
+    )
+    .superRefine((schedules, ctx) => {
+      for (const [index, schedule] of schedules.entries()) {
+        if (schedule.rows.some((row) => row.length !== schedule.columns.length))
+          ctx.addIssue({
+            code: "custom",
+            message: "Schedule rows must match columns",
+            path: [index, "rows"],
+          });
+        if (
+          schedule.columnFormats &&
+          schedule.columnFormats.length !== schedule.columns.length
+        )
+          ctx.addIssue({
+            code: "custom",
+            message: "Schedule formats must match columns",
+            path: [index, "columnFormats"],
+          });
+        if (
+          schedule.columnFormats?.includes("currency") &&
+          !schedule.currencyCode
+        )
+          ctx.addIssue({
+            code: "custom",
+            message: "Currency columns require a currency code",
+            path: [index, "currencyCode"],
+          });
+        for (const [column, format] of (
+          schedule.columnFormats ?? []
+        ).entries()) {
+          for (const [row, values] of schedule.rows.entries()) {
+            const value = values[column];
+            if (value === null) continue;
+            if (
+              (format === "number" || format === "currency") &&
+              typeof value !== "number"
+            )
+              ctx.addIssue({
+                code: "custom",
+                message: "Numeric columns require numeric cells",
+                path: [index, "rows", row, column],
+              });
+            if (
+              format === "date" &&
+              (typeof value !== "string" ||
+                !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+                !Number.isFinite(Date.parse(value)) ||
+                new Date(value).toISOString().slice(0, 10) !== value)
+            )
+              ctx.addIssue({
+                code: "custom",
+                message: "Date columns require valid ISO dates",
+                path: [index, "rows", row, column],
+              });
+          }
+        }
+      }
+    }),
+});
+export type WorkProduct = z.infer<typeof WorkProductSchema>;
+
 export const DeliverableSectionSchema = z.object({
   id: IdSchema,
   title: z.string().min(1),
@@ -834,11 +939,37 @@ export const DeliverableSchema = z.object({
   format: z.enum(["document", "report", "spreadsheet", "dashboard"]),
   title: z.string().min(1),
   summary: z.string(),
+  workProduct: WorkProductSchema.optional(),
+  generatedFiles: z
+    .array(
+      z.object({
+        format: z.enum(["pdf", "xlsx", "json"]),
+        version: z.number().int().positive(),
+        objectKey: IdSchema,
+        filename: z.string().min(1),
+        mimeType: z.string().min(1),
+        sizeBytes: NonNegativeIntegerSchema,
+      }),
+    )
+    .optional(),
   sections: z.array(DeliverableSectionSchema).default([]),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });
 export type Deliverable = z.infer<typeof DeliverableSchema>;
+
+export function savedWorkProduct(deliverable: Deliverable): WorkProduct | null {
+  if (!deliverable.workProduct) return null;
+  const section = deliverable.sections[0];
+  const body =
+    section?.reviewerContent ??
+    section?.content ??
+    deliverable.workProduct.body;
+  if (typeof body !== "string")
+    throw new Error("The saved document body is not text.");
+  if (!body.trim()) throw new Error("The saved document body is blank.");
+  return { ...deliverable.workProduct, body };
+}
 
 export const ApprovalSchema = z.object({
   id: IdSchema,
@@ -860,6 +991,30 @@ export function isApprovalCurrent(
     approval.deliverableId === deliverable.id &&
     approval.deliverableVersion === deliverable.version
   );
+}
+
+export function filingReadiness(
+  deliverable: Deliverable,
+  context: { synthetic: boolean; approval: Approval | undefined },
+): { status: "draft"; blockers: string[] } | null {
+  const product = deliverable.workProduct;
+  if (!product) return null;
+  const blockers = [
+    "Current destination formats, size limits and attachment rules have not been validated.",
+    ...product.missingOriginals.map(
+      (item) => `Provide the original separately: ${item}`,
+    ),
+    ...product.reviewBlockers,
+  ];
+  if (context.synthetic)
+    blockers.push("Synthetic examples must not be used for real filing.");
+  if (!context.approval || !isApprovalCurrent(context.approval, deliverable))
+    blockers.push("Approval of this saved document version is required.");
+  if (
+    deliverable.sections.some((section) => section.reviewStatus !== "accepted")
+  )
+    blockers.push("Document review is not complete.");
+  return { status: "draft", blockers: [...new Set(blockers)] };
 }
 
 export const EvaluationResultSchema = z

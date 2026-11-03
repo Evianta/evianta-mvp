@@ -71,6 +71,7 @@ export class ScriptedProvider implements ModelProvider {
   readonly providerName = "mock" as const;
   readonly calls: string[] = [];
   readonly inputs = new Map<string, Record<string, unknown>[]>();
+  readonly modelInputs: unknown[] = [];
   active = 0;
   maxActive = 0;
 
@@ -81,7 +82,44 @@ export class ScriptedProvider implements ModelProvider {
   ) {}
 
   async generateStructured(request: StructuredGenerationRequest) {
+    this.modelInputs.push(structuredClone(request.input));
     const input = request.input as Record<string, unknown>;
+    if (Array.isArray(input.sourceEvidenceCatalog)) {
+      const catalog = input.sourceEvidenceCatalog as Record<string, unknown>[];
+      for (const name of ["priorFindings", "findings"]) {
+        if (!Array.isArray(input[name])) continue;
+        input[name] = (input[name] as Record<string, unknown>[]).map(
+          (finding) => {
+            if (!Array.isArray(finding.sourceEvidenceRefs)) return finding;
+            const { sourceEvidenceRefs, ...rest } = finding;
+            return {
+              ...rest,
+              sourceEvidence: (
+                sourceEvidenceRefs as Array<{
+                  index: number;
+                  evidenceId?: string;
+                }>
+              ).map((ref) => {
+                const entry = catalog[ref.index]!;
+                const { extractionRef, ...source } = entry;
+                if (ref.evidenceId !== undefined)
+                  source.evidenceId = ref.evidenceId;
+                return typeof extractionRef === "number"
+                  ? {
+                      ...source,
+                      extraction: (input.extractionCatalog as unknown[])[
+                        extractionRef
+                      ],
+                    }
+                  : source;
+              }),
+            };
+          },
+        );
+      }
+      delete input.sourceEvidenceCatalog;
+      delete input.extractionCatalog;
+    }
     const route = request.system.startsWith("You plan")
       ? "coordinator"
       : request.system.startsWith("You independently")
@@ -167,6 +205,27 @@ export function specialistOutput(
       },
     ],
     inputRequired: null,
+    ...(["case-preparation", "response-preparation", "response"].includes(key)
+      ? {
+          workProducts: [
+            {
+              key: "test-response",
+              type:
+                key === "case-preparation"
+                  ? ("evidence-request" as const)
+                  : ("tax-response" as const),
+              title: "Professional review draft",
+              claimant: "Synthetic claimant",
+              counterparty: "Synthetic recipient",
+              body: "To: Synthetic recipient\nSubject: Review of supplied records\nPlease review the supplied evidence before taking action.\nFor the claimant: [unsigned]",
+              sources: [],
+              missingOriginals: [],
+              reviewBlockers: ["Professional review required."],
+              schedules: [],
+            },
+          ],
+        }
+      : {}),
   };
 }
 
@@ -371,7 +430,24 @@ export function createHarness(options: HarnessOptions) {
     specialists:
       options.specialists ??
       roles.map((role) =>
-        createSpecialistAgent(profileFor(role), `Specialist ${role}`),
+        createSpecialistAgent(
+          profileFor(role),
+          [
+            `Specialist ${role}`,
+            ...(options.plan.tasks.some(
+              (task) =>
+                task.role === role &&
+                [
+                  "prepare",
+                  "response",
+                  "case-preparation",
+                  "response-preparation",
+                ].includes(task.key),
+            )
+              ? ["Return workProducts containing the actual test drafts."]
+              : []),
+          ].join("\n"),
+        ),
       ),
     reviewer: options.reviewer === false ? undefined : createReviewAgent(),
     coordinator: options.coordinator ? createCoordinatorAgent() : undefined,

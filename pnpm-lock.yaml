@@ -160,6 +160,9 @@ importers:
       autoprefixer:
         specifier: ^10.6.1
         version: 10.6.1(postcss@8.5.31)
+      fflate:
+        specifier: 0.8.3
+        version: 0.8.3
       pdfjs-dist:
         specifier: 6.4.299
         version: 6.4.299
@@ -215,9 +218,22 @@ importers:
 
   packages/core:
     dependencies:
+      fflate:
+        specifier: 0.8.3
+        version: 0.8.3
+      pdfmake:
+        specifier: 0.3.13
+        version: 0.3.13
+      xlsx:
+        specifier: https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz
+        version: https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz
       zod:
         specifier: 4.4.3
         version: 4.4.3
+    devDependencies:
+      '@types/pdfmake':
+        specifier: 0.3.3
+        version: 0.3.3
 
   packages/env: {}
 

@@ -126,6 +126,7 @@ export interface Agent<I, O, ModelOutput = O> {
   modelTier: ModelTier;
   systemPrompt: string;
   inputSchema: ZodType<I>;
+  prepareModelInput?: (input: I) => unknown;
   outputSchema: ZodType<ModelOutput>;
   /** The complete agent input is sent to the model and must fit its budget. */
   usesModelInput?: boolean;
@@ -158,6 +159,7 @@ export function defineStructuredAgent<I, O>(definition: {
   tools?: Tool[];
   maxOutputTokens?: number;
   webSearch?: boolean;
+  prepareModelInput?: (input: I) => unknown;
 }): Agent<I, O> {
   const modelTier = definition.profile.modelTier;
   return {
@@ -165,6 +167,7 @@ export function defineStructuredAgent<I, O>(definition: {
     modelTier,
     systemPrompt: definition.systemPrompt,
     inputSchema: definition.inputSchema,
+    prepareModelInput: definition.prepareModelInput,
     outputSchema: definition.outputSchema,
     usesModelInput: true,
     tools: definition.tools,
@@ -172,7 +175,9 @@ export function defineStructuredAgent<I, O>(definition: {
     async run(input, ctx) {
       const result = await ctx.ai.runStructured({
         tier: modelTier,
-        inputSchema: definition.inputSchema,
+        inputSchema: definition.prepareModelInput
+          ? definition.inputSchema.transform(definition.prepareModelInput)
+          : definition.inputSchema,
         outputSchema: definition.outputSchema,
         system: definition.systemPrompt,
         input,

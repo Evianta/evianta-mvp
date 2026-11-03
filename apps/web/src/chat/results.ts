@@ -48,14 +48,27 @@ export function buildResult(
   run: RunDto | null,
   limit = 2,
 ): ResultSummary {
-  const deliverable = latestDeliverable(workspace);
+  const runDeliverables = run
+    ? workspace.deliverables.filter((item) => item.runId === run.id)
+    : workspace.deliverables;
+  const products = runDeliverables.filter((item) => item.workProduct);
+  const documentWorkflow = ["msme-payment", "tax-notice"].includes(
+    workspace.case.useCase,
+  );
+  const deliverable =
+    products[0] ??
+    [...runDeliverables].sort((left, right) =>
+      right.createdAt.localeCompare(left.createdAt),
+    )[0];
   const referenced = new Set(
-    deliverable?.sections.flatMap((section) => section.findingIds) ?? [],
+    runDeliverables.flatMap((item) =>
+      item.sections.flatMap((section) => section.findingIds),
+    ),
   );
   const findings = workspace.findings.filter(
     (finding) =>
       !isInputFinding(finding) &&
-      (referenced.size === 0 || referenced.has(finding.id)),
+      ((!run && referenced.size === 0) || referenced.has(finding.id)),
   );
   const ranked = [...findings].sort(
     (left, right) =>
@@ -64,7 +77,9 @@ export function buildResult(
   );
   return {
     headline:
-      deliverable?.summary.trim() ||
+      (products.length
+        ? `${run?.status === "partially-completed" ? "Available drafts:" : "Prepared"} ${products.length} document${products.length === 1 ? "" : "s"} for professional review.`
+        : deliverable?.summary.trim()) ||
       "The work is finished. Open the details to review it.",
     findings: ranked.slice(0, limit).map((finding) => ({
       id: finding.id,
@@ -81,7 +96,11 @@ export function buildResult(
           .length,
       0,
     ),
-    deliverables: deliverable ? [deliverable] : [],
+    deliverables: products.length
+      ? products
+      : !documentWorkflow && deliverable
+        ? [deliverable]
+        : [],
     exportContext: workspace.case,
     sourceCount: workspace.documents.length,
     evidenceCount: workspace.evidence.length,

@@ -16,6 +16,7 @@ import { StatusBadge } from "./Badges";
 import { Chip } from "./Chip";
 import { InspectorPanel } from "./InspectorPanel";
 import { DeliverableExport } from "./DeliverableExport";
+import { WorkProductPreview } from "./WorkProductPreview";
 
 const documentStateLabels: Record<string, string> = {
   uploaded: "Uploaded",
@@ -213,6 +214,21 @@ export function ChatInspector({
       {target?.kind === "deliverable" &&
         (deliverable ? (
           <div className="space-y-5 text-sm">
+            {workspace && (
+              <WorkProductPreview
+                deliverable={deliverable}
+                workspace={workspace}
+                onSelectDocument={(id) =>
+                  onInspect({
+                    kind: "document",
+                    id,
+                    name:
+                      workspace.documents.find((item) => item.id === id)
+                        ?.name ?? "Referenced original",
+                  })
+                }
+              />
+            )}
             <p className="leading-relaxed">{deliverable.summary}</p>
             <DeliverableExport
               deliverable={deliverable}

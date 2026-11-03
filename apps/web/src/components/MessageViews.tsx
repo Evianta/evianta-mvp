@@ -35,6 +35,7 @@ import { Chip, type ChipTone } from "./Chip";
 import { StreamedText } from "./StreamedText";
 import { RunQuestionForm } from "./RunQuestionForm";
 import { DeliverableExport } from "./DeliverableExport";
+import { GeneratedFilesDownload } from "./GeneratedFilesDownload";
 
 export interface MessageContext {
   progressFor: (runId: string) => ProgressState | null;
@@ -480,41 +481,6 @@ function ResultCard({
       <p className="line-clamp-2 text-sm font-medium leading-5">
         {result.headline}
       </p>
-      <p className="mt-1 text-xs text-muted-foreground">
-        {result.totalFindings} findings | {result.openQuestions} open questions
-        {" | "}
-        {result.sourceCount} sources |{" "}
-        {usage
-          ? formatCost(usage.costUsd, usage.costStatus === "unknown")
-          : "Cost pending"}
-      </p>
-      {result.findings.length > 0 && (
-        <div className="mt-2">
-          <ul className="flex flex-col gap-1" aria-label="Key findings">
-            {result.findings.map((finding) => (
-              <li key={finding.id}>
-                <button
-                  type="button"
-                  className="finding-row result-finding"
-                  onClick={() =>
-                    context.onInspect(
-                      { kind: "finding", id: finding.id },
-                      progress.caseId,
-                    )
-                  }
-                >
-                  <Chip tone={severityTone[finding.severity] ?? "neutral"}>
-                    {finding.severity}
-                  </Chip>
-                  <span className="min-w-0 flex-1 truncate text-left text-xs">
-                    {finding.title}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         {result.deliverables.map((deliverable) => (
           <div key={deliverable.id} className="flex min-w-0 flex-wrap gap-2">
@@ -543,9 +509,53 @@ function ResultCard({
           Open full details <ArrowRight size={14} aria-hidden="true" />
         </Link>
       </div>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Draft for professional review.
-      </p>
+      {result.deliverables.length > 0 && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          Draft for professional review.
+        </p>
+      )}
+      <GeneratedFilesDownload
+        deliverables={result.deliverables}
+        context={result.exportContext}
+      />
+      <details
+        className="mt-3"
+        open={!result.deliverables.some((item) => item.workProduct)}
+      >
+        <summary className="cursor-pointer text-xs text-muted-foreground">
+          Findings and evidence: {result.totalFindings} findings /{" "}
+          {result.openQuestions} open questions
+        </summary>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {result.sourceCount} sources /{" "}
+          {usage
+            ? formatCost(usage.costUsd, usage.costStatus === "unknown")
+            : "Cost pending"}
+        </p>
+        <ul className="mt-2 flex flex-col gap-1" aria-label="Key findings">
+          {result.findings.map((finding) => (
+            <li key={finding.id}>
+              <button
+                type="button"
+                className="finding-row result-finding"
+                onClick={() =>
+                  context.onInspect(
+                    { kind: "finding", id: finding.id },
+                    progress.caseId,
+                  )
+                }
+              >
+                <Chip tone={severityTone[finding.severity] ?? "neutral"}>
+                  {finding.severity}
+                </Chip>
+                <span className="min-w-0 flex-1 truncate text-left text-xs">
+                  {finding.title}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </details>
     </section>
   );
 }

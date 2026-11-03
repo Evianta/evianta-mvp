@@ -33,6 +33,10 @@ import {
 } from "@evianta/core";
 import { Orchestrator, ResumeRequestSchema } from "@evianta/agents";
 import {
+  buildDeliverableExport,
+  deliverableExportFormats,
+} from "@evianta/core/deliverable-export";
+import {
   defaultIngestionLimits,
   detectFormat,
   IngestionError,
@@ -1737,6 +1741,194 @@ export function registerCaseApiRoutes(
   registerStreamRoute(context, services);
 
   app.get(
+    "/cases/:caseId/deliverables/:deliverableId/export",
+    authenticate,
+    requireCase(repositories),
+    async (request, response) => {
+      const principal = authContext(request)?.principal;
+      const record = requestCase(request);
+      const id = routeParam(request.params.deliverableId);
+      const input = z
+        .object({
+          format: z.enum(["pdf", "xlsx", "json"]),
+          version: z.coerce.number().int().positive(),
+        })
+        .safeParse(request.query);
+      if (!principal || !record || !id) return;
+      if (!input.success) {
+        sendApiError(
+          response,
+          400,
+          "validation-failed",
+          "Specify a file format and saved document version.",
+        );
+        return;
+      }
+      const scope = { ownerId: principal.userId, caseId: record.id };
+      const deliverable = await findSettledDeliverable(
+        repositories,
+        id,
+        scope,
+        response,
+      );
+      if (!deliverable) return;
+      if (deliverable.version !== input.data.version) {
+        sendApiError(
+          response,
+          409,
+          "conflict",
+          "This document changed. Reload it before downloading.",
+        );
+        return;
+      }
+      if (
+        !deliverable.workProduct ||
+        !deliverableExportFormats(deliverable, record).includes(
+          input.data.format,
+        )
+      ) {
+        sendApiError(
+          response,
+          400,
+          "validation-failed",
+          "This document does not support the requested generated-file export.",
+        );
+        return;
+      }
+      const cached = deliverable.generatedFiles?.find(
+        (file) =>
+          file.version === deliverable.version &&
+          file.format === input.data.format,
+      );
+      let bytes: Uint8Array;
+      let filename: string;
+      let mimeType: string;
+      if (cached) {
+        const stored = await services.storage.readBufferAsync(
+          cached.objectKey,
+          services.uploads.uploadMaxBytes,
+        );
+        if (!stored)
+          throw new Error("The saved generated file is missing from storage.");
+        bytes = stored;
+        filename = cached.filename;
+        mimeType = cached.mimeType;
+      } else {
+        const file = await buildDeliverableExport(
+          deliverable,
+          input.data.format,
+          record,
+        );
+        bytes = file.content;
+        filename = file.filename;
+        mimeType = file.mimeType;
+        if (bytes.byteLength > services.uploads.uploadMaxBytes) {
+          sendApiError(
+            response,
+            413,
+            "limit-reached",
+            "The generated file exceeds the configured storage limit.",
+          );
+          return;
+        }
+        const objectKey = await services.storage.uploadAsync(
+          record.id,
+          mimeType,
+          {
+            body: bytesOf(Buffer.from(bytes)),
+            contentLength: bytes.byteLength,
+            contentHash: hash(Buffer.from(bytes)),
+          },
+        );
+        let saved = false;
+        let reused = false;
+        try {
+          for (let attempt = 0; attempt < 3 && !saved; attempt += 1) {
+            const candidate = await repositories.deliverables.findOwnedById(
+              id,
+              scope,
+            );
+            if (!candidate || candidate.version !== deliverable.version) break;
+            const concurrent = candidate.generatedFiles?.find(
+              (entry) =>
+                entry.format === input.data.format &&
+                entry.version === candidate.version,
+            );
+            if (concurrent) {
+              const stored = await services.storage.readBufferAsync(
+                concurrent.objectKey,
+                services.uploads.uploadMaxBytes,
+              );
+              if (!stored)
+                throw new Error(
+                  "The saved generated file is missing from storage.",
+                );
+              bytes = stored;
+              filename = concurrent.filename;
+              mimeType = concurrent.mimeType;
+              reused = true;
+              break;
+            }
+            saved = await repositories.deliverables.replaceOwned(
+              {
+                ...candidate,
+                updatedAt: new Date(
+                  Math.max(Date.now(), Date.parse(candidate.updatedAt) + 1),
+                ).toISOString(),
+                generatedFiles: [
+                  ...(candidate.generatedFiles ?? []),
+                  {
+                    format: input.data.format,
+                    version: candidate.version,
+                    objectKey,
+                    filename,
+                    mimeType,
+                    sizeBytes: bytes.byteLength,
+                  },
+                ],
+              },
+              scope,
+              {
+                expectedVersion: candidate.version,
+                expectedUpdatedAt: candidate.updatedAt,
+                requireSettledRun: true,
+              },
+            );
+          }
+        } finally {
+          if (!saved) await services.storage.deleteAsync(objectKey);
+        }
+        if (!saved && !reused) {
+          sendApiError(
+            response,
+            409,
+            "conflict",
+            "This document changed while preparing the download. Reload and retry.",
+          );
+          return;
+        }
+      }
+      const current = await repositories.deliverables.findOwnedById(id, scope);
+      if (!current || current.version !== input.data.version) {
+        sendApiError(
+          response,
+          409,
+          "conflict",
+          "This document changed while downloading. Reload and retry.",
+        );
+        return;
+      }
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Content-Type", mimeType);
+      response.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${filename}"`,
+      );
+      response.send(Buffer.from(bytes));
+    },
+  );
+
+  app.get(
     "/cases/:caseId/deliverables/:deliverableId",
     authenticate,
     requireCase(repositories),
@@ -1812,6 +2004,19 @@ export function registerCaseApiRoutes(
       const contentChanged =
         input.reviewerContent !== undefined &&
         input.reviewerContent !== section.reviewerContent;
+      if (
+        deliverable.workProduct &&
+        input.reviewerContent !== undefined &&
+        !input.reviewerContent.trim()
+      ) {
+        sendApiError(
+          response,
+          400,
+          "validation-failed",
+          "The drafted document body cannot be blank.",
+        );
+        return;
+      }
       const reviewStatus =
         input.reviewStatus ??
         (contentChanged ? "pending" : section.reviewStatus);
@@ -1831,6 +2036,7 @@ export function registerCaseApiRoutes(
       const reviewedAt = new Date().toISOString();
       const updated = {
         ...deliverable,
+        generatedFiles: [],
         version: deliverable.version + 1,
         updatedAt: reviewedAt,
         sections: deliverable.sections.map((item) =>
@@ -1851,7 +2057,11 @@ export function registerCaseApiRoutes(
       const saved = await repositories.deliverables.replaceOwned(
         updated,
         scope,
-        { expectedVersion: input.expectedVersion, requireSettledRun: true },
+        {
+          expectedVersion: input.expectedVersion,
+          expectedUpdatedAt: deliverable.updatedAt,
+          requireSettledRun: true,
+        },
       );
       if (!saved) {
         sendApiError(
@@ -1862,6 +2072,11 @@ export function registerCaseApiRoutes(
         );
         return;
       }
+      await Promise.all(
+        (deliverable.generatedFiles ?? []).map((file) =>
+          services.storage.deleteAsync(file.objectKey),
+        ),
+      );
       response.status(200).json({ deliverable: updated });
     },
   );

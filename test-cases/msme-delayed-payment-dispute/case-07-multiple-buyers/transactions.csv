@@ -1,0 +1,4 @@
+supplier,buyer,invoice,invoice_date,accepted_date,gross_inr,confirmed_paid_inr
+BluePeak Precision Components,Northstar Appliances,INV-A-001,2026-07-15,2026-07-16,100000,25000
+BluePeak Precision Components,Northstar Appliances,INV-A-002,2026-08-15,2026-08-16,50000,0
+BluePeak Precision Components,Riverbend Equipment,INV-B-001,2026-07-20,2026-07-21,60000,0

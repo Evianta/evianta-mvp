@@ -202,7 +202,11 @@ export interface DeliverableRepository {
   replaceOwned(
     deliverable: Deliverable,
     scope: OwnerScope,
-    options?: { expectedVersion?: number; requireSettledRun?: boolean },
+    options?: {
+      expectedVersion?: number;
+      expectedUpdatedAt?: string;
+      requireSettledRun?: boolean;
+    },
   ): Promise<boolean>;
 }
 

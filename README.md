@@ -113,15 +113,29 @@ form. Answer each field, optionally attach supporting files, then select
 answers are sent. Failed submissions keep the answers and offer a retry without
 starting a new run.
 
-Completed chat results show a short summary and two key findings. Open a finding
-for details, or use **Export** to download the full deliverable, including saved
-reviewer edits. The system selects formats from the task and output: notice
-replies and reports use PDF; spreadsheet/dashboard work and tabular schedules
-also offer Excel. JSON is offered only for tasks requesting a JSON output, not
-as a default for every case. A task may offer multiple formats. Exports are also
-available in the deliverable inspector and review workspace. These are drafts
-for professional review, not validated government portal payloads or submitted
-filings.
+MSME and tax results show the actual prepared documents, separately from internal
+findings and evidence. Multiple buyers receive separate drafts; multiple invoices
+for the same parties can share a notice and schedule. The inspector and case review
+workspace preview the saved letter and tables. Select a document to review and
+approve its saved version. Unsaved edits do not change downloads.
+
+**Export** downloads the saved draft body as PDF. Excel is offered only for actual
+derived schedules, with numeric amounts and typed currency/date columns. JSON is
+offered only when requested. Generated files are cached in private storage for
+that document version; saved edits invalidate the cached files and approval.
+**Download all generated files** packages drafts and schedules only, never originals.
+Invoices, certificates, bank records and other source evidence are referenced,
+not reconstructed. Upload your original evidence separately.
+
+Completed execution, professional review and filing readiness are distinct.
+Disputes and missing originals can produce useful cautious drafts; actual task
+failures still produce partial or failed runs with failure details and retries.
+The filing checklist blocks synthetic examples, missing originals, unresolved
+professional checks and absent approval. Current destination formats, size limits
+and attachment rules have not been verified, so no draft is labelled upload-ready.
+The system does not submit filings or log into government services.
+
+Data-analysis reports and their existing PDF/Excel exports remain available.
 
 All three workflows accept CSV, TSV, Excel (`.xlsx`/`.xls`), JSON, plain text,
 Markdown (`.md`/`.markdown`) and PDF. Image uploads are not enabled because OCR
@@ -336,6 +350,18 @@ dispatch, records each attempt, and settles only when cost can be estimated.
 Attempts with unknown provider usage keep their reservation as explicit
 exposure; they are not silently treated as free. Streaming calls remain
 reserved when the provider does not return usage details.
+
+Provider output schemas use strict JSON: every object property is required.
+Analysts return findings, not document fields. Only preparation agents receive
+the work-product contract; schedule formatting fields use explicit `null` when
+not applicable and are normalized before saving the domain document.
+
+Specialist and review model inputs share repeated evidence and extraction
+metadata through indexed catalogs. Budgeting uses the same compact payload that
+is sent to the provider; no finding, numeric claim or source location is removed.
+Long source excerpts can still be shortened with explicit truncation markers.
+If required content remains too large, execution fails visibly rather than
+discarding evidence or bypassing usage limits.
 
 Set `EVIANTA_USAGE_MODE=enforced` for live use and configure every
 `MODEL_MAX_*`, concurrency, spend, and period value in `.env`. The example uses

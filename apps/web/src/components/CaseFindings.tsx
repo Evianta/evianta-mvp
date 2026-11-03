@@ -15,7 +15,11 @@ export function CaseFindings({
       right.version - left.version,
   )[0];
   const findingIds = new Set(
-    deliverable?.sections.flatMap((section) => section.findingIds) ?? [],
+    (workspace?.deliverables ?? [])
+      .filter((item) => item.runId === deliverable?.runId)
+      .flatMap((item) =>
+        item.sections.flatMap((section) => section.findingIds),
+      ),
   );
   const findings = (workspace?.findings ?? []).filter((finding) =>
     findingIds.has(finding.id),

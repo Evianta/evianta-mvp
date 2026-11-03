@@ -1009,6 +1009,11 @@ export class InMemoryStore {
           ) {
             return false;
           }
+          if (
+            options?.expectedUpdatedAt !== undefined &&
+            current.updatedAt !== options.expectedUpdatedAt
+          )
+            return false;
           const run = this.runs.get(record.runId);
           if (
             options?.requireSettledRun &&

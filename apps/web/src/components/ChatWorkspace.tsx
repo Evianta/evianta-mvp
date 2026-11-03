@@ -1009,8 +1009,10 @@ function ChatSession({
       const summary = buildResult(workspace, latest ?? null);
       say(
         status === "completed"
-          ? "Here is what I found. Select any item to look closer."
-          : "Part of the work finished. Here is what is ready.",
+          ? summary.deliverables.some((item) => item.workProduct)
+            ? "Your drafts are prepared. Preview and review each document below."
+            : "Analysis finished. Review the findings and evidence below."
+          : "Processing stopped before all requested outputs were prepared. Available results are below.",
       );
       setResultMap((current) => ({ ...current, [runId]: summary }));
       dispatch({
@@ -1026,7 +1028,10 @@ function ChatSession({
         retryRef.current = () => void retryRun(caseId, runId);
         notice(
           "warning",
-          "Some steps did not finish. You can retry them, and finished work is kept.",
+          progressRef.current[runId]?.failures
+            .map((failure) => failure.message)
+            .join(" ") ||
+            "Some processing steps did not finish. Open the case for the failure details. Retrying keeps finished work.",
           { kind: "retry" },
         );
       }
@@ -1039,7 +1044,10 @@ function ChatSession({
       retryRef.current = () => void retryRun(caseId, runId);
       notice(
         "danger",
-        "The run stopped before it finished. Retrying keeps the work that is already done.",
+        progressRef.current[runId]?.failures
+          .map((failure) => failure.message)
+          .join(" ") ||
+          "The run stopped before it finished. Retrying keeps the work that is already done.",
         { kind: "retry" },
       );
       return;

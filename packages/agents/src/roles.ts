@@ -6,9 +6,11 @@ import {
   type AgentResult,
 } from "./agent.js";
 import { businessDataAnalystProfile } from "./data-analysis.js";
+import { compactModelInput, compactInputInstructions } from "./model-input.js";
 import {
   PlanningInputSchema,
   PlanningOutputSchema,
+  PreparationModelOutputSchema,
   ReviewInputSchema,
   ReviewOutputSchema,
   SpecialistInputSchema,
@@ -108,6 +110,7 @@ export function createSpecialistAgent(
 ): SpecialistAgent {
   systemPrompt = [
     systemPrompt,
+    compactInputInstructions,
     "Source excerpts marked excerptsTruncated are partial. Preserve their evidence IDs and source locations, and flag material assertions that cannot be supported by the supplied excerpts.",
     "Set inputRequired only when a specific missing source document blocks the work or the task instructions are too ambiguous to understand. Ask only for the missing document or task clarification. Do not ask the user to confirm figures, dates, conclusions, assumptions, or other unresolved findings; record those as findings and open questions for the case work.",
   ].join("\n");
@@ -115,7 +118,10 @@ export function createSpecialistAgent(
     profile,
     systemPrompt,
     inputSchema: SpecialistInputSchema,
-    outputSchema: SpecialistModelOutputSchema,
+    prepareModelInput: compactModelInput,
+    outputSchema: systemPrompt.includes("Return workProducts containing")
+      ? PreparationModelOutputSchema
+      : SpecialistModelOutputSchema,
   });
   return {
     ...structured,
@@ -123,7 +129,23 @@ export function createSpecialistAgent(
       const result = await structured.run(input, context);
       return {
         ...result,
-        output: SpecialistOutputSchema.parse(result.output),
+        output: SpecialistOutputSchema.parse({
+          ...result.output,
+          ...(systemPrompt.includes("Return workProducts containing")
+            ? {
+                workProducts: PreparationModelOutputSchema.parse(
+                  result.output,
+                ).workProducts.map((product) => ({
+                  ...product,
+                  schedules: product.schedules.map((schedule) => ({
+                    ...schedule,
+                    columnFormats: schedule.columnFormats ?? undefined,
+                    currencyCode: schedule.currencyCode ?? undefined,
+                  })),
+                })),
+              }
+            : {}),
+        }),
       };
     },
   };
@@ -146,6 +168,7 @@ export function createReviewAgent(): ReviewAgent {
     profile: reviewerProfile,
     systemPrompt: [
       "You independently review specialist findings.",
+      compactInputInstructions,
       "Deterministic checks already recomputed totals, evidence presence and consistency; do not repeat them.",
       "Assess narrative soundness, missing requirements and unsupported claims.",
       "Review every assertion in the supplied drafts, even when it has no corresponding finding. Compare draft text with source-backed findings and flag unsupported figures, deadlines, and legal conclusions.",
@@ -154,6 +177,7 @@ export function createReviewAgent(): ReviewAgent {
     ].join("\n"),
     inputSchema: ReviewInputSchema,
     outputSchema: ReviewOutputSchema,
+    prepareModelInput: compactModelInput,
   });
 }
 

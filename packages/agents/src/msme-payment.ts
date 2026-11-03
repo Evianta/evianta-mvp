@@ -17,6 +17,7 @@ import {
   type SpecialistAgent,
 } from "./roles.js";
 import type { ReferencePlan } from "./planning.js";
+import { workProductInstructions } from "./work-products.js";
 
 export const MSME_DOCUMENT_ANALYSIS_ROLE = "msme-document-analysis";
 export const MSME_PAYMENT_RECONCILIATION_ROLE = "msme-payment-reconciliation";
@@ -715,6 +716,7 @@ export function createMsmePaymentSpecialists(): SpecialistAgent[] {
         "Use only supplied findings and source evidence; cite material assertions.",
         "Clearly label assumptions, evidence gaps, disputes, and legal points requiring current-law verification.",
         "Do not send communications or initiate an escalation.",
+        workProductInstructions,
       ].join("\n"),
     ),
   ];

@@ -25,6 +25,7 @@ export interface ProgressState {
   costUsd: number | null;
   costUnknown: boolean;
   waitingQuestionIds: string[];
+  failures: Array<{ taskId: string; message: string }>;
 }
 
 export function createProgress(caseId: string, run: RunDto): ProgressState {
@@ -39,6 +40,7 @@ export function createProgress(caseId: string, run: RunDto): ProgressState {
     costUsd: run.usage.costUsd,
     costUnknown: run.usage.costStatus === "unknown",
     waitingQuestionIds: [],
+    failures: [],
   };
 }
 
@@ -99,6 +101,9 @@ export function applyRunEvent(
       const name = nameOf(payload.role);
       return {
         ...base,
+        failures: base.failures.filter(
+          (failure) => failure.taskId !== payload.taskId,
+        ),
         roster: setRole(base.roster, payload.role, name, "done"),
         lines: withLine(base, event, `${name} finished.`, "success"),
       };
@@ -107,6 +112,15 @@ export function applyRunEvent(
       const name = nameOf(payload.role);
       return {
         ...base,
+        failures: [
+          ...base.failures.filter(
+            (failure) => failure.taskId !== payload.taskId,
+          ),
+          {
+            taskId: payload.taskId,
+            message: `${name}: ${payload.error.message}`,
+          },
+        ],
         roster: setRole(base.roster, payload.role, name, "failed"),
         lines: withLine(
           base,

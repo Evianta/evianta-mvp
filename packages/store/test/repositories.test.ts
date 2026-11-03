@@ -1254,6 +1254,84 @@ function repositoryContract(
       ).toEqual(deliverable);
     });
 
+    it("compares metadata timestamps without invalidating a same-version document approval", async () => {
+      await repositories.cases.insert(makeCase("case-1", "owner-1"));
+      await repositories.runs.insert({
+        ...makeRun("run-1", "case-1", "owner-1"),
+        status: "completed",
+      });
+      const deliverable = makeDeliverable("deliverable-1", 1);
+      await repositories.deliverables.insert(deliverable, ownerScope);
+      await repositories.approvals.insert(
+        {
+          id: "approval-1",
+          caseId: ownerScope.caseId,
+          deliverableId: deliverable.id,
+          deliverableVersion: 1,
+          actorId: "owner-1",
+          approvedAt: timestamp,
+          unresolvedQuestionIds: [],
+          note: "",
+        },
+        ownerScope,
+      );
+      const changed = new Date(
+        Date.parse(deliverable.updatedAt) + 1,
+      ).toISOString();
+      expect(
+        await repositories.deliverables.replaceOwned(
+          {
+            ...deliverable,
+            updatedAt: changed,
+            generatedFiles: [
+              {
+                format: "pdf",
+                version: 1,
+                objectKey: "generated-object",
+                filename: "draft.pdf",
+                mimeType: "application/pdf",
+                sizeBytes: 100,
+              },
+            ],
+          },
+          ownerScope,
+          {
+            expectedVersion: 1,
+            expectedUpdatedAt: deliverable.updatedAt,
+            requireSettledRun: true,
+          },
+        ),
+      ).toBe(true);
+      expect(
+        await repositories.deliverables.replaceOwned(
+          {
+            ...deliverable,
+            generatedFiles: [],
+          },
+          ownerScope,
+          {
+            expectedVersion: 1,
+            expectedUpdatedAt: deliverable.updatedAt,
+            requireSettledRun: true,
+          },
+        ),
+      ).toBe(false);
+      expect(
+        await repositories.approvals.findForDeliverable(
+          deliverable.id,
+          ownerScope,
+        ),
+      ).not.toBeNull();
+      expect(
+        (
+          await repositories.deliverables.findOwnedById(
+            deliverable.id,
+            ownerScope,
+          )
+        )?.generatedFiles,
+      ).toHaveLength(1);
+    });
+
     it("invalidates approval after a deliverable version changes", async () => {
       await repositories.cases.insert(makeCase("case-1", "owner-1"));
       await repositories.runs.insert(makeRun("run-1", "case-1", "owner-1"));

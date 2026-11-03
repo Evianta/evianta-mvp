@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import type { Deliverable } from "@evianta/core";
+import { useSession } from "../session/SessionProvider";
 import {
   buildDeliverableExport,
   deliverableExportFormats,
@@ -18,6 +19,7 @@ export function DeliverableExport({
   deliverable: Deliverable;
   context?: ExportContext;
 }) {
+  const { api } = useSession();
   const menu = useRef<HTMLDetailsElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -37,14 +39,28 @@ export function DeliverableExport({
     setError(null);
     setPending(true);
     try {
-      const file = await buildDeliverableExport(deliverable, format, context);
+      let blob: Blob;
+      let filename: string;
+      if (deliverable.workProduct) {
+        if (!api.downloadDeliverable)
+          throw new Error("Generated-file downloads are unavailable.");
+        blob = await api.downloadDeliverable(deliverable, format);
+        filename = `${
+          deliverable.title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-|-$/g, "") || "document"
+        }-v${deliverable.version}.${format}`;
+      } else {
+        const file = await buildDeliverableExport(deliverable, format, context);
+        blob = new Blob([file.content], { type: file.mimeType });
+        filename = file.filename;
+      }
       if (!active.current) return;
-      const url = URL.createObjectURL(
-        new Blob([file.content], { type: file.mimeType }),
-      );
+      const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = file.filename;
+      link.download = filename;
       document.body.append(link);
       try {
         link.click();
@@ -63,6 +79,7 @@ export function DeliverableExport({
     }
   }
 
+  if (!formats.length) return null;
   return (
     <div>
       <details ref={menu} className="relative">
