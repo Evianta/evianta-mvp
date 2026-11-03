@@ -35,6 +35,7 @@ describe("startup error logging", () => {
         const error = new DocumentStoreError("Document upload failed", code, {
           cause,
         });
+        error.name = "DocumentStoreError test-aws-access-key";
         const log = vi.spyOn(console, "error").mockImplementation(() => {});
         const { app } = createApiApp({
           repositories: createInMemoryStore().repositories,
@@ -78,9 +79,9 @@ describe("startup error logging", () => {
             expect.objectContaining({
               method: "POST",
               requestId: response.headers.get("x-request-id"),
-              errorName: "DocumentStoreError",
+              errorName: "DocumentStoreError [REDACTED]",
               error: expect.objectContaining({
-                name: "DocumentStoreError",
+                name: "DocumentStoreError [REDACTED]",
                 code,
                 cause: expect.objectContaining({
                   name: causeName,
@@ -117,5 +118,85 @@ describe("startup error logging", () => {
       message: "Underlying request failed",
     });
     expect(JSON.stringify(details)).not.toContain("local-model-secret");
+  });
+
+  it("includes redacted aggregate upload and cleanup errors", () => {
+    vi.stubEnv("AWS_SECRET_ACCESS_KEY", "test-aws-secret-key");
+    const uploadError = Object.assign(
+      new Error("Upload failed with test-aws-secret-key"),
+      { code: "EACCES" },
+    );
+    const cleanupError = Object.assign(
+      new Error("Cleanup failed with test-aws-secret-key"),
+      { code: "EPERM" },
+    );
+    const error = new AggregateError(
+      [uploadError, new AggregateError([cleanupError], "Cleanup failures")],
+      "Document upload failed and temporary files could not be removed",
+    );
+
+    const details = getErrorLogDetails(error);
+
+    expect(details).toMatchObject({
+      name: "AggregateError",
+      errors: [
+        { code: "EACCES", message: "Upload failed with [REDACTED]" },
+        {
+          errors: [
+            { code: "EPERM", message: "Cleanup failed with [REDACTED]" },
+          ],
+        },
+      ],
+    });
+    expect(JSON.stringify(details)).not.toContain("test-aws-secret-key");
+  });
+
+  it("redacts names in circular causes and aggregate members", () => {
+    vi.stubEnv("MODEL_API_KEY", "local-model-secret");
+    const error = new AggregateError([], "Circular failure");
+    error.name = "Failure local-model-secret";
+    error.cause = error;
+    error.errors.push(error);
+
+    const details = getErrorLogDetails(error);
+
+    expect(details).toMatchObject({
+      name: "Failure [REDACTED]",
+      cause: {
+        name: "Failure [REDACTED]",
+        message: "[Circular cause]",
+      },
+      errors: [{ name: "Failure [REDACTED]", message: "[Circular cause]" }],
+    });
+    expect(JSON.stringify(details)).not.toContain("local-model-secret");
+  });
+
+  it("bounds recursion across aggregate members and causes", () => {
+    let error: Error = new Error("Beyond depth limit");
+    for (let depth = 5; depth >= 0; depth -= 1) {
+      error =
+        depth % 2 === 0
+          ? new AggregateError([error], `Level ${depth}`)
+          : new Error(`Level ${depth}`, { cause: error });
+    }
+
+    const details = getErrorLogDetails(error);
+
+    expect(details).toMatchObject({
+      errors: [
+        {
+          cause: {
+            errors: [
+              {
+                cause: {
+                  errors: [{ message: "Level 5" }],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    expect(JSON.stringify(details)).not.toContain("Beyond depth limit");
   });
 });

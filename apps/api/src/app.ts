@@ -308,12 +308,12 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
                     ? 429
                     : 500;
     if (status === 500) {
-      const errorName = error instanceof Error ? error.name : "UnknownError";
+      const errorDetails = getErrorLogDetails(error);
       console.error("API request failed", {
         method: request.method,
         requestId: response.locals.requestId,
-        errorName,
-        error: getErrorLogDetails(error),
+        errorName: errorDetails.name,
+        error: errorDetails,
       });
     }
     const code =

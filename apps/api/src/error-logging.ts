@@ -4,6 +4,7 @@ export interface ErrorLogDetails {
   stack?: string;
   code?: string | number;
   cause?: ErrorLogDetails | { message: string };
+  errors?: Array<ErrorLogDetails | { message: string }>;
 }
 
 function redact(value: string): string {
@@ -34,7 +35,7 @@ export function getErrorLogDetails(error: unknown): ErrorLogDetails {
       return { message: redact(String(value)) };
     }
     if (seen.has(value))
-      return { name: value.name, message: "[Circular cause]" };
+      return { name: redact(value.name), message: "[Circular cause]" };
     seen.add(value);
 
     const details: ErrorLogDetails = {
@@ -51,6 +52,11 @@ export function getErrorLogDetails(error: unknown): ErrorLogDetails {
     }
     if (depth < 5 && value.cause !== undefined) {
       details.cause = describe(value.cause, depth + 1);
+    }
+    if (depth < 5 && value instanceof AggregateError) {
+      details.errors = value.errors.map((error: unknown) =>
+        describe(error, depth + 1),
+      );
     }
     return details;
   }
