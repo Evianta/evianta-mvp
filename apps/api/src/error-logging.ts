@@ -4,6 +4,7 @@ export interface ErrorLogDetails {
   stack?: string;
   code?: string | number;
   cause?: ErrorLogDetails | { message: string };
+  errors?: Array<ErrorLogDetails | { message: string }>;
 }
 
 function redact(value: string): string {
@@ -13,7 +14,7 @@ function redact(value: string): string {
   );
   for (const [name, secret] of Object.entries(process.env)) {
     if (
-      /(?:SECRET|PASSWORD|TOKEN|API_KEY|SIGNING_KEY|MONGODB_URI|PRIVATE_KEY)/i.test(
+      /(?:SECRET|PASSWORD|TOKEN|API_KEY|SIGNING_KEY|MONGODB_URI|PRIVATE_KEY|AWS_ACCESS_KEY_ID)/i.test(
         name,
       ) &&
       secret
@@ -25,7 +26,7 @@ function redact(value: string): string {
 }
 
 export function getErrorLogDetails(error: unknown): ErrorLogDetails {
-  const seen = new Set<object>();
+  const ancestors = new Set<object>();
   function describe(
     value: unknown,
     depth: number,
@@ -33,9 +34,9 @@ export function getErrorLogDetails(error: unknown): ErrorLogDetails {
     if (!(value instanceof Error)) {
       return { message: redact(String(value)) };
     }
-    if (seen.has(value))
-      return { name: value.name, message: "[Circular cause]" };
-    seen.add(value);
+    if (ancestors.has(value))
+      return { name: redact(value.name), message: "[Circular cause]" };
+    ancestors.add(value);
 
     const details: ErrorLogDetails = {
       name: redact(value.name),
@@ -52,6 +53,12 @@ export function getErrorLogDetails(error: unknown): ErrorLogDetails {
     if (depth < 5 && value.cause !== undefined) {
       details.cause = describe(value.cause, depth + 1);
     }
+    if (depth < 5 && value instanceof AggregateError) {
+      details.errors = value.errors.map((error: unknown) =>
+        describe(error, depth + 1),
+      );
+    }
+    ancestors.delete(value);
     return details;
   }
 

@@ -19,6 +19,7 @@ import {
   type AuthenticationRepositories,
 } from "./auth.js";
 import { sendApiError } from "./errors.js";
+import { getErrorLogDetails } from "./error-logging.js";
 
 export interface ApiAppConfiguration extends AuthConfiguration {
   webOrigin: string;
@@ -307,10 +308,12 @@ export function createApiApp(options: ApiAppOptions): ApiApp {
                     ? 429
                     : 500;
     if (status === 500) {
-      const errorName = error instanceof Error ? error.name : "UnknownError";
+      const errorDetails = getErrorLogDetails(error);
       console.error("API request failed", {
         method: request.method,
-        errorName,
+        requestId: response.locals.requestId,
+        errorName: errorDetails.name,
+        error: errorDetails,
       });
     }
     const code =
