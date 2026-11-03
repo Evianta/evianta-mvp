@@ -24,6 +24,9 @@ export const metadata: Metadata = {
   title: "Evianta",
   description:
     "A calm, source-first workspace for turning business records into clear, reviewable findings.",
+  icons: {
+    icon: "/logo.svg",
+  },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
