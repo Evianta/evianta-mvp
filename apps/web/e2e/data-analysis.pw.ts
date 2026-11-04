@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import {
   syntheticWorkflowFixtures,
   type Deliverable,
@@ -213,6 +214,88 @@ test("reopens a completed analysis and renders its report and charts", async ({
   await expect(page.getByText("Rows 101–200 of 205")).toBeVisible();
   await expect(page.getByText("quarterly-sales.csv")).toBeVisible();
   await expect(page.getByText("rows 2–7")).toBeVisible();
+
+  await page.getByRole("heading", { name: "Dashboard" }).waitFor();
+  const imageDownload = page.waitForEvent("download");
+  await page
+    .getByRole("button", { name: "Download Revenue by month as image" })
+    .click();
+  const image = await imageDownload;
+  expect(image.suggestedFilename()).toBe("revenue-by-month.png");
+  const imageBytes = await readFile((await image.path()) as string);
+  expect(imageBytes.subarray(1, 4).toString()).toBe("PNG");
+  expect(imageBytes.length).toBeGreaterThan(8000);
+  const pdfDownload = page.waitForEvent("download");
+  await page
+    .getByRole("button", { name: "Download Revenue by month as PDF" })
+    .click();
+  const pdf = await pdfDownload;
+  expect(pdf.suggestedFilename()).toBe("revenue-by-month.pdf");
+  expect(
+    (await readFile((await pdf.path()) as string)).subarray(0, 4).toString(),
+  ).toBe("%PDF");
+
+  await page
+    .getByRole("button", { name: "View Revenue by month full screen" })
+    .click();
+  const fullScreenChart = page.getByRole("dialog", {
+    name: "Revenue by month",
+  });
+  await expect(fullScreenChart).toBeVisible();
+  const fullScreenImage = page.waitForEvent("download");
+  await fullScreenChart
+    .getByRole("button", { name: "Download Revenue by month as image" })
+    .click();
+  expect((await fullScreenImage).suggestedFilename()).toBe(
+    "revenue-by-month.png",
+  );
+  await page.keyboard.press("Escape");
+  await expect(fullScreenChart).toHaveCount(0);
+
+  await page
+    .getByRole("button", { name: "View Revenue by month data full screen" })
+    .click();
+  const fullScreenTable = page.getByRole("dialog", {
+    name: "Revenue by month data",
+  });
+  await expect(fullScreenTable.getByRole("row")).toHaveCount(206);
+  const tablePdf = page.waitForEvent("download");
+  await fullScreenTable
+    .getByRole("button", { name: "Download Revenue by month data as PDF" })
+    .click();
+  expect((await tablePdf).suggestedFilename()).toBe(
+    "revenue-by-month-data.pdf",
+  );
+  await page.keyboard.press("Escape");
+  await expect(fullScreenTable).toHaveCount(0);
+
+  const dashboardImage = page.waitForEvent("download");
+  await page
+    .getByRole("button", { name: "Download Dashboard as image" })
+    .click();
+  const dashboardPng = await dashboardImage;
+  expect(dashboardPng.suggestedFilename()).toBe("dashboard.png");
+  expect(
+    (await readFile((await dashboardPng.path()) as string))
+      .subarray(1, 4)
+      .toString(),
+  ).toBe("PNG");
+  const dashboardPdf = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download Dashboard as PDF" }).click();
+  expect((await dashboardPdf).suggestedFilename()).toBe("dashboard.pdf");
+
+  await page
+    .getByRole("button", { name: "View Dashboard full screen" })
+    .click();
+  const fullScreenDashboard = page.getByRole("dialog", { name: "Dashboard" });
+  await expect(
+    fullScreenDashboard.getByRole("img", { name: "Revenue by month" }),
+  ).toBeVisible();
+  await expect(
+    fullScreenDashboard.getByRole("button", {
+      name: "Download Dashboard as PDF",
+    }),
+  ).toBeVisible();
 });
 
 test("preserves unsaved reviews and approves only the saved content", async ({

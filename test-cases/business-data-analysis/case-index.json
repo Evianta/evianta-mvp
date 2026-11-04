@@ -1,0 +1,121 @@
+{
+  "dataset_name": "Business Data Analysis Synthetic Evaluation Pack",
+  "version": "1.0.0",
+  "snapshot_date": "2026-10-18",
+  "currency": "INR",
+  "synthetic_data": true,
+  "cases": [
+    {
+      "id": "SYNTH-DATA-001",
+      "folder": "case-01-clean-monthly-sales",
+      "input_file": "sales-data.csv",
+      "scenario": "clean monthly sales with festive-season peak",
+      "expected": {
+        "rowCount": 48,
+        "valueColumn": "revenue",
+        "total": 13254400,
+        "periodColumn": "month",
+        "segmentColumn": "product",
+        "topSegment": { "label": "Standing Desk", "value": 5973600 },
+        "periodCount": 12,
+        "dataQualityCodes": []
+      }
+    },
+    {
+      "id": "SYNTH-DATA-002",
+      "folder": "case-02-messy-data-quality",
+      "input_file": "sales-data.csv",
+      "scenario": "missing, non-numeric, duplicate, negative and mixed-format values",
+      "expected": {
+        "rowCount": 24,
+        "valueColumn": "revenue",
+        "total": 1570900,
+        "periodColumn": "order_date",
+        "segmentColumn": "product",
+        "topSegment": { "label": "Standing Desk", "value": 756000 },
+        "dataQualityCodes": [
+          "duplicate-rows",
+          "inconsistent-date-formats",
+          "missing-values",
+          "out-of-range",
+          "type-mismatch",
+          "unordered-periods"
+        ]
+      }
+    },
+    {
+      "id": "SYNTH-DATA-003",
+      "folder": "case-03-regional-concentration",
+      "input_file": "sales-data.csv",
+      "scenario": "one region dominates revenue while another declines",
+      "expected": {
+        "rowCount": 96,
+        "valueColumn": "revenue",
+        "total": 11896300,
+        "periodColumn": "month",
+        "segmentColumn": "region",
+        "topSegment": { "label": "North", "value": 6958900 },
+        "periodCount": 12,
+        "dataQualityCodes": []
+      }
+    },
+    {
+      "id": "SYNTH-DATA-004",
+      "folder": "case-04-weekly-spike-and-outage",
+      "input_file": "sales-data.csv",
+      "scenario": "one-week promotional spike followed by an online outage",
+      "expected": {
+        "rowCount": 60,
+        "valueColumn": "revenue",
+        "total": 16473500,
+        "periodColumn": "week",
+        "segmentColumn": "channel",
+        "topSegment": { "label": "Wholesale", "value": 6619500 },
+        "periodCount": 20,
+        "dataQualityCodes": []
+      }
+    },
+    {
+      "id": "SYNTH-DATA-005",
+      "folder": "case-05-excel-workbook-multiple-sheets",
+      "input_file": "quarterly-sales.xlsx",
+      "scenario": "Excel workbook where the sales sheet must be chosen over summary and target sheets",
+      "expected": {
+        "rowCount": 40,
+        "valueColumn": "revenue",
+        "total": 16432000,
+        "periodColumn": "quarter",
+        "segmentColumn": "category",
+        "topSegment": { "label": "Furniture", "value": 7962900 },
+        "periodCount": 8,
+        "sheet": "Sales Data",
+        "dataQualityCodes": []
+      }
+    },
+    {
+      "id": "SYNTH-DATA-006",
+      "folder": "case-06-unordered-campaign-periods",
+      "input_file": "sales-data.csv",
+      "scenario": "campaign names that cannot be ordered chronologically",
+      "expected": {
+        "rowCount": 8,
+        "valueColumn": "revenue",
+        "total": 2880000,
+        "periodColumn": "campaign_period",
+        "segmentColumn": "channel",
+        "topSegment": { "label": "Online", "value": 1630000 },
+        "periodCount": 4,
+        "dataQualityCodes": ["unordered-periods"]
+      }
+    },
+    {
+      "id": "SYNTH-DATA-007",
+      "folder": "case-07-no-sales-column",
+      "input_file": "inventory-counts.csv",
+      "scenario": "inventory counts with no sales or amount column",
+      "expected": {
+        "error": "do not contain a usable numeric sales or amount column"
+      }
+    }
+  ]
+}
