@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { analyzeSalesTables } from "@evianta/agents";
 import {
   parseDelimited,
@@ -26,12 +27,8 @@ interface PackCase {
   };
 }
 
-const packRoot = join(
-  process.cwd(),
-  "..",
-  "..",
-  "test-cases",
-  "business-data-analysis",
+const packRoot = fileURLToPath(
+  new URL("../../../test-cases/business-data-analysis/", import.meta.url),
 );
 const pack = JSON.parse(
   readFileSync(join(packRoot, "case-index.json"), "utf8"),
@@ -71,7 +68,7 @@ describe("business data analysis test pack", () => {
     if (expected.periodCount !== undefined)
       expect(result.metrics.byPeriod).toHaveLength(expected.periodCount);
     if (expected.sheet)
-      expect(result.sourceEvidence.location.sheet).toBe(expected.sheet);
+      expect(result.sourceEvidence.location?.sheet).toBe(expected.sheet);
     expect(
       [...new Set(result.dataQuality.map((issue) => issue.code))].sort(),
     ).toEqual(expected.dataQualityCodes);
