@@ -14,6 +14,7 @@ import { formatFileSize } from "../intake";
 import { AgentInspector } from "./AgentsClient";
 import { StatusBadge } from "./Badges";
 import { Chip } from "./Chip";
+import { DashboardCharts, dashboardCharts } from "./ChartView";
 import { InspectorPanel } from "./InspectorPanel";
 import { DeliverableExport } from "./DeliverableExport";
 import { WorkProductPreview } from "./WorkProductPreview";
@@ -87,6 +88,7 @@ export function ChatInspector({
     target?.kind === "deliverable"
       ? workspace?.deliverables.find((item) => item.id === target.id)
       : undefined;
+  const charts = deliverable ? dashboardCharts(deliverable) : [];
   const document =
     target?.kind === "document"
       ? (workspace?.documents.find(
@@ -230,6 +232,12 @@ export function ChatInspector({
               />
             )}
             <p className="leading-relaxed">{deliverable.summary}</p>
+            {charts.length > 0 && (
+              <section aria-label="Dashboard">
+                <h3 className="inspector-heading mb-2">Dashboard</h3>
+                <DashboardCharts charts={charts} title={deliverable.title} />
+              </section>
+            )}
             <DeliverableExport
               deliverable={deliverable}
               context={workspace?.case}

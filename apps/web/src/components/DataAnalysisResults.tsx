@@ -1,209 +1,16 @@
 "use client";
 
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Line,
-  LineChart,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import { useState } from "react";
-import {
   DataAnalysisDashboardSchema,
   DataAnalysisReportSchema,
 } from "@evianta/core";
 import type { CaseWorkspace } from "../api/client";
-
-const chartColors = [
-  "hsl(var(--primary))",
-  "hsl(var(--warning))",
-  "hsl(199 72% 45%)",
-  "hsl(38 78% 53%)",
-  "hsl(264 52% 59%)",
-];
-
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat("en-IN", {
-    maximumFractionDigits: 2,
-  }).format(value);
-}
+import { DashboardCharts, formatNumber } from "./ChartView";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)
     : null;
-}
-
-function ChartView({
-  chart,
-}: {
-  chart: ReturnType<typeof DataAnalysisDashboardSchema.parse>["charts"][number];
-}) {
-  const [dataPage, setDataPage] = useState(0);
-  const [showData, setShowData] = useState(false);
-  const axisClass = "fill-muted-foreground text-xs";
-  const labelKey = chart.type === "pie" ? chart.nameKey : chart.categoryKey;
-  const pageSize = 100;
-  const pageCount = Math.ceil(chart.data.length / pageSize);
-  const pageRows = chart.data.slice(
-    dataPage * pageSize,
-    (dataPage + 1) * pageSize,
-  );
-  const firstRow = dataPage * pageSize + 1;
-  const lastRow = Math.min((dataPage + 1) * pageSize, chart.data.length);
-  return (
-    <figure className="rounded-lg border border-border bg-background p-4">
-      <figcaption className="mb-3 text-xs font-semibold">
-        {chart.title}
-      </figcaption>
-      <div className="h-64 w-full" role="img" aria-label={chart.title}>
-        <ResponsiveContainer width="100%" height="100%">
-          {chart.type === "bar" ? (
-            <BarChart data={chart.data}>
-              <CartesianGrid
-                stroke="hsl(var(--border))"
-                strokeDasharray="3 3"
-              />
-              <XAxis
-                dataKey={chart.categoryKey}
-                tick={{ className: axisClass }}
-              />
-              <YAxis tick={{ className: axisClass }} />
-              <Tooltip />
-              <Bar
-                dataKey={chart.valueKey}
-                fill={chartColors[0]}
-                radius={[4, 4, 0, 0]}
-              />
-            </BarChart>
-          ) : chart.type === "line" ? (
-            <LineChart data={chart.data}>
-              <CartesianGrid
-                stroke="hsl(var(--border))"
-                strokeDasharray="3 3"
-              />
-              <XAxis
-                dataKey={chart.categoryKey}
-                tick={{ className: axisClass }}
-              />
-              <YAxis tick={{ className: axisClass }} />
-              <Tooltip />
-              <Line
-                type="monotone"
-                dataKey={chart.valueKey}
-                stroke={chartColors[0]}
-                strokeWidth={2}
-                dot={{ r: 3 }}
-              />
-            </LineChart>
-          ) : (
-            <PieChart>
-              <Tooltip />
-              <Pie
-                data={chart.data}
-                dataKey={chart.valueKey}
-                nameKey={chart.nameKey}
-                outerRadius="80%"
-                label
-              >
-                {chart.data.map((entry, index) => (
-                  <Cell
-                    key={String(entry[chart.nameKey] ?? index)}
-                    fill={chartColors[index % chartColors.length]}
-                  />
-                ))}
-              </Pie>
-            </PieChart>
-          )}
-        </ResponsiveContainer>
-      </div>
-      <details
-        className="mt-3 text-xs"
-        onToggle={(event) => setShowData(event.currentTarget.open)}
-      >
-        <summary className="cursor-pointer text-muted-foreground">
-          View chart data
-        </summary>
-        {showData && (
-          <div className="mt-2 overflow-x-auto">
-            <table className="w-full border-collapse text-left">
-              <caption className="sr-only">{chart.title} data</caption>
-              <thead>
-                <tr className="border-b border-border">
-                  <th scope="col" className="py-1 pr-3 font-medium">
-                    {labelKey}
-                  </th>
-                  <th scope="col" className="py-1 text-right font-medium">
-                    {chart.valueKey}
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {pageRows.map((entry, index) => {
-                  const label = entry[labelKey];
-                  const value = entry[chart.valueKey];
-                  return (
-                    <tr
-                      className="border-b border-border/50"
-                      key={`${String(label ?? "")}-${firstRow + index}`}
-                    >
-                      <th scope="row" className="py-1 pr-3 font-normal">
-                        {String(label ?? "Unknown")}
-                      </th>
-                      <td className="py-1 text-right">
-                        {typeof value === "number"
-                          ? formatNumber(value)
-                          : String(value ?? "—")}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {pageCount > 1 && (
-              <div className="mt-2 flex items-center justify-between gap-3">
-                <p aria-live="polite" className="text-muted-foreground">
-                  Rows {firstRow}–{lastRow} of {chart.data.length}
-                </p>
-                <div className="flex gap-2">
-                  <button
-                    className="rounded border border-border px-2 py-1 disabled:opacity-50"
-                    disabled={dataPage === 0}
-                    onClick={() => setDataPage((page) => page - 1)}
-                    type="button"
-                  >
-                    Previous
-                  </button>
-                  <button
-                    className="rounded border border-border px-2 py-1 disabled:opacity-50"
-                    disabled={dataPage + 1 >= pageCount}
-                    onClick={() => setDataPage((page) => page + 1)}
-                    type="button"
-                  >
-                    Next
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </details>
-      <p className="mt-2 text-xs text-muted-foreground">
-        Source: {chart.source.documentId}
-        {chart.source.sheet ? ` · ${chart.source.sheet}` : ""}
-        {chart.source.cellRange ? ` · ${chart.source.cellRange}` : ""}
-        {" · rows "}
-        {chart.source.rowRange.start}–{chart.source.rowRange.end}
-      </p>
-    </figure>
-  );
 }
 
 export function DataAnalysisResults({
@@ -306,11 +113,7 @@ export function DataAnalysisResults({
           Dashboard
         </h3>
         {dashboard.data.charts.length ? (
-          <div className="grid gap-3 xl:grid-cols-2">
-            {dashboard.data.charts.map((chart) => (
-              <ChartView key={chart.id} chart={chart} />
-            ))}
-          </div>
+          <DashboardCharts charts={dashboard.data.charts} />
         ) : (
           <p className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">
             No chartable period or segment columns were found in this dataset.

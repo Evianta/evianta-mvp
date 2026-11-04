@@ -902,3 +902,79 @@ button.chip:focus-visible,
     animation: none;
   }
 }
+
+/* Full-screen chart and table viewer */
+
+.artifact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+}
+
+.fullscreen-overlay {
+  z-index: 60;
+}
+
+.fullscreen-view {
+  position: fixed;
+  z-index: 61;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: hsl(var(--surface-raised));
+  color: hsl(var(--foreground));
+}
+
+.fullscreen-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 14px 20px;
+}
+
+.fullscreen-title {
+  min-width: 0;
+  flex: 1;
+  font-size: 17px;
+  font-weight: 620;
+  letter-spacing: -0.02em;
+}
+
+.fullscreen-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  padding: 20px;
+}
+
+.fullscreen-plot {
+  min-height: 320px;
+  flex: 1;
+}
+
+.fullscreen-dashboard {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  gap: 28px;
+  overflow: auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr));
+  align-content: start;
+}
+
+.fullscreen-table {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.fullscreen-table thead th {
+  position: sticky;
+  top: 0;
+  background: hsl(var(--surface-raised));
+}
