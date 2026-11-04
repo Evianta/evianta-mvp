@@ -13,27 +13,52 @@ background worker. This guide covers local development.
 
 Install dependencies and copy the local environment defaults:
 
+**Windows (PowerShell)**
+
 ```powershell
 pnpm install --frozen-lockfile
 Copy-Item .env.example .env
 ```
 
+**macOS / Linux**
+
+```sh
+pnpm install --frozen-lockfile
+cp .env.example .env
+```
+
 The example uses the mock AI provider, so no Meta API key is needed to develop
 locally. Its signing key is for local development only; never use it in a
-deployment. To use Meta models, set `EVIANTA_AI_PROVIDER=muse` and configure
-`MODEL_API_KEY` and the required usage limits in `.env`.
+deployment. To use Meta models, set `EVIANTA_AI_PROVIDER=muse` and
+`EVIANTA_USAGE_MODE=enforced` in `.env`. Uncomment and fill in `MODEL_API_KEY`,
+`MUSE_SPARK_MODEL`, and `MUSE_WONDER_MODEL`; uncomment all token, concurrency,
+spend, and period settings in the usage-limits block. Model IDs and suggested
+limits are supplied in `.env.example`.
 
 Start a local MongoDB replica set. Create a data directory, then run `mongod`
 in one terminal:
+
+**Windows (PowerShell)**
 
 ```powershell
 New-Item -ItemType Directory -Force C:\data\evianta
 mongod --replSet rs0 --bind_ip 127.0.0.1 --port 27017 --dbpath C:\data\evianta
 ```
 
+**macOS / Linux**
+
+```sh
+mkdir -p "$HOME/.local/share/evianta/mongo"
+mongod --replSet rs0 --bind_ip 127.0.0.1 --port 27017 --dbpath "$HOME/.local/share/evianta/mongo"
+```
+
+Use a dedicated local instance; do not reconfigure a shared database. If port
+27017 is already in use, choose another port and update both the replica-set
+initialization command and `MONGODB_URI`.
+
 Initialize the replica set once, after MongoDB is listening:
 
-```powershell
+```sh
 mongosh --eval "rs.initiate({_id:'rs0',members:[{_id:0,host:'127.0.0.1:27017'}]})"
 ```
 
