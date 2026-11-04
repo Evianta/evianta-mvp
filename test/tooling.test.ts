@@ -7,8 +7,12 @@ import { promisify } from "node:util";
 import { parseEnv } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
+  getAiEnvironment,
   getApiEnvironment,
+  getDocumentStoreConfig,
+  getMongoConfig,
   getRequiredEnv,
+  getUploadEnvironment,
 } from "../packages/env/src/server.js";
 
 const execute = promisify(execFile);
@@ -32,14 +36,31 @@ describe("developer tooling", () => {
     }
   });
 
-  it("provides valid local API defaults after supplying a signing key", async () => {
+  it("provides valid local defaults without environment overrides", async () => {
     const example = parseEnv(
       await readFile(join(root, ".env.example"), "utf8"),
     );
-    expect(example.JWT_SIGNING_KEY).toBe("");
-    const environment = getApiEnvironment({
-      ...example,
-      JWT_SIGNING_KEY: "synthetic-test-signing-key-with-32-bytes",
+    const environment = getApiEnvironment(example);
+    expect(environment.jwtSigningKey).toBe(example.JWT_SIGNING_KEY);
+    expect(Buffer.byteLength(environment.jwtSigningKey)).toBeGreaterThanOrEqual(
+      32,
+    );
+    expect(getMongoConfig(example)).toEqual({
+      uri: "mongodb://127.0.0.1:27017/?replicaSet=rs0",
+      dbName: "evianta",
+    });
+    expect(getDocumentStoreConfig(example)).toEqual({
+      driver: "filesystem",
+      localStorageDir: ".data/documents",
+    });
+    expect(getUploadEnvironment(example)).toEqual({
+      uploadMaxBytes: 26_214_400,
+      uploadMaxFiles: 10,
+      documentMaxPages: 100,
+    });
+    expect(getAiEnvironment(example)).toMatchObject({
+      provider: "mock",
+      usage: { mode: "test" },
     });
     expect(environment.apiPort).toBe(3001);
     expect(example.NEXT_PUBLIC_API_BASE_URL).toBe("http://localhost:3001");
